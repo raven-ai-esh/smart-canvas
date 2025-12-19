@@ -219,6 +219,7 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
 
     // Missing state restored
     const [isEditing, setIsEditing] = React.useState(false);
+    const titleTouchRef = React.useRef<{ id: number; x: number; y: number } | null>(null);
 
     const effectiveEnergy = useStore((state) => state.effectiveEnergy[data.id] ?? data.energy);
     const baseEnergy = clampEnergy(Number.isFinite(data.energy) ? data.energy : 50);
@@ -270,7 +271,23 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
                         className={styles.cardHeader}
                         onDoubleClick={() => setIsEditing(true)}
                         data-interactive="true"
-                        onPointerDown={(e) => e.stopPropagation()}
+                        onPointerDown={(e) => {
+                            e.stopPropagation();
+                            if (e.pointerType === 'touch') {
+                                titleTouchRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+                            }
+                        }}
+                        onPointerUp={(e) => {
+                            if (e.pointerType !== 'touch') return;
+                            const ref = titleTouchRef.current;
+                            if (!ref || ref.id !== e.pointerId) return;
+                            const dist = Math.hypot(e.clientX - ref.x, e.clientY - ref.y);
+                            titleTouchRef.current = null;
+                            if (dist < 8) setIsEditing(true);
+                        }}
+                        onPointerCancel={() => {
+                            titleTouchRef.current = null;
+                        }}
                         style={{ flex: 1, marginRight: 8 }}
                     >
                         {data.title}
@@ -380,6 +397,7 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
     // Let's apply double-click rule to Title for consistency. Content should be always editable if in NoteView.
 
     const [isEditingTitle, setIsEditingTitle] = React.useState(false);
+    const titleTouchRef = useRef<{ id: number; x: number; y: number } | null>(null);
     const [showEnergyPanel, setShowEnergyPanel] = React.useState(false);
     const effectiveEnergy = useStore((state) => state.effectiveEnergy[data.id] ?? data.energy);
     const baseEnergy = clampEnergy(Number.isFinite(data.energy) ? data.energy : 50);
@@ -446,7 +464,23 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
                                 className={styles.noteTitle}
                                 onDoubleClick={() => setIsEditingTitle(true)}
                                 data-interactive="true"
-                                onPointerDown={(e) => e.stopPropagation()}
+                                onPointerDown={(e) => {
+                                    e.stopPropagation();
+                                    if (e.pointerType === 'touch') {
+                                        titleTouchRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+                                    }
+                                }}
+                                onPointerUp={(e) => {
+                                    if (e.pointerType !== 'touch') return;
+                                    const ref = titleTouchRef.current;
+                                    if (!ref || ref.id !== e.pointerId) return;
+                                    const dist = Math.hypot(e.clientX - ref.x, e.clientY - ref.y);
+                                    titleTouchRef.current = null;
+                                    if (dist < 8) setIsEditingTitle(true);
+                                }}
+                                onPointerCancel={() => {
+                                    titleTouchRef.current = null;
+                                }}
                             >
                                 {data.title}
                             </div>
