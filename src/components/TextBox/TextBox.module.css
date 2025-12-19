@@ -1,0 +1,78 @@
+.textBox {
+    position: absolute;
+    border-radius: 10px;
+    background: transparent;
+    border: 1px solid transparent;
+    box-sizing: border-box;
+    pointer-events: auto;
+}
+
+.textBox:hover {
+	  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.textBox[data-marquee-hover="true"] {
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+}
+
+.active {
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+}
+
+.display {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 8px;
+  bottom: 8px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: hidden;
+  user-select: none;
+  transition: font-size 140ms ease;
+}
+
+.placeholder {
+  opacity: 0.55;
+}
+
+.editor {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 8px;
+  bottom: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  outline: none;
+  resize: none;
+  padding: 0;
+  margin: 0;
+  width: auto;
+  height: auto;
+  box-sizing: border-box;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  transition: font-size 140ms ease;
+}
+
+.editor::-webkit-scrollbar {
+  display: none;
+}
+
+.resizeHandle {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.06);
+  cursor: nwse-resize;
+}

@@ -1,0 +1,862 @@
+.nodeWrapper {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    /* Center anchor */
+    cursor: pointer;
+    user-select: none;
+    transition: box-shadow 0.2s ease, opacity 0.2s ease;
+}
+
+.nodeWrapper:hover {
+    z-index: 10;
+}
+
+.nodeWrapper[data-marquee-hover="true"] {
+    z-index: 10;
+}
+
+/* --- View Containers for Animation --- */
+.viewContainer {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.visible {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+    pointer-events: auto;
+}
+
+.hidden {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.8);
+    pointer-events: none;
+}
+
+/* --- Graph View (Dot) --- */
+.graphNode {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background-color: var(--bg-node);
+    border: 2px solid var(--text-dim);
+    /* Thicker border for visibility */
+    transition: transform 0.2s ease, border-color 0.2s ease;
+}
+
+.graphNode:hover {
+    transform: scale(1.2);
+    /* Slightly less aggressive zoom */
+    border-color: #FF9F1C;
+    background-color: #FF9F1C;
+    box-shadow: 0 0 16px rgba(255, 159, 28, 0.6);
+}
+
+/* Marquee hover should feel like hover */
+.nodeWrapper[data-marquee-hover="true"] .graphNode {
+    transform: scale(1.2);
+    border-color: #FF9F1C;
+    background-color: #FF9F1C;
+    box-shadow: 0 0 16px rgba(255, 159, 28, 0.6);
+}
+
+:global(body.light-theme) .nodeWrapper[data-marquee-hover="true"] .graphNode,
+:global(body.light-theme) .nodeWrapper[data-marquee-hover="true"] .graphNode.task {
+    background-color: #FF9F1C;
+    border-color: #FF9F1C;
+    box-shadow: 0 0 16px rgba(255, 159, 28, 0.6);
+}
+
+/* Task variant for Graph View */
+.graphNode.task {
+    border-color: var(--accent-task);
+    background-color: var(--bg-node);
+}
+
+/* Light Mode Graph View Fills */
+:global(body.light-theme) .graphNode {
+    background-color: var(--accent-primary);
+    border-color: var(--accent-primary);
+    box-shadow: 0 2px 8px rgba(94, 129, 172, 0.4);
+}
+
+:global(body.light-theme) .graphNode.task {
+    background-color: var(--accent-task);
+    border-color: var(--accent-task);
+    box-shadow: 0 2px 8px rgba(163, 190, 140, 0.4);
+}
+
+/* Hover effects for Light Mode */
+:global(body.light-theme) .graphNode:hover,
+:global(body.light-theme) .graphNode.task:hover {
+    background-color: #FF9F1C;
+    border-color: #FF9F1C;
+    box-shadow: 0 0 16px rgba(255, 159, 28, 0.6);
+}
+
+/* --- Card View --- */
+.cardNode {
+    width: 240px;
+    background-color: var(--bg-node);
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.cardNode:hover {
+    border-color: #FF9F1C;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 12px rgba(255, 159, 28, 0.3);
+}
+
+.nodeWrapper[data-marquee-hover="true"] .cardNode {
+    border-color: #FF9F1C;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 12px rgba(255, 159, 28, 0.3);
+}
+
+.nodeWrapper[data-marquee-hover="true"] .noteNode {
+    border-color: #FF9F1C;
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45), 0 0 14px rgba(255, 159, 28, 0.26);
+}
+
+.cardHeader {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-primary);
+    line-height: 1.4;
+    cursor: text;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.cardHeaderInput {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-primary);
+    line-height: 1.4;
+    background: transparent;
+    border: none;
+    width: 100%;
+    outline: none;
+    padding: 0;
+    font-family: inherit;
+}
+
+.cardHeaderInput:focus {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 4px;
+}
+
+.cardMeta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+}
+
+/* --- Energy Indicators --- */
+.energyTag {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+}
+
+.energyLow {
+    background-color: #A3BE8C;
+    box-shadow: 0 0 8px rgba(163, 190, 140, 0.6), 0 0 16px rgba(163, 190, 140, 0.2);
+}
+
+.energyMedium {
+    background-color: #EBCB8B;
+    box-shadow: 0 0 8px rgba(235, 203, 139, 0.6), 0 0 16px rgba(235, 203, 139, 0.2);
+}
+
+.energyHigh {
+    background-color: #BF616A;
+    box-shadow: 0 0 8px rgba(191, 97, 106, 0.6), 0 0 16px rgba(191, 97, 106, 0.2);
+}
+
+/* --- Note View --- */
+.noteNode {
+    width: 500px;
+    min-height: 400px;
+    background-color: var(--bg-node);
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--text-dim);
+    color: var(--text-primary);
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+}
+
+.noteDetailWrap {
+    position: relative;
+    display: inline-block;
+}
+
+.noteHeaderRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.noteHeaderActions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+}
+
+.noteTypeSwitcherCompact {
+    padding: 1px;
+    border-radius: 10px;
+}
+
+.noteTypeSwitcherCompact .typeOption {
+    padding: 3px 8px;
+    font-size: 10px;
+    line-height: 1;
+    flex: 0 0 auto;
+    min-width: 0;
+}
+
+.noteTitleWrap {
+    flex: 1;
+    min-width: 0;
+}
+
+.noteStack {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex: 1;
+    min-height: 0;
+}
+
+.noteTitle {
+    font-size: 20px;
+    font-weight: 700;
+    margin: 0;
+    color: var(--text-primary);
+    cursor: text;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.noteTitleInput {
+    font-size: 20px;
+    font-weight: 700;
+    margin: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    width: 100%;
+    outline: none;
+    font-family: inherit;
+}
+
+.noteEnergySide {
+    position: absolute;
+    top: 0;
+    left: calc(100% + 12px);
+    width: 56px;
+    height: 100%;
+    border-radius: 12px;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255, 255, 255, 0.03);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    box-sizing: border-box;
+}
+
+.noteEnergyValuesRow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    color: var(--text-primary);
+}
+
+.noteEnergyValue {
+    width: 100%;
+    padding: 2px 6px;
+    border-radius: 8px;
+    transition: var(--transition-smooth);
+    text-align: center;
+}
+
+.noteEnergyValue:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.noteEnergyDividerLine {
+    width: 70%;
+    height: 1px;
+    background: var(--border-subtle);
+    border-radius: 999px;
+}
+
+.noteEnergyScale {
+    flex: 1;
+    border-radius: 12px;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255, 255, 255, 0.04);
+    position: relative;
+    overflow: hidden;
+    touch-action: none;
+    cursor: ns-resize;
+    min-height: 140px;
+}
+
+.noteEnergyFluidCanvas {
+    touch-action: none;
+}
+
+.noteEnergyScaleMarker {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: rgba(255, 255, 255, 0.85);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 10px rgba(255, 255, 255, 0.25);
+    pointer-events: none;
+    z-index: 5;
+}
+
+.editorRoot {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.editorPreview {
+    flex: 1;
+    min-height: 120px;
+    width: 100%;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 10px 12px;
+    overflow: auto;
+    color: var(--text-secondary);
+    cursor: text;
+    box-sizing: border-box;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+}
+
+.editorPreview :global(p) {
+    margin: 0 0 10px;
+}
+
+.editorPreview :global(p:last-child) {
+    margin-bottom: 0;
+}
+
+.editorPreview :global(ul),
+.editorPreview :global(ol) {
+    margin: 0 0 10px 20px;
+    padding: 0;
+}
+
+.editorPreview :global(code) {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 1px 6px;
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.editorPlaceholder {
+    color: var(--text-dim);
+}
+
+.editorToolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.15);
+    margin-bottom: 10px;
+    backdrop-filter: blur(10px);
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.editorButton {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle);
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: var(--transition-smooth);
+}
+
+.editorButton:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: var(--border-strong);
+}
+
+.editorDivider {
+    width: 1px;
+    align-self: stretch;
+    background: var(--border-subtle);
+    margin: 0 6px;
+}
+
+.editorHint {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-dim);
+    user-select: none;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.editorHint span {
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--border-subtle);
+    padding: 2px 6px;
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.noteContentInput {
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 10px 12px;
+    width: 100%;
+    flex: 1;
+    resize: none;
+    overflow: auto;
+    outline: none;
+    font-family: inherit;
+    box-sizing: border-box;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+}
+
+.noteContentInput:focus {
+    border-color: var(--border-strong);
+    box-shadow: 0 0 0 2px rgba(94, 129, 172, 0.12);
+}
+
+/* Focus Mode Dimming */
+
+
+/* Neighborhood Highlighting */
+/* Apply highlights to the children, not the wrapper, to respect border-radius */
+
+.highlightLevel0 .cardNode,
+.highlightLevel0 .graphNode,
+.highlightLevel0 .noteNode {
+    /* Selected */
+    box-shadow: 0 0 0 2px var(--accent-primary), 0 0 32px rgba(94, 129, 172, 0.6);
+    opacity: 1 !important;
+}
+
+.highlightLevel1 .cardNode,
+.highlightLevel1 .graphNode,
+.highlightLevel1 .noteNode {
+    /* Direct Neighbor */
+    box-shadow: 0 0 0 1px var(--accent-primary), 0 0 16px rgba(94, 129, 172, 0.3);
+    opacity: 0.9;
+}
+
+/* Neighborhood Highlighting - Wrapper Rules for Opacity */
+.highlightLevel0 {
+    z-index: 100 !important;
+    opacity: 1 !important;
+}
+
+.highlightLevel1 {
+    opacity: 0.9 !important;
+    z-index: 50;
+}
+
+.highlightLevel2 {
+    opacity: 0.6 !important;
+    z-index: 40;
+}
+
+.targetGlow {
+    opacity: 1 !important;
+    z-index: 60;
+}
+
+/* Children Styling for Target Glow */
+.targetGlow .cardNode,
+.targetGlow .graphNode,
+.targetGlow .noteNode {
+    border-color: #FF9F1C !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 12px rgba(255, 159, 28, 0.6) !important;
+}
+
+.backgroundNoise {
+    /* In selection mode, everything else is dimmed */
+    opacity: 0.1 !important;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+}
+
+/* --- Task Node Extensions --- */
+.taskNode {
+    width: 240px;
+    background: var(--bg-node);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    cursor: grab;
+    /* backdrop-filter: blur(12px); Removed for consistency with theme switching */
+    transition: var(--transition-smooth);
+    position: relative;
+    /* Task Accent indicator on left */
+    border-left: 3px solid var(--accent-task);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.taskNode:hover {
+    transform: translateY(-2px);
+    border-color: var(--accent-task);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.dateRow {
+    display: flex;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 4px;
+}
+
+.dateTag {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--border-subtle);
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border-subtle);
+}
+
+.dateTag.overdue {
+    color: #BF616A;
+    border-color: rgba(191, 97, 106, 0.3);
+}
+
+/* --- UI Controls --- */
+
+/* Segmented Control for Type Switching */
+.typeSwitcher {
+    display: flex;
+    background: var(--border-subtle);
+    padding: 2px;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle);
+}
+
+.typeOption {
+    padding: 4px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    border-radius: 6px;
+    color: var(--text-secondary);
+    transition: all 0.2s ease;
+    user-select: none;
+    flex: 1;
+    text-align: center;
+}
+
+.typeOption:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.typeOption.active {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+    font-weight: 500;
+}
+
+.typeOption.activeTask {
+    background: rgba(163, 190, 140, 0.2);
+    color: var(--accent-task);
+    border: 1px solid rgba(163, 190, 140, 0.2);
+}
+
+.typeOption.activeIdea {
+    background: rgba(94, 129, 172, 0.2);
+    color: var(--accent-primary);
+    border: 1px solid rgba(94, 129, 172, 0.2);
+}
+
+
+/* Custom Date Input Styling */
+.customDateInput {
+    background: transparent;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 12px;
+    outline: none;
+    transition: all 0.2s ease;
+    color-scheme: dark;
+    /* Crucial for native picker to be dark */
+    cursor: pointer;
+    width: 130px;
+}
+
+.customDateInput:hover {
+    border-color: var(--border-strong);
+    background: var(--border-subtle);
+}
+
+.customDateInput:focus {
+    border-color: var(--accent-task);
+    box-shadow: 0 0 0 2px rgba(163, 190, 140, 0.1);
+}
+
+.customDateInput::-webkit-calendar-picker-indicator {
+    opacity: 0.6;
+    cursor: pointer;
+    filter: invert(1);
+    /* Ensure icon is white if needed, but color-scheme dark usually handles it */
+    transition: opacity 0.2s;
+}
+
+.customDateInput::-webkit-calendar-picker-indicator:hover {
+    opacity: 1;
+}
+
+/* --- Energy Selector --- */
+.energyIndicatorInteract {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.energyIndicatorInteract:hover {
+    transform: scale(1.5);
+    border-color: rgba(255, 255, 255, 0.4);
+}
+
+.energySelector {
+    position: absolute;
+    top: -6px;
+    left: calc(100% + 12px);
+    background: rgba(15, 17, 21, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    z-index: 200;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(12px);
+    width: 24px;
+    animation: fadeIn 0.1s ease-out;
+}
+
+.energyMiniValuesRow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 9px;
+    line-height: 1.05;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    color: var(--text-primary);
+}
+
+.energyMiniValue {
+    width: 100%;
+    padding: 1px 0;
+    border-radius: 6px;
+    transition: var(--transition-smooth);
+    text-align: center;
+}
+
+.energyMiniValue:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.energyMiniDividerLine {
+    width: 70%;
+    height: 1px;
+    background: var(--border-subtle);
+    border-radius: 999px;
+}
+
+.energyRow {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 8px 2px;
+}
+
+.energyLabel {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.energyValue {
+    font-size: 11px;
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.energyRange {
+    width: 100%;
+    margin: 6px 0 2px;
+    accent-color: var(--accent-primary);
+}
+
+.energyLiquidGauge {
+    width: 100%;
+    margin: 0;
+    height: 90px;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255, 255, 255, 0.04);
+    position: relative;
+    overflow: hidden;
+    touch-action: none;
+    cursor: ns-resize;
+}
+
+.energyLiquidGaugeMarker {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: rgba(255, 255, 255, 0.85);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 10px rgba(255, 255, 255, 0.25);
+    pointer-events: none;
+    z-index: 5;
+}
+
+.energyPanel {
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.03);
+    padding: 10px 12px;
+}
+
+.energyPanelHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.energyPanelTitle {
+    font-size: 11px;
+    color: var(--text-secondary);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.energyPanelValue {
+    font-size: 11px;
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.energyPanelDivider {
+    color: var(--text-dim);
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.energyOption {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.1s ease;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.energyOption:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-primary);
+}
+
+.energyDot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+}

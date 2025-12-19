@@ -1,0 +1,115 @@
+:root {
+  /* Deep Space Palette */
+  --bg-space: #0F1115;
+  --bg-node: #1A1D23;
+  --bg-node-hover: #22262E;
+
+  --text-primary: #E1E1E3;
+  --text-secondary: #8F949D;
+  --text-dim: #4B5059;
+
+  --accent-primary: #5E81AC;
+  --accent-task: #A3BE8C;
+  --accent-glow: rgba(94, 129, 172, 0.2);
+
+  --edge-default: #2C3038;
+  --edge-active: #5E81AC;
+
+  /* Typography */
+  --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+
+  /* Animation */
+  --transition-smooth: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  --border-subtle: rgba(255, 255, 255, 0.05);
+  --border-strong: rgba(255, 255, 255, 0.1);
+  --border-share-menu: var(--accent-task);
+  --border-display-menu: #88C0D0;
+
+  /* Viewport vars (patched via JS for mobile keyboards/orientation) */
+  --app-width: 100vw;
+  --app-height: 100vh;
+  --visual-width: 100vw;
+  --visual-height: 100vh;
+}
+
+* {
+  transition: background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+html {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-space);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  overflow: hidden;
+  /* Prevent native scroll */
+  width: var(--app-width, 100vw);
+  height: var(--app-height, 100vh);
+  min-height: var(--app-height, 100vh);
+  /* Mobile touch optimizations */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+/* Light Theme Overrides */
+body.light-theme {
+  --bg-space: #ECEFF4;
+  --bg-node: #FFFFFF;
+  --bg-node-hover: #F0F4F8;
+
+  --text-primary: #2E3440;
+  --text-secondary: #4C566A;
+  --text-dim: #9498a0;
+
+  --edge-default: #D8DEE9;
+
+  --border-subtle: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.2);
+  --border-share-menu: var(--accent-task);
+  --border-display-menu: #88C0D0;
+}
+
+/* Light theme date input overrides */
+body.light-theme input[type="date"] {
+  color-scheme: light;
+}
+
+/* Scrollbar hiding if needed */
+::-webkit-scrollbar {
+  display: none;
+}
+
+/* Placeholder styling (dimmed across the app) */
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+input::-webkit-input-placeholder,
+textarea::-webkit-input-placeholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+input::-moz-placeholder,
+textarea::-moz-placeholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}

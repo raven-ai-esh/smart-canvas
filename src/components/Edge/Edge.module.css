@@ -1,0 +1,83 @@
+.edgePath {
+    stroke: var(--text-dim);
+    stroke-width: 2px;
+    fill: none;
+    transition: stroke 0.2s ease, stroke-width 0.2s ease;
+    pointer-events: none;
+}
+
+.edgeHitArea {
+    stroke: transparent;
+    stroke-width: 24px;
+    fill: none;
+    pointer-events: stroke;
+    cursor: pointer;
+}
+
+.edgeHitArea:hover + .edgePath {
+    stroke-width: 3px;
+    filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.1));
+}
+
+.edgeHitArea[data-marquee-hover="true"] + .edgePath {
+    stroke-width: 3px;
+    filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.1));
+}
+
+.edgeHitArea:hover + .edgePath + .edgeArrow,
+.edgeHitArea[data-marquee-hover="true"] + .edgePath + .edgeArrow {
+    filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.1));
+}
+
+.edgeArrow {
+    pointer-events: none;
+}
+
+.edgeSelected {
+    stroke-width: 3px !important;
+    filter: drop-shadow(0 0 4px var(--accent-primary));
+    z-index: 10;
+}
+
+.edgeArrowSelected {
+    filter: drop-shadow(0 0 4px var(--accent-primary));
+}
+
+.edgeHighlightLevel0 {
+    stroke: var(--accent-primary);
+    stroke-width: 2px;
+    opacity: 1;
+}
+
+.edgeHighlightLevel1 {
+    stroke: var(--text-primary);
+    stroke-width: 2px;
+    opacity: 0.8;
+}
+
+.edgeDimmed {
+    stroke: var(--text-dim);
+    opacity: 0.1;
+}
+
+.edgeGradient {
+    stroke: none;
+    /* Let inline style take over */
+    opacity: 1;
+}
+
+.connectionLine {
+    stroke: #FF9F1C;
+    stroke-width: 2px;
+    stroke-dasharray: 5, 5;
+    fill: none;
+    animation: dash 1s linear infinite;
+    pointer-events: none;
+    filter: drop-shadow(0 0 4px #FF9F1C);
+}
+
+@keyframes dash {
+    to {
+        stroke-dashoffset: -10;
+    }
+}

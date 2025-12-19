@@ -1,0 +1,47 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:80"
+    restart: always
+    container_name: smart-tracker
+    depends_on:
+      - api
+
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    environment:
+      PORT: "8787"
+      DATABASE_URL: "postgres://postgres:postgres@db:5432/smart_tracker"
+      CORS_ORIGIN: "true"
+      DEFAULT_SESSION_ID: "28873812-4985-4867-b6e1-8748a24fa1b4"
+      JWT_SECRET: "${JWT_SECRET:-dev-jwt-secret}"
+      AUTH_COOKIE_NAME: "${AUTH_COOKIE_NAME:-auth_token}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      APP_ORIGIN: "${APP_ORIGIN:-}"
+      SMTP_URL: "${SMTP_URL:-}"
+      MAIL_FROM: "${MAIL_FROM:-no-reply@smart-tracker.local}"
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+      YANDEX_CLIENT_ID: "${YANDEX_CLIENT_ID:-}"
+      YANDEX_CLIENT_SECRET: "${YANDEX_CLIENT_SECRET:-}"
+      TELEGRAM_BOT_USERNAME: "${TELEGRAM_BOT_USERNAME:-}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+    depends_on:
+      - db
+    restart: always
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: smart_tracker
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    restart: always
+
+volumes:
+  db-data:
