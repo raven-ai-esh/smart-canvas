@@ -170,6 +170,7 @@ export const Controls: React.FC = () => {
 
     useEffect(() => {
         const handlePointerDown = (e: PointerEvent) => {
+            if (e.pointerType === 'pen') return;
             const root = controlsRootRef.current;
             if (!root) return;
             if (root.contains(e.target as Node)) return;

@@ -9,6 +9,7 @@ import { beautifyStroke } from '../../utils/strokeBeautify';
 import type { EdgeData, NodeData } from '../../types';
 import { debugLog } from '../../utils/debug';
 import { TextBox } from '../TextBox/TextBox';
+import { SnowOverlay } from '../Snow/SnowOverlay';
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
@@ -39,12 +40,14 @@ export const Canvas: React.FC = () => {
     const nodes = useStore((state) => state.nodes);
     const edges = useStore((state) => state.edges);
     const penMode = useStore((state) => state.penMode);
-	    const penTool = useStore((state) => state.penTool);
-	    const drawings = useStore((state) => state.drawings);
-	    const textMode = useStore((state) => state.textMode);
-	    const textBoxes = useStore((state) => state.textBoxes);
-	    const moveMode = useStore((state) => state.moveMode);
-	    const snapMode = useStore((state) => state.snapMode);
+    const penTool = useStore((state) => state.penTool);
+    const drawings = useStore((state) => state.drawings);
+    const textMode = useStore((state) => state.textMode);
+    const textBoxes = useStore((state) => state.textBoxes);
+    const moveMode = useStore((state) => state.moveMode);
+    const snapMode = useStore((state) => state.snapMode);
+    const snowEnabled = useStore((state) => state.snowEnabled);
+    const theme = useStore((state) => state.theme);
 
 	    // Actions
 	    const setCanvasTransform = useStore((state) => state.setCanvasTransform);
@@ -1827,6 +1830,8 @@ export const Canvas: React.FC = () => {
 	                    </div>
 	                </div>
 	            )}
+
+            <SnowOverlay enabled={snowEnabled} theme={theme} embedded />
 
             <div
                 className={styles.gridPattern}

@@ -16,7 +16,15 @@ type Flake = {
   a: number; // 0..1
 };
 
-export function SnowOverlay({ enabled, theme }: { enabled: boolean; theme: ThemeMode }) {
+export function SnowOverlay({
+  enabled,
+  theme,
+  embedded = false,
+}: {
+  enabled: boolean;
+  theme: ThemeMode;
+  embedded?: boolean;
+}) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const flakesRef = useRef<Flake[]>([]);
@@ -192,19 +200,28 @@ export function SnowOverlay({ enabled, theme }: { enabled: boolean; theme: Theme
   if (!enabled) return null;
 
   return (
-    <canvas
-      ref={canvasRef}
-      aria-hidden="true"
+    <div
       style={{
-        position: 'fixed',
-        left: 0,
-        top: 0,
-        width: '100vw',
-        height: '100vh',
-        zIndex: 1400,
+        position: embedded ? 'absolute' : 'fixed',
+        inset: 0,
+        zIndex: embedded ? 0 : 1400,
         pointerEvents: 'none',
+        touchAction: 'none',
         opacity: 0.88,
       }}
-    />
+    >
+      <canvas
+        ref={canvasRef}
+        aria-hidden="true"
+        style={{
+          position: 'absolute',
+          inset: 0,
+          width: '100%',
+          height: '100%',
+          pointerEvents: 'none',
+          touchAction: 'none',
+        }}
+      />
+    </div>
   );
 }
