@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Atom, Hand, Moon, Sun, PenTool, Eraser, Highlighter, Type, X, Link2, Plus, Copy, Share2, Loader2, Monitor, Snowflake } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Atom, Hand, Moon, Sun, PenTool, Eraser, Highlighter, Type, X, Link2, Plus, Copy, Share2, Loader2, Monitor, Snowflake, Grid3x3, Eye, Paintbrush } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import type { PenToolType } from '../../types';
 
@@ -15,10 +15,11 @@ type ControlButtonProps = {
     borderColor?: string;
     iconColor?: string;
     inactiveBackgroundColor?: string;
+    buttonStyle?: React.CSSProperties;
     children: React.ReactNode;
 };
 
-const ControlButton: React.FC<ControlButtonProps> = ({ title, onClick, active, disabled, borderColor, iconColor, inactiveBackgroundColor, children }) => {
+const ControlButton: React.FC<ControlButtonProps> = ({ title, onClick, active, disabled, borderColor, iconColor, inactiveBackgroundColor, buttonStyle, children }) => {
     const [pressed, setPressed] = useState(false);
     const [ripples, setRipples] = useState<Array<{ id: number; x: number; y: number; size: number }>>([]);
 
@@ -43,6 +44,7 @@ const ControlButton: React.FC<ControlButtonProps> = ({ title, onClick, active, d
         opacity: disabled ? 0.6 : 1,
         position: 'relative',
         overflow: 'hidden',
+        ...buttonStyle,
     };
 
     return (
@@ -97,12 +99,15 @@ const ControlButton: React.FC<ControlButtonProps> = ({ title, onClick, active, d
 };
 
 export const Controls: React.FC = () => {
-    const { physicsEnabled, togglePhysicsMode, moveMode, toggleMoveMode, theme, toggleTheme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, snowEnabled, toggleSnow } = useStore();
+    const { physicsEnabled, togglePhysicsMode, moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, theme, toggleTheme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, snowEnabled, toggleSnow } = useStore();
+
+    const controlsRootRef = useRef<HTMLDivElement | null>(null);
 
     // Tool menu visibility
     const [showToolMenu, setShowToolMenu] = useState(false);
     const [showShareMenu, setShowShareMenu] = useState(false);
     const [showDisplayMenu, setShowDisplayMenu] = useState(false);
+    const [showModeMenu, setShowModeMenu] = useState(false);
     const [shareBusy, setShareBusy] = useState<null | 'new' | 'clone'>(null);
     const [toastText, setToastText] = useState<string | null>(null);
     const [toastVisible, setToastVisible] = useState(false);
@@ -163,9 +168,32 @@ export const Controls: React.FC = () => {
         };
     }, [toastText]);
 
+    useEffect(() => {
+        const handlePointerDown = (e: PointerEvent) => {
+            const root = controlsRootRef.current;
+            if (!root) return;
+            if (root.contains(e.target as Node)) return;
+            setShowToolMenu(false);
+            setShowShareMenu(false);
+            setShowDisplayMenu(false);
+            setShowModeMenu(false);
+        };
+        document.addEventListener('pointerdown', handlePointerDown);
+        return () => document.removeEventListener('pointerdown', handlePointerDown);
+    }, []);
+
+    useEffect(() => {
+        if (!focusMode) return;
+        setShowToolMenu(false);
+        setShowShareMenu(false);
+        setShowDisplayMenu(false);
+        setShowModeMenu(false);
+    }, [focusMode]);
+
     const handlePenClick = () => {
         setShowDisplayMenu(false);
         setShowShareMenu(false);
+        setShowModeMenu(false);
         setShowToolMenu(!showToolMenu);
     };
 
@@ -173,6 +201,7 @@ export const Controls: React.FC = () => {
         setShowToolMenu(false);
         setShowShareMenu(false);
         setShowDisplayMenu(false);
+        setShowModeMenu(false);
         toggleTextMode();
     };
 
@@ -190,6 +219,7 @@ export const Controls: React.FC = () => {
     const handleShareClick = () => {
         setShowToolMenu(false);
         setShowDisplayMenu(false);
+        setShowModeMenu(false);
         setShowShareMenu((v) => !v);
     };
     const handleCloseShare = () => setShowShareMenu(false);
@@ -197,7 +227,23 @@ export const Controls: React.FC = () => {
     const handleDisplayClick = () => {
         setShowToolMenu(false);
         setShowShareMenu(false);
+        setShowModeMenu(false);
         setShowDisplayMenu((v) => !v);
+    };
+
+    const handleModeClick = () => {
+        setShowToolMenu(false);
+        setShowShareMenu(false);
+        setShowDisplayMenu(false);
+        setShowModeMenu((v) => !v);
+    };
+
+    const handleFocusClick = () => {
+        setShowToolMenu(false);
+        setShowShareMenu(false);
+        setShowDisplayMenu(false);
+        setShowModeMenu(false);
+        toggleFocusMode();
     };
 
     const copyToClipboard = async (text: string) => {
@@ -402,7 +448,8 @@ export const Controls: React.FC = () => {
     const displayMenuIconColor = theme === 'light' ? 'var(--border-display-menu)' : undefined;
 
     const baseRowButtonCount = 6;
-    const penAnchorOffset = (2 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP; // Physics, Move, Pen, Text, Theme, Share
+    const modeAnchorOffset = (1 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP;
+    const penAnchorOffset = (2 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP; // Move, Modes, Pen, Text, Display, Share
     const displayAnchorOffset = (4 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP;
     const shareAnchorOffset = (5 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP;
 
@@ -411,7 +458,7 @@ export const Controls: React.FC = () => {
     const subStackBottom = `calc(${baseBottom}px + env(safe-area-inset-bottom, 0px) + ${BUTTON_STEP}px)`;
 
     return (
-        <>
+        <div ref={controlsRootRef}>
             <style>{`
 	              @keyframes controlsSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 	              .controlsSpin { animation: controlsSpin 0.9s linear infinite; }
@@ -454,7 +501,7 @@ export const Controls: React.FC = () => {
 	            )}
 
 	                {/* Secondary stack for Pen menu (vertical from base button) */}
-	                {showToolMenu && (
+	                {!focusMode && showToolMenu && (
 	                    <div
 	                        style={{
 	                            position: 'fixed',
@@ -516,7 +563,7 @@ export const Controls: React.FC = () => {
 	                )}
 
                 {/* Secondary stack for Share menu (vertical from base button) */}
-                {showShareMenu && (
+                {!focusMode && showShareMenu && (
 	                    <div
 	                        style={{
 	                            position: 'fixed',
@@ -578,7 +625,7 @@ export const Controls: React.FC = () => {
                 )}
 
                 {/* Secondary stack for Display menu (Theme + Snow) */}
-                {showDisplayMenu && (
+                {!focusMode && showDisplayMenu && (
                     <div
                         style={{
                             position: 'fixed',
@@ -625,6 +672,59 @@ export const Controls: React.FC = () => {
                     </div>
                 )}
 
+                {/* Secondary stack for Mode menu (Physics + Grid + Focus) */}
+                {!focusMode && showModeMenu && (
+                    <div
+                        style={{
+                            position: 'fixed',
+                            left: `calc(50% + ${modeAnchorOffset}px)`,
+                            bottom: subStackBottom,
+                            transform: 'translateX(-50%)',
+                            zIndex: 1600,
+                            display: 'flex',
+                            flexDirection: 'column-reverse',
+                            gap: BUTTON_GAP,
+                            animation: 'controlsSubRowIn 180ms ease-out both',
+                            transformOrigin: '50% 100%',
+                            pointerEvents: 'auto',
+                        }}
+                    >
+                        {[
+                            {
+                                key: 'physics',
+                                title: physicsEnabled ? 'Disable Physics' : 'Enable Physics',
+                                onClick: togglePhysicsMode,
+                                active: physicsEnabled,
+                                child: <Atom size={18} />,
+                            },
+                            {
+                                key: 'grid',
+                                title: snapMode ? 'Disable Grid Snap' : 'Grid + Align',
+                                onClick: toggleSnapMode,
+                                active: snapMode,
+                                child: <Grid3x3 size={18} />,
+                            },
+                            {
+                                key: 'focus',
+                                title: focusMode ? 'Disable Focus Mode' : 'Enable Focus Mode',
+                                onClick: handleFocusClick,
+                                active: focusMode,
+                                child: <Eye size={18} />,
+                            },
+                        ].map((b, idx) => (
+                            <div key={b.key} style={{ animation: 'controlsSubBtnIn 220ms ease-out both', animationDelay: `${idx * 35}ms` }}>
+                                <ControlButton
+                                    onClick={b.onClick}
+                                    title={b.title}
+                                    active={b.active}
+                                >
+                                    {b.child}
+                                </ControlButton>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
                 {/* Base row */}
 	            <div style={{
 	                position: 'fixed',
@@ -636,57 +736,69 @@ export const Controls: React.FC = () => {
 	                gap: BUTTON_GAP,
                     pointerEvents: 'auto',
 	            }}>
+                    {focusMode ? (
+                        <ControlButton
+                            onClick={handleFocusClick}
+                            title="Disable Focus Mode"
+                            active
+                            buttonStyle={{ opacity: 0.55 }}
+                        >
+                            <Eye size={18} />
+                        </ControlButton>
+                    ) : (
+                        <>
+                            <ControlButton
+                                onClick={toggleMoveMode}
+                                title={moveMode ? 'Disable Move' : 'Move canvas'}
+                                active={moveMode}
+                            >
+                                <Hand size={18} />
+                            </ControlButton>
 
-	    	            <ControlButton
-	    	                onClick={togglePhysicsMode}
-	    	                title={physicsEnabled ? 'Disable Physics' : 'Enable Physics'}
-	    	                active={physicsEnabled}
-	    	            >
-	    	                <Atom size={18} />
-	    	            </ControlButton>
+                            <ControlButton
+                                onClick={handleModeClick}
+                                title="Modes"
+                                active={showModeMenu || physicsEnabled || snapMode || focusMode}
+                            >
+                                <Monitor size={18} />
+                            </ControlButton>
+
+		                    <ControlButton
+		                        onClick={handlePenClick}
+		                        title="Pen Mode"
+		                        active={penMode || showToolMenu}
+	                        >
+	                            {penTool === 'eraser' ? <Eraser size={18} /> :
+	                                penTool === 'highlighter' ? <Highlighter size={18} /> :
+	                                    <PenTool size={18} />}
+	                        </ControlButton>
 
                         <ControlButton
-                            onClick={toggleMoveMode}
-                            title={moveMode ? 'Disable Move' : 'Move canvas'}
-                            active={moveMode}
+                            onClick={handleTextClick}
+                            title={textMode ? 'Disable Text' : 'Text'}
+                            active={textMode}
                         >
-                            <Hand size={18} />
+                            <Type size={18} />
                         </ControlButton>
 
-		                <ControlButton
-		                    onClick={handlePenClick}
-		                    title="Pen Mode"
-		                    active={penMode || showToolMenu}
-	                >
-	                    {penTool === 'eraser' ? <Eraser size={18} /> :
-	                        penTool === 'highlighter' ? <Highlighter size={18} /> :
-	                            <PenTool size={18} />}
-	                </ControlButton>
+                        <ControlButton
+                            onClick={handleDisplayClick}
+                            title="Display"
+                            active={showDisplayMenu}
+                        >
+                            <Paintbrush size={18} />
+                        </ControlButton>
 
-                    <ControlButton
-                        onClick={handleTextClick}
-                        title={textMode ? 'Disable Text' : 'Text'}
-                        active={textMode}
-                    >
-                        <Type size={18} />
-                    </ControlButton>
-
-                    <ControlButton
-                        onClick={handleDisplayClick}
-                        title="Display"
-                        active={showDisplayMenu}
-                    >
-                        <Monitor size={18} />
-                    </ControlButton>
-
-	                <ControlButton
-	                    onClick={handleShareClick}
-	                    title="Share"
-	                    active={showShareMenu}
-	                >
-	                    <Link2 size={18} />
-	                </ControlButton>
+	                    <ControlButton
+	                        onClick={handleShareClick}
+	                        title="Share"
+	                        active={showShareMenu}
+	                    >
+	                        <Link2 size={18} />
+	                    </ControlButton>
+                        </>
+                    )}
 	            </div>
-	        </>
+	        </div>
 	    );
 };

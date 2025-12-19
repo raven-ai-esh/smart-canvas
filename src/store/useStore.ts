@@ -36,6 +36,10 @@ interface AppState {
 
     moveMode: boolean;
     toggleMoveMode: () => void;
+    snapMode: boolean;
+    toggleSnapMode: () => void;
+    focusMode: boolean;
+    toggleFocusMode: () => void;
 
     me: { id: string; email: string; name: string; avatarSeed: string; verified: boolean } | null;
     setMe: (me: AppState['me']) => void;
@@ -184,6 +188,10 @@ export const useStore = create<AppState>()(
 
             moveMode: false,
             toggleMoveMode: () => set((state) => ({ moveMode: !state.moveMode })),
+            snapMode: false,
+            toggleSnapMode: () => set((state) => ({ snapMode: !state.snapMode })),
+            focusMode: false,
+            toggleFocusMode: () => set((state) => ({ focusMode: !state.focusMode })),
 
             me: null,
             setMe: (me) => set({ me }),

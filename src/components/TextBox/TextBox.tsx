@@ -12,13 +12,30 @@ const BORDER_BOX_SHRINK = 2; // 1px border on each side with box-sizing: border-
 const LONG_PRESS_MS = 500;
 const TOUCH_DRAG_THRESHOLD = 8;
 
+type SnapAnchor = 'center' | 'topleft';
+type SnapRequest = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  anchor: SnapAnchor;
+  excludeNodeIds?: string[];
+  excludeTextBoxIds?: string[];
+};
+
 export function TextBox({
   box,
   screenToWorld,
+  snapMode,
+  resolveSnap,
+  clearAlignmentGuides,
   onRequestContextMenu,
 }: {
   box: TextBoxType;
   screenToWorld: (x: number, y: number) => { x: number; y: number };
+  snapMode?: boolean;
+  resolveSnap?: (req: SnapRequest) => { x: number; y: number };
+  clearAlignmentGuides?: () => void;
   onRequestContextMenu?: (args: { id: string; x: number; y: number }) => void;
 }) {
   const updateTextBox = useStore((s) => s.updateTextBox);
@@ -269,8 +286,28 @@ export function TextBox({
       e.preventDefault();
       e.stopPropagation();
       const now = screenToWorld(e.clientX, e.clientY);
-      const dx = now.x - group.startWorld.x;
-      const dy = now.y - group.startWorld.y;
+      let dx = now.x - group.startWorld.x;
+      let dy = now.y - group.startWorld.y;
+      if (snapMode && resolveSnap) {
+        const anchor = group.textBoxStarts.find((tb) => tb.id === box.id) ?? group.textBoxStarts[0];
+        if (anchor) {
+          const snapped = resolveSnap({
+            x: anchor.x + dx,
+            y: anchor.y + dy,
+            width: box.width,
+            height: box.height,
+            anchor: 'topleft',
+            excludeNodeIds: group.nodeStarts.map((ns) => ns.id),
+            excludeTextBoxIds: group.textBoxStarts.map((tb) => tb.id),
+          });
+          dx = snapped.x - anchor.x;
+          dy = snapped.y - anchor.y;
+        } else {
+          clearAlignmentGuides?.();
+        }
+      } else if (!snapMode) {
+        clearAlignmentGuides?.();
+      }
 
       const moved = Math.hypot(dx, dy) > DRAG_COMMIT_DIST;
       if (moved && !group.committed) {
@@ -304,9 +341,26 @@ export function TextBox({
     }
 
     if (st.kind === 'move') {
+      if (snapMode && resolveSnap) {
+        const stSnap = resolveSnap({
+          x: st.startBox.x + dx,
+          y: st.startBox.y + dy,
+          width: st.startBox.width,
+          height: st.startBox.height,
+          anchor: 'topleft',
+          excludeNodeIds: [],
+          excludeTextBoxIds: [box.id],
+        });
+        dx = stSnap.x - st.startBox.x;
+        dy = stSnap.y - st.startBox.y;
+      } else if (!snapMode) {
+        clearAlignmentGuides?.();
+      }
       updateTextBox(box.id, { x: st.startBox.x + dx, y: st.startBox.y + dy });
       return;
     }
+
+    clearAlignmentGuides?.();
 
     // When resizing, keep width stable if user mostly drags vertically (and vice-versa).
     if (Math.abs(dx) < Math.abs(dy) * 0.35) dx = 0;
@@ -324,6 +378,7 @@ export function TextBox({
       const opened = cand.openedMenu;
       clearTouchCandidate();
       e.stopPropagation();
+      clearAlignmentGuides?.();
       if (isClick && !opened && !isEditing) {
         selectTextBox(box.id);
       }
@@ -339,6 +394,7 @@ export function TextBox({
       } catch {
         // ignore
       }
+      clearAlignmentGuides?.();
       return;
     }
 
@@ -351,6 +407,7 @@ export function TextBox({
     } catch {
       // ignore
     }
+    clearAlignmentGuides?.();
   };
 
   const onDoubleClick = (e: React.MouseEvent) => {

@@ -15,8 +15,21 @@ const MAX_SCALE = 5;
 const CLICK_THRESHOLD = 5;
 const LONG_PRESS_MS = 500;
 const TOUCH_DRAG_THRESHOLD = 8;
+const GRID_SIZE = 50;
+const ALIGN_SNAP_PX = 8;
 
     type InteractionMode = 'idle' | 'panning' | 'draggingNode' | 'connecting' | 'textPlacing' | 'selecting';
+type AlignmentGuide = { axis: 'x' | 'y'; pos: number; length: number };
+type SnapAnchor = 'center' | 'topleft';
+type SnapRequest = {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    anchor: SnapAnchor;
+    excludeNodeIds?: string[];
+    excludeTextBoxIds?: string[];
+};
 
 export const Canvas: React.FC = () => {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -31,6 +44,7 @@ export const Canvas: React.FC = () => {
 	    const textMode = useStore((state) => state.textMode);
 	    const textBoxes = useStore((state) => state.textBoxes);
 	    const moveMode = useStore((state) => state.moveMode);
+	    const snapMode = useStore((state) => state.snapMode);
 
 	    // Actions
 	    const setCanvasTransform = useStore((state) => state.setCanvasTransform);
@@ -60,14 +74,19 @@ export const Canvas: React.FC = () => {
 	    useEffect(() => {
 	        activeIdRef.current = activeId;
 	    }, [activeId]);
+	    const clearAlignmentGuides = useCallback(() => setAlignmentGuides([]), []);
+	    useEffect(() => {
+	        if (!snapMode) clearAlignmentGuides();
+	    }, [snapMode, clearAlignmentGuides]);
 	    const contextConnectActiveRef = useRef(false);
 	    const connectingPointerIdRef = useRef<number | null>(null);
 	    const connectingPointerTypeRef = useRef<string | null>(null);
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
     const [connectionStart, setConnectionStart] = useState({ x: 0, y: 0 });
 	    const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 }); // World coordinates
-		    const [contextMenu, setContextMenu] = useState<{ kind: 'node' | 'textBox' | 'edge' | 'selection'; id: string; x: number; y: number; hidden?: boolean } | null>(null);
+	    const [contextMenu, setContextMenu] = useState<{ kind: 'node' | 'textBox' | 'edge' | 'selection'; id: string; x: number; y: number; hidden?: boolean } | null>(null);
 	    const [marqueeRect, setMarqueeRect] = useState<null | { left: number; top: number; width: number; height: number }>(null);
+	    const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuide[]>([]);
 	    const marqueeStartRef = useRef<{ x: number; y: number; pointerId: number } | null>(null);
 	    const groupDragRef = useRef<null | {
         pointerId: number;
@@ -173,6 +192,130 @@ export const Canvas: React.FC = () => {
             x: (screenX - rect.left - c.x) / c.scale,
             y: (screenY - rect.top - c.y) / c.scale,
         };
+    }, []);
+
+    const snapToGrid = useCallback((value: number) => Math.round(value / GRID_SIZE) * GRID_SIZE, []);
+
+    const resolveSnap = useCallback((req: SnapRequest) => {
+        if (!snapMode) return { x: req.x, y: req.y };
+        const container = containerRef.current;
+        if (!container) return { x: req.x, y: req.y };
+        const containerRect = container.getBoundingClientRect();
+        const c = canvasRef.current;
+        const threshold = ALIGN_SNAP_PX / Math.max(0.0001, c.scale);
+
+        const excludeNodes = new Set(req.excludeNodeIds ?? []);
+        const excludeTextBoxes = new Set(req.excludeTextBoxIds ?? []);
+
+        const rectFromClient = (r: DOMRect) => {
+            const left = (r.left - containerRect.left - c.x) / c.scale;
+            const top = (r.top - containerRect.top - c.y) / c.scale;
+            const width = r.width / c.scale;
+            const height = r.height / c.scale;
+            return {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+                width,
+                height,
+                cx: left + width / 2,
+                cy: top + height / 2,
+            };
+        };
+
+        const candidatesX: number[] = [];
+        const candidatesY: number[] = [];
+
+        document.querySelectorAll<HTMLElement>('[data-node-rect="true"]').forEach((el) => {
+            const id = el.getAttribute('data-node-rect-id');
+            if (!id || excludeNodes.has(id)) return;
+            const rect = rectFromClient(el.getBoundingClientRect());
+            candidatesX.push(rect.left, rect.cx, rect.right);
+            candidatesY.push(rect.top, rect.cy, rect.bottom);
+        });
+
+        document.querySelectorAll<HTMLElement>('[data-textbox-id]').forEach((el) => {
+            const id = el.getAttribute('data-textbox-id');
+            if (!id || excludeTextBoxes.has(id)) return;
+            const rect = rectFromClient(el.getBoundingClientRect());
+            candidatesX.push(rect.left, rect.cx, rect.right);
+            candidatesY.push(rect.top, rect.cy, rect.bottom);
+        });
+
+        const width = Math.max(0, req.width);
+        const height = Math.max(0, req.height);
+        let left = req.anchor === 'center' ? req.x - width / 2 : req.x;
+        let top = req.anchor === 'center' ? req.y - height / 2 : req.y;
+
+        const targetX = [
+            { kind: 'left', value: left },
+            { kind: 'center', value: left + width / 2 },
+            { kind: 'right', value: left + width },
+        ] as const;
+        const targetY = [
+            { kind: 'top', value: top },
+            { kind: 'center', value: top + height / 2 },
+            { kind: 'bottom', value: top + height },
+        ] as const;
+
+        const findBest = (
+            targets: ReadonlyArray<{ kind: string; value: number }>,
+            candidates: number[]
+        ) => {
+            let best: { delta: number; target: typeof targets[number]; candidate: number } | null = null;
+            for (const t of targets) {
+                for (const cVal of candidates) {
+                    const delta = cVal - t.value;
+                    const dist = Math.abs(delta);
+                    if (dist > threshold) continue;
+                    if (!best || dist < Math.abs(best.delta)) {
+                        best = { delta, target: t, candidate: cVal };
+                    }
+                }
+            }
+            return best;
+        };
+
+        const bestX = findBest(targetX, candidatesX);
+        const bestY = findBest(targetY, candidatesY);
+
+        const guides: AlignmentGuide[] = [];
+
+        if (bestX) {
+            if (bestX.target.kind === 'left') left = bestX.candidate;
+            if (bestX.target.kind === 'center') left = bestX.candidate - width / 2;
+            if (bestX.target.kind === 'right') left = bestX.candidate - width;
+            guides.push({ axis: 'x', pos: bestX.candidate * c.scale + c.x, length: containerRect.height });
+        } else {
+            const snapped = snapToGrid(req.anchor === 'center' ? left + width / 2 : left);
+            left = req.anchor === 'center' ? snapped - width / 2 : snapped;
+        }
+
+        if (bestY) {
+            if (bestY.target.kind === 'top') top = bestY.candidate;
+            if (bestY.target.kind === 'center') top = bestY.candidate - height / 2;
+            if (bestY.target.kind === 'bottom') top = bestY.candidate - height;
+            guides.push({ axis: 'y', pos: bestY.candidate * c.scale + c.y, length: containerRect.width });
+        } else {
+            const snapped = snapToGrid(req.anchor === 'center' ? top + height / 2 : top);
+            top = req.anchor === 'center' ? snapped - height / 2 : snapped;
+        }
+
+        setAlignmentGuides(guides);
+
+        return {
+            x: req.anchor === 'center' ? left + width / 2 : left,
+            y: req.anchor === 'center' ? top + height / 2 : top,
+        };
+    }, [snapMode, snapToGrid]);
+
+    const getNodeSize = useCallback((id: string) => {
+        const el = document.querySelector<HTMLElement>(`[data-node-rect="true"][data-node-rect-id="${id}"]`);
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        const scale = Math.max(0.0001, canvasRef.current.scale);
+        return { width: rect.width / scale, height: rect.height / scale };
     }, []);
 
     const applyLiveStrokeStyle = (style: { stroke: string; width: number; opacity: number }) => {
@@ -1218,8 +1361,29 @@ export const Canvas: React.FC = () => {
 	            const worldPos = screenToWorld(e.clientX, e.clientY);
 	            const group = groupDragRef.current;
 	            if (group && group.pointerId === e.pointerId) {
-	                const dx = worldPos.x - group.startWorld.x;
-	                const dy = worldPos.y - group.startWorld.y;
+	                let dx = worldPos.x - group.startWorld.x;
+	                let dy = worldPos.y - group.startWorld.y;
+	                if (snapMode) {
+	                    const anchor = group.nodeStarts.find((ns) => ns.id === activeId) ?? group.nodeStarts[0];
+	                    if (anchor) {
+	                        const size = getNodeSize(anchor.id) ?? { width: 0, height: 0 };
+	                        const snapped = resolveSnap({
+	                            x: anchor.x + dx,
+	                            y: anchor.y + dy,
+	                            width: size.width,
+	                            height: size.height,
+	                            anchor: 'center',
+	                            excludeNodeIds: group.nodeStarts.map((ns) => ns.id),
+	                            excludeTextBoxIds: group.textBoxStarts.map((ts0) => ts0.id),
+	                        });
+	                        dx = snapped.x - anchor.x;
+	                        dy = snapped.y - anchor.y;
+	                    } else {
+	                        clearAlignmentGuides();
+	                    }
+	                } else {
+	                    clearAlignmentGuides();
+	                }
 
 	                const moved = Math.hypot(dx, dy) > 2;
 	                if (moved && !group.committed && pendingDragUndoSnapshotRef.current) {
@@ -1256,8 +1420,23 @@ export const Canvas: React.FC = () => {
 	                return;
 	            }
 
-	            const nextX = worldPos.x - dragOffset.x;
-	            const nextY = worldPos.y - dragOffset.y;
+	            let nextX = worldPos.x - dragOffset.x;
+	            let nextY = worldPos.y - dragOffset.y;
+	            if (snapMode && activeId) {
+	                const size = getNodeSize(activeId) ?? { width: 0, height: 0 };
+	                const snapped = resolveSnap({
+	                    x: nextX,
+	                    y: nextY,
+	                    width: size.width,
+	                    height: size.height,
+	                    anchor: 'center',
+	                    excludeNodeIds: [activeId],
+	                });
+	                nextX = snapped.x;
+	                nextY = snapped.y;
+	            } else if (!snapMode) {
+	                clearAlignmentGuides();
+	            }
 
 	            if (!dragUndoCommittedRef.current && pendingDragUndoSnapshotRef.current && dragStartPosRef.current) {
 	                const moved = Math.hypot(nextX - dragStartPosRef.current.x, nextY - dragStartPosRef.current.y) > 2;
@@ -1385,6 +1564,7 @@ export const Canvas: React.FC = () => {
 	            if (e.pointerType === 'pen') {
 	                penStrokeActiveRef.current = false;
 	            }
+	            clearAlignmentGuides();
 		            return;
 		        }
 
@@ -1504,6 +1684,7 @@ export const Canvas: React.FC = () => {
         if (e.pointerType === 'pen') {
             penStrokeActiveRef.current = false;
         }
+        clearAlignmentGuides();
     };
 
     const handleDoubleClick = (e: React.MouseEvent) => {
@@ -1557,6 +1738,7 @@ export const Canvas: React.FC = () => {
                 // ignore
             }
         }
+	        clearAlignmentGuides();
 	    };
 
 	    const handlePointerLeave = (e: React.PointerEvent) => {
@@ -1650,9 +1832,20 @@ export const Canvas: React.FC = () => {
                 className={styles.gridPattern}
                 style={{
                     backgroundPosition: `${canvas.x}px ${canvas.y}px`,
-                    backgroundSize: `${50 * canvas.scale}px ${50 * canvas.scale}px`
+                    backgroundSize: `${GRID_SIZE * canvas.scale}px ${GRID_SIZE * canvas.scale}px`
                 }}
             />
+
+            {alignmentGuides.map((guide, idx) => (
+                <div
+                    key={`${guide.axis}-${idx}`}
+                    className={styles.alignmentGuide}
+                    style={guide.axis === 'x'
+                        ? { left: guide.pos, top: 0, width: 1, height: guide.length }
+                        : { top: guide.pos, left: 0, height: 1, width: guide.length }
+                    }
+                />
+            ))}
 
             {marqueeRect && (
                 <div
@@ -1736,6 +1929,9 @@ export const Canvas: React.FC = () => {
 	                        key={tb.id}
 	                        box={tb}
 	                        screenToWorld={screenToWorld}
+	                        snapMode={snapMode}
+	                        resolveSnap={resolveSnap}
+	                        clearAlignmentGuides={clearAlignmentGuides}
 	                        onRequestContextMenu={(args) => {
 	                            if (args.id === '__selection__') setContextMenu({ kind: 'selection', id: '__selection__', x: args.x, y: args.y });
 	                            else setContextMenu({ kind: 'textBox', id: args.id, x: args.x, y: args.y });

@@ -646,17 +646,29 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
             data-node-id={data.id}
         >
             {/* Graph View */}
-            <div className={graphClass}>
+            <div
+                className={graphClass}
+                data-node-rect={isGraph ? 'true' : undefined}
+                data-node-rect-id={data.id}
+            >
                 <GraphView data={data} />
             </div>
 
             {/* Card View */}
-            <div className={cardClass}>
+            <div
+                className={cardClass}
+                data-node-rect={isCard ? 'true' : undefined}
+                data-node-rect-id={data.id}
+            >
                 <CardView data={data} />
             </div>
 
             {/* Note View */}
-            <div className={noteClass}>
+            <div
+                className={noteClass}
+                data-node-rect={isNote ? 'true' : undefined}
+                data-node-rect-id={data.id}
+            >
                 <NoteView data={data} />
             </div>
         </div>

@@ -50,6 +50,15 @@
     background-size: 50px 50px;
 }
 
+.alignmentGuide {
+    position: absolute;
+    pointer-events: none;
+    background: var(--accent-primary);
+    opacity: 0.55;
+    z-index: 1500;
+    box-shadow: 0 0 8px rgba(94, 129, 172, 0.25);
+}
+
 .contextMenuOverlay {
     position: fixed;
     inset: 0;
