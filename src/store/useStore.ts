@@ -22,6 +22,13 @@ interface AppState {
     canvas: CanvasState;
     effectiveEnergy: Record<string, number>;
     tombstones: Tombstones;
+    sessionId: string | null;
+    sessionName: string | null;
+    sessionSaved: boolean;
+    sessionOwnerId: string | null;
+    sessionExpiresAt: string | null;
+    setSessionId: (id: string | null) => void;
+    setSessionMeta: (meta: { name?: string | null; saved?: boolean; ownerId?: string | null; expiresAt?: string | null }) => void;
     textBoxes: TextBox[];
     editingTextBoxId: string | null;
     setEditingTextBoxId: (id: string | null) => void;
@@ -159,6 +166,18 @@ export const useStore = create<AppState>()(
             canvas: { x: 0, y: 0, scale: 1 },
             effectiveEnergy: {},
             tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {} },
+            sessionId: null,
+            sessionName: null,
+            sessionSaved: false,
+            sessionOwnerId: null,
+            sessionExpiresAt: null,
+            setSessionId: (id) => set({ sessionId: id }),
+            setSessionMeta: (meta) => set((state) => ({
+                sessionName: Object.prototype.hasOwnProperty.call(meta, 'name') ? meta.name ?? null : state.sessionName,
+                sessionSaved: typeof meta.saved === 'boolean' ? meta.saved : state.sessionSaved,
+                sessionOwnerId: Object.prototype.hasOwnProperty.call(meta, 'ownerId') ? meta.ownerId ?? null : state.sessionOwnerId,
+                sessionExpiresAt: Object.prototype.hasOwnProperty.call(meta, 'expiresAt') ? meta.expiresAt ?? null : state.sessionExpiresAt,
+            })),
             textBoxes: [],
             editingTextBoxId: null,
             setEditingTextBoxId: (id) => set({ editingTextBoxId: id }),

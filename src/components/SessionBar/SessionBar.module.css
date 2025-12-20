@@ -1,0 +1,425 @@
+.root {
+    position: fixed;
+    top: calc(12px + env(safe-area-inset-top, 0px));
+    left: calc(12px + env(safe-area-inset-left, 0px));
+    z-index: 1500;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    pointer-events: auto;
+}
+
+.saveGroup {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.saveButton {
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-node);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
+    transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
+}
+
+.saveButton:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.3);
+}
+
+.expiryBadge {
+    height: 26px;
+    padding: 0 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 11px;
+    opacity: 0.5;
+    cursor: pointer;
+    transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.expiryBadge:hover {
+    opacity: 0.8;
+    transform: translateY(-1px);
+}
+
+.expiryInfo {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    padding: 8px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-node);
+    color: var(--text-primary);
+    font-size: 12px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+    transition: opacity 220ms ease;
+    pointer-events: none;
+    white-space: nowrap;
+}
+
+.sessionName {
+    border: none;
+    background: transparent;
+    padding: 0;
+    font-family: inherit;
+    appearance: none;
+    font-size: 12px;
+    color: var(--text-primary);
+    opacity: 0.35;
+    transition: opacity 180ms ease;
+    max-width: min(320px, 45vw);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+}
+
+.sessionName:hover {
+    opacity: 0.9;
+}
+
+.sessionName:disabled {
+    cursor: default;
+    opacity: 0.35;
+}
+
+.sessionsBackdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.25);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 220ms ease;
+    z-index: 1750;
+}
+
+.sessionsBackdropOpen {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.sessionsPanel {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: min(340px, 85vw);
+    background: var(--bg-node);
+    border-right: 1px solid var(--border-strong);
+    box-shadow: 20px 0 60px rgba(0, 0, 0, 0.45);
+    transform: translateX(-100%);
+    opacity: 0;
+    transition: transform 240ms ease, opacity 240ms ease;
+    z-index: 1800;
+    display: flex;
+    flex-direction: column;
+    padding: calc(18px + env(safe-area-inset-top, 0px)) 16px 18px;
+    box-sizing: border-box;
+    pointer-events: none;
+}
+
+.sessionsPanelOpen {
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.currentSession {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+
+.currentSessionHeader {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.currentSessionLabel {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-secondary);
+}
+
+.currentSessionBadge {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 2px 8px;
+}
+
+.currentSessionRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    border: 1px solid var(--border-strong);
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.currentSessionName {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    cursor: text;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border: 1px solid transparent;
+    background: transparent;
+    padding: 2px 6px;
+    border-radius: 8px;
+    outline: none;
+    width: 100%;
+}
+
+.currentSessionName:focus {
+    border-color: var(--border-strong);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.currentSessionName:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.sessionsHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+}
+
+.sessionsTitle {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.sessionsClose {
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--text-primary);
+    width: 28px;
+    height: 28px;
+    border-radius: 9px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+.newSessionButton {
+    border: 1px dashed var(--border-strong);
+    background: transparent;
+    color: var(--text-primary);
+    border-radius: 14px;
+    padding: 10px 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 160ms ease, transform 160ms ease, opacity 160ms ease;
+    margin-bottom: 10px;
+}
+
+.newSessionButton:hover {
+    transform: translateY(-1px);
+    border-color: var(--accent-primary);
+}
+
+.newSessionButton:disabled {
+    opacity: 0.5;
+    cursor: default;
+    transform: none;
+}
+
+.sessionsList {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    overflow-y: auto;
+    padding-right: 2px;
+    flex: 1;
+    min-height: 0;
+}
+
+.sessionItem {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    border: 1px solid var(--border-strong);
+    background: rgba(255, 255, 255, 0.04);
+    cursor: pointer;
+    transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.sessionItem:hover {
+    transform: translateY(-1px);
+    border-color: var(--accent-primary);
+}
+
+.sessionItemActive {
+    border-color: var(--accent-primary);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.sessionItemInfo {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    flex: 1;
+}
+
+.sessionItemName {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sessionItemMeta {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.sessionItemActions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.sessionActionButton {
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--text-primary);
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: border-color 160ms ease, transform 160ms ease, opacity 160ms ease;
+}
+
+.sessionActionButton:hover {
+    transform: translateY(-1px);
+    border-color: var(--accent-primary);
+}
+
+.sessionActionDanger:hover {
+    border-color: var(--accent-danger, #e05656);
+    color: var(--accent-danger, #e05656);
+}
+
+.sessionActionButton:disabled {
+    opacity: 0.45;
+    cursor: default;
+    transform: none;
+}
+
+.sessionsEmpty {
+    font-size: 12px;
+    color: var(--text-secondary);
+    padding: 8px 4px;
+}
+
+.prompt {
+    position: absolute;
+    top: calc(100% + 10px);
+    left: 0;
+    min-width: 280px;
+    padding: 12px;
+    border-radius: 14px;
+    background: var(--bg-node);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.promptTitle {
+    font-size: 12px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.promptInput {
+    width: 100%;
+    border-radius: 10px;
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--text-primary);
+    padding: 8px 10px;
+    font-size: 13px;
+    outline: none;
+    box-sizing: border-box;
+}
+
+.promptActions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.promptButton {
+    border-radius: 10px;
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--text-primary);
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.promptButtonPrimary {
+    background: var(--accent-primary);
+    border-color: var(--accent-primary);
+    color: #fff;
+}
+
+.toast {
+    position: absolute;
+    top: -38px;
+    left: 0;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: var(--bg-node);
+    border: 1px solid var(--border-strong);
+    color: var(--text-primary);
+    font-size: 12px;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+}

@@ -25,6 +25,8 @@ const YANDEX_CLIENT_ID = process.env.YANDEX_CLIENT_ID;
 const YANDEX_CLIENT_SECRET = process.env.YANDEX_CLIENT_SECRET;
 const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TEMP_SESSION_TTL_DAYS = Number(process.env.TEMP_SESSION_TTL_DAYS ?? 7);
+const TEMP_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * (Number.isFinite(TEMP_SESSION_TTL_DAYS) && TEMP_SESSION_TTL_DAYS > 0 ? TEMP_SESSION_TTL_DAYS : 7);
 const parseCorsOrigin = (v) => {
   if (v === undefined) return true;
   if (v === 'true') return true;
@@ -45,6 +47,41 @@ async function initDb() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+
+  try {
+    await pool.query('ALTER TABLE sessions ADD COLUMN IF NOT EXISTS owner_id TEXT');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('ALTER TABLE sessions ADD COLUMN IF NOT EXISTS name TEXT');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('ALTER TABLE sessions ADD COLUMN IF NOT EXISTS saved_at TIMESTAMPTZ');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('ALTER TABLE sessions ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions (expires_at)');
+  } catch {
+    // ignore
+  }
+
+  try {
+    await pool.query(
+      'UPDATE sessions SET expires_at = NOW() + $1::interval WHERE saved_at IS NULL AND expires_at IS NULL',
+      [`${Math.max(1, Math.floor(Number.isFinite(TEMP_SESSION_TTL_DAYS) ? TEMP_SESSION_TTL_DAYS : 7))} days`],
+    );
+  } catch {
+    // ignore
+  }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS app_settings (
@@ -109,7 +146,10 @@ async function initDbWithRetry() {
 }
 
 async function getSession(id) {
-  const res = await pool.query('SELECT id, state, version FROM sessions WHERE id = $1', [id]);
+  const res = await pool.query(
+    'SELECT id, state, version, name, owner_id, saved_at, expires_at FROM sessions WHERE id = $1 AND (expires_at IS NULL OR expires_at > NOW())',
+    [id],
+  );
   return res.rows[0] ?? null;
 }
 
@@ -190,10 +230,13 @@ async function setSetting(key, value) {
   );
 }
 
-async function createSession(id, state) {
+async function createSession(id, state, opts = {}) {
+  const expiresAt = Object.prototype.hasOwnProperty.call(opts, 'expiresAt') ? opts.expiresAt : new Date(Date.now() + TEMP_SESSION_TTL_MS);
   const res = await pool.query(
-    'INSERT INTO sessions (id, state, version) VALUES ($1, $2, 0) RETURNING id, state, version',
-    [id, state],
+    `INSERT INTO sessions (id, state, version, name, owner_id, saved_at, expires_at)
+     VALUES ($1, $2, 0, $3, $4, $5, $6)
+     RETURNING id, state, version, name, owner_id, saved_at, expires_at`,
+    [id, state, opts.name ?? null, opts.ownerId ?? null, opts.savedAt ?? null, expiresAt ?? null],
   );
   return res.rows[0];
 }
@@ -287,7 +330,10 @@ async function mergeAndUpdateSession(sessionId, incomingState) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const res = await client.query('SELECT id, state, version FROM sessions WHERE id = $1 FOR UPDATE', [sessionId]);
+    const res = await client.query(
+      'SELECT id, state, version, name, owner_id, saved_at, expires_at FROM sessions WHERE id = $1 AND (expires_at IS NULL OR expires_at > NOW()) FOR UPDATE',
+      [sessionId],
+    );
     const row = res.rows[0];
     if (!row) {
       await client.query('ROLLBACK');
@@ -298,7 +344,7 @@ async function mergeAndUpdateSession(sessionId, incomingState) {
       `UPDATE sessions
          SET state = $1, version = version + 1, updated_at = NOW()
        WHERE id = $2
-       RETURNING id, state, version`,
+       RETURNING id, state, version, name, owner_id, saved_at, expires_at`,
       [merged, sessionId],
     );
     await client.query('COMMIT');
@@ -313,6 +359,43 @@ async function mergeAndUpdateSession(sessionId, incomingState) {
   } finally {
     client.release();
   }
+}
+
+function serializeSession(row) {
+  if (!row) return null;
+  const savedAt = row.saved_at ?? null;
+  return {
+    id: row.id,
+    state: row.state,
+    version: row.version,
+    meta: {
+      name: row.name ?? null,
+      ownerId: row.owner_id ?? null,
+      savedAt,
+      expiresAt: row.expires_at ?? null,
+      saved: !!savedAt,
+    },
+  };
+}
+
+async function cleanupExpiredSessions() {
+  await pool.query('DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= NOW()');
+}
+
+async function pinSession(sessionId) {
+  await pool.query(
+    'UPDATE sessions SET saved_at = COALESCE(saved_at, NOW()), expires_at = NULL WHERE id = $1',
+    [sessionId],
+  );
+}
+
+async function ensurePinnedSession(sessionId) {
+  const existing = await pool.query('SELECT id FROM sessions WHERE id = $1', [sessionId]);
+  if (!existing.rowCount) {
+    await createSession(sessionId, normalizeState({}), { expiresAt: null, savedAt: new Date() });
+    return;
+  }
+  await pinSession(sessionId);
 }
 
 const app = express();
@@ -816,7 +899,27 @@ app.post('/api/sessions', async (req, res) => {
   const state = normalizeState(req.body?.state);
   const id = randomUUID();
   const created = await createSession(id, state);
-  res.status(201).json(created);
+  res.status(201).json(serializeSession(created));
+});
+
+app.get('/api/sessions/mine', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const rows = await pool.query(
+    `SELECT id, name, saved_at, updated_at
+       FROM sessions
+      WHERE owner_id = $1 AND saved_at IS NOT NULL
+      ORDER BY updated_at DESC`,
+    [auth.userId],
+  );
+  res.json({
+    sessions: rows.rows.map((row) => ({
+      id: row.id,
+      name: row.name ?? null,
+      savedAt: row.saved_at ?? null,
+      updatedAt: row.updated_at ?? null,
+    })),
+  });
 });
 
 // Fast server-side clone: avoids uploading large session state from the client.
@@ -825,13 +928,13 @@ app.post('/api/sessions/:id/clone', async (req, res) => {
   if (!source) return res.status(404).json({ error: 'not_found' });
   const id = randomUUID();
   const created = await createSession(id, normalizeState(source.state));
-  res.status(201).json(created);
+  res.status(201).json(serializeSession(created));
 });
 
 app.get('/api/sessions/:id', async (req, res) => {
   const session = await getSession(req.params.id);
   if (!session) return res.status(404).json({ error: 'not_found' });
-  res.json(session);
+  res.json(serializeSession(session));
 });
 
 app.put('/api/sessions/:id', async (req, res) => {
@@ -839,7 +942,71 @@ app.put('/api/sessions/:id', async (req, res) => {
   if (!state) return res.status(400).json({ error: 'bad_request' });
   const updated = await mergeAndUpdateSession(req.params.id, state);
   if (!updated) return res.status(404).json({ error: 'not_found' });
-  res.json(updated);
+  res.json(serializeSession(updated));
+});
+
+app.delete('/api/sessions/:id', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const sessionId = req.params.id;
+  const defaultId = await getSetting('default_session_id');
+  if (defaultId && defaultId === sessionId) return res.status(409).json({ error: 'cannot_delete_default' });
+
+  const existing = await pool.query('SELECT owner_id FROM sessions WHERE id = $1', [sessionId]);
+  const row = existing.rows[0];
+  if (!row) return res.status(404).json({ error: 'not_found' });
+  if (!row.owner_id || row.owner_id !== auth.userId) return res.status(403).json({ error: 'forbidden' });
+
+  await pool.query('DELETE FROM sessions WHERE id = $1', [sessionId]);
+  res.json({ ok: true });
+});
+
+app.post('/api/sessions/:id/save', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const rawName = String(req.body?.name ?? '').trim();
+  if (!rawName) return res.status(400).json({ error: 'name_required' });
+  const name = rawName.slice(0, 120);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query(
+      'SELECT id, name, owner_id, saved_at, expires_at FROM sessions WHERE id = $1 AND (expires_at IS NULL OR expires_at > NOW()) FOR UPDATE',
+      [req.params.id],
+    );
+    const row = existing.rows[0];
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'not_found' });
+    }
+    if (row.owner_id && row.owner_id !== auth.userId) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'forbidden' });
+    }
+    const updated = await client.query(
+      `UPDATE sessions
+         SET name = $1, owner_id = $2, saved_at = NOW(), expires_at = NULL, updated_at = NOW()
+       WHERE id = $3
+       RETURNING id, state, version, name, owner_id, saved_at, expires_at`,
+      [name, auth.userId, req.params.id],
+    );
+    await client.query('COMMIT');
+    const payload = serializeSession(updated.rows[0]);
+    if (payload?.meta) {
+      broadcast(req.params.id, { type: 'session_meta', meta: payload.meta });
+    }
+    res.json(payload);
+  } catch (e) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore
+    }
+    res.status(500).json({ error: 'save_failed' });
+  } finally {
+    client.release();
+  }
 });
 
 const server = http.createServer(app);
@@ -940,7 +1107,8 @@ wss.on('connection', async (ws, req) => {
   ws._meta = { sessionId, connId, clientId, userId: user?.id ?? null, name, avatarSeed };
 
   roomFor(sessionId).add(ws);
-  ws.send(JSON.stringify({ type: 'sync', ...session }));
+  const payload = serializeSession(session);
+  ws.send(JSON.stringify({ type: 'sync', ...payload }));
   sendPresence(sessionId);
 
   ws.on('message', async (raw) => {
@@ -959,7 +1127,8 @@ wss.on('connection', async (ws, req) => {
 
     const updated = await mergeAndUpdateSession(sessionId, state);
     if (!updated) return;
-    broadcast(sessionId, { type: 'update', ...updated, sourceClientId: clientId, requestId });
+    const payload = serializeSession(updated);
+    broadcast(sessionId, { type: 'update', ...payload, sourceClientId: clientId, requestId });
   });
 
   ws.on('close', () => {
@@ -985,19 +1154,28 @@ const pingInterval = setInterval(() => {
 wss.on('close', () => clearInterval(pingInterval));
 
 await initDbWithRetry();
+try {
+  await cleanupExpiredSessions();
+} catch {
+  // ignore
+}
+setInterval(() => {
+  cleanupExpiredSessions().catch(() => undefined);
+}, 1000 * 60 * 60);
 
 // Ensure there is a default session for "landing" opens (no ?session=...).
 // If DEFAULT_SESSION_ID is provided, it becomes the default (and is created if missing).
 try {
   if (DEFAULT_SESSION_ID) {
-    const existing = await getSession(DEFAULT_SESSION_ID);
-    if (!existing) await createSession(DEFAULT_SESSION_ID, normalizeState({}));
+    await ensurePinnedSession(DEFAULT_SESSION_ID);
     await setSetting('default_session_id', DEFAULT_SESSION_ID);
   } else {
     const current = await getSetting('default_session_id');
-    if (!current) {
+    if (current) {
+      await ensurePinnedSession(current);
+    } else {
       const id = randomUUID();
-      await createSession(id, normalizeState({}));
+      await ensurePinnedSession(id);
       await setSetting('default_session_id', id);
     }
   }
