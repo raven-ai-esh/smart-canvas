@@ -29,13 +29,14 @@ function pickSessionState(state: ReturnType<typeof useStore.getState>) {
 }
 
 function applySessionState(state: SessionState) {
+  const monitoringMode = useStore.getState().monitoringMode;
   useStore.setState({
     nodes: state.nodes as any,
     edges: state.edges as any,
     drawings: state.drawings as any,
     textBoxes: state.textBoxes as any,
     tombstones: state.tombstones,
-    effectiveEnergy: computeEffectiveEnergy(state.nodes as any, state.edges as any),
+    effectiveEnergy: computeEffectiveEnergy(state.nodes as any, state.edges as any, { blockDoneTasks: monitoringMode }),
     selectedNode: null,
     selectedNodes: [],
     selectedEdge: null,

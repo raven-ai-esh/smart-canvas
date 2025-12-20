@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Activity, Atom, Hand, Moon, Sun, PenTool, Eraser, Highlighter, Type, X, SlidersHorizontal, Snowflake, Grid3x3, Eye, Paintbrush } from 'lucide-react';
+import { Activity, Hand, Moon, Sun, PenTool, Eraser, Highlighter, Type, X, SlidersHorizontal, Snowflake, Grid3x3, Eye, Paintbrush } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import type { PenToolType } from '../../types';
 
@@ -99,7 +99,7 @@ const ControlButton: React.FC<ControlButtonProps> = ({ title, onClick, active, d
 };
 
 export const Controls: React.FC = () => {
-    const { physicsEnabled, togglePhysicsMode, moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, monitoringMode, toggleMonitoringMode, theme, toggleTheme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, snowEnabled, toggleSnow } = useStore();
+    const { moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, monitoringMode, toggleMonitoringMode, theme, toggleTheme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, snowEnabled, toggleSnow } = useStore();
 
     const controlsRootRef = useRef<HTMLDivElement | null>(null);
 
@@ -437,13 +437,6 @@ export const Controls: React.FC = () => {
                     >
                         {[
                             {
-                                key: 'physics',
-                                title: physicsEnabled ? 'Disable Physics' : 'Enable Physics',
-                                onClick: togglePhysicsMode,
-                                active: physicsEnabled,
-                                child: <Atom size={18} />,
-                            },
-                            {
                                 key: 'grid',
                                 title: snapMode ? 'Disable Grid Snap' : 'Grid + Align',
                                 onClick: toggleSnapMode,
@@ -516,11 +509,11 @@ export const Controls: React.FC = () => {
                                 <Hand size={18} />
                             </ControlButton>
 
-                            <ControlButton
-                                onClick={handleModeClick}
-                                title="Modes"
-                                active={showModeMenu || physicsEnabled || snapMode || focusMode || monitoringMode}
-                            >
+                        <ControlButton
+                            onClick={handleModeClick}
+                            title="Modes"
+                            active={showModeMenu || snapMode || focusMode || monitoringMode}
+                        >
                                 <SlidersHorizontal size={18} />
                             </ControlButton>
 
