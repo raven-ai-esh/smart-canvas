@@ -60,10 +60,28 @@ function stableSerialize(x: unknown) {
   return JSON.stringify(x);
 }
 
+type SessionMeta = {
+  name: string | null;
+  saved: boolean;
+  ownerId: string | null;
+  expiresAt: string | null;
+};
+
+function normalizeSessionMeta(raw: any): SessionMeta | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : null;
+  const ownerId = typeof raw.ownerId === 'string' ? raw.ownerId : null;
+  const expiresAt = raw.expiresAt ? String(raw.expiresAt) : null;
+  const saved = !!raw.saved || !!raw.savedAt;
+  return { name, saved, ownerId, expiresAt };
+}
+
 export function useSessionSync() {
   const [sessionId, setSessionId] = useState<string | null>(() => getSessionIdFromUrl());
   const [resetRequested, setResetRequested] = useState<boolean>(() => getResetFromUrl());
   const clientId = useMemo(() => getOrCreateClientId(), []);
+  const setSessionIdInStore = useStore((s) => s.setSessionId);
+  const setSessionMeta = useStore((s) => s.setSessionMeta);
 
   const wsRef = useRef<WebSocket | null>(null);
   const applyingRemoteRef = useRef(false);
@@ -79,6 +97,10 @@ export function useSessionSync() {
   useEffect(() => {
     resetRequestedRef.current = resetRequested;
   }, [resetRequested]);
+
+  useEffect(() => {
+    setSessionIdInStore(sessionId);
+  }, [sessionId, setSessionIdInStore]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -141,6 +163,7 @@ export function useSessionSync() {
         editingTextBoxId: null,
         presence: { selfId: null, peers: [] },
       } as any);
+      setSessionMeta({ name: null, saved: false, ownerId: null, expiresAt: null });
     }
 
     desiredStateRef.current = null;
@@ -192,6 +215,8 @@ export function useSessionSync() {
       const data = await res.json();
       if (cancelled) return;
       const remote = normalizeSessionState(data?.state);
+      const meta = normalizeSessionMeta(data?.meta);
+      if (meta) setSessionMeta(meta);
       applyRemote(remote, 'fetch');
     };
 
@@ -266,6 +291,12 @@ export function useSessionSync() {
           return;
         }
 
+        if (msg?.type === 'session_meta') {
+          const meta = normalizeSessionMeta(msg?.meta);
+          if (meta) setSessionMeta(meta);
+          return;
+        }
+
         if (msg?.type === 'presence') {
           const peers = Array.isArray(msg?.peers) ? msg.peers : [];
           useStore.getState().setPresence({
@@ -284,6 +315,10 @@ export function useSessionSync() {
         }
 
         if (msg?.type !== 'sync' && msg?.type !== 'update') return;
+        if (msg?.meta) {
+          const meta = normalizeSessionMeta(msg.meta);
+          if (meta) setSessionMeta(meta);
+        }
 
         // Our server broadcasts updates to the sender as well. Applying those echoes would
         // reset local UI state (selection/editing) while typing, so treat them as an ACK.

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Activity, Atom, Hand, Moon, Sun, PenTool, Eraser, Highlighter, Type, X, Link2, Plus, Copy, Share2, Loader2, SlidersHorizontal, Snowflake, Grid3x3, Eye, Paintbrush } from 'lucide-react';
+import { Activity, Atom, Hand, Moon, Sun, PenTool, Eraser, Highlighter, Type, X, SlidersHorizontal, Snowflake, Grid3x3, Eye, Paintbrush } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import type { PenToolType } from '../../types';
 
@@ -105,10 +105,8 @@ export const Controls: React.FC = () => {
 
     // Tool menu visibility
     const [showToolMenu, setShowToolMenu] = useState(false);
-    const [showShareMenu, setShowShareMenu] = useState(false);
     const [showDisplayMenu, setShowDisplayMenu] = useState(false);
     const [showModeMenu, setShowModeMenu] = useState(false);
-    const [shareBusy, setShareBusy] = useState<null | 'new' | 'clone'>(null);
     const [toastText, setToastText] = useState<string | null>(null);
     const [toastVisible, setToastVisible] = useState(false);
 
@@ -175,7 +173,6 @@ export const Controls: React.FC = () => {
             if (!root) return;
             if (root.contains(e.target as Node)) return;
             setShowToolMenu(false);
-            setShowShareMenu(false);
             setShowDisplayMenu(false);
             setShowModeMenu(false);
         };
@@ -186,21 +183,18 @@ export const Controls: React.FC = () => {
     useEffect(() => {
         if (!focusMode) return;
         setShowToolMenu(false);
-        setShowShareMenu(false);
         setShowDisplayMenu(false);
         setShowModeMenu(false);
     }, [focusMode]);
 
     const handlePenClick = () => {
         setShowDisplayMenu(false);
-        setShowShareMenu(false);
         setShowModeMenu(false);
         setShowToolMenu(!showToolMenu);
     };
 
     const handleTextClick = () => {
         setShowToolMenu(false);
-        setShowShareMenu(false);
         setShowDisplayMenu(false);
         setShowModeMenu(false);
         toggleTextMode();
@@ -217,221 +211,23 @@ export const Controls: React.FC = () => {
         setShowToolMenu(false);
     };
 
-    const handleShareClick = () => {
-        setShowToolMenu(false);
-        setShowDisplayMenu(false);
-        setShowModeMenu(false);
-        setShowShareMenu((v) => !v);
-    };
-    const handleCloseShare = () => setShowShareMenu(false);
-
     const handleDisplayClick = () => {
         setShowToolMenu(false);
-        setShowShareMenu(false);
         setShowModeMenu(false);
         setShowDisplayMenu((v) => !v);
     };
 
     const handleModeClick = () => {
         setShowToolMenu(false);
-        setShowShareMenu(false);
         setShowDisplayMenu(false);
         setShowModeMenu((v) => !v);
     };
 
     const handleFocusClick = () => {
         setShowToolMenu(false);
-        setShowShareMenu(false);
         setShowDisplayMenu(false);
         setShowModeMenu(false);
         toggleFocusMode();
-    };
-
-    const copyToClipboard = async (text: string) => {
-        const copy = async (text: string) => {
-            try {
-                await navigator.clipboard.writeText(text);
-                return true;
-            } catch {
-                // Clipboard may be blocked (non-https, permissions). Fallback:
-                window.prompt('Copy session link:', text);
-                return false;
-            }
-        };
-        return copy(text);
-    };
-
-    const openLoadingTab = () => {
-        const w = window.open('about:blank', '_blank');
-        if (!w) return null;
-        try {
-            w.opener = null;
-            w.document.write(
-                `<!doctype html><html><head><meta charset="utf-8"/><title>Loading…</title>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<style>
-  body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background: #0b0f18; color: #e6e6e6; }
-  .wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
-  .card { max-width: 520px; width: 100%; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 16px; padding: 20px; }
-  .bar { height: 6px; border-radius: 999px; background: rgba(255,255,255,0.14); overflow: hidden; margin-top: 12px; }
-  .bar > div { height: 100%; width: 40%; background: rgba(255,255,255,0.55); animation: l 1.1s ease-in-out infinite; border-radius: 999px; }
-  @keyframes l { 0% { transform: translateX(-120%);} 100% { transform: translateX(260%);} }
-</style></head><body><div class="wrap"><div class="card">
-  <div>Создаём сессию…</div>
-  <div class="bar"><div></div></div>
-</div></div></body></html>`,
-            );
-            w.document.close();
-        } catch {
-            // ignore
-        }
-        return w;
-    };
-
-    const ensureSessionId = async () => {
-        const url = new URL(window.location.href);
-        const existing = url.searchParams.get('session');
-        if (existing) return existing;
-
-        try {
-            const settingsRes = await fetch('/api/settings/default-session');
-            if (settingsRes.ok) {
-                const settings = await settingsRes.json();
-                const id = typeof settings?.id === 'string' ? settings.id : null;
-                if (id) {
-                    url.searchParams.set('session', id);
-                    window.history.replaceState({}, '', url.toString());
-                    return id;
-                }
-            }
-
-            const snapshot = ((s) => ({
-                nodes: s.nodes,
-                edges: s.edges,
-                drawings: s.drawings,
-                textBoxes: s.textBoxes,
-                tombstones: s.tombstones,
-            }))(useStore.getState());
-            const res = await fetch('/api/sessions', {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ state: snapshot }),
-            });
-            if (!res.ok) throw new Error(`Failed to create session: ${res.status}`);
-            const data = await res.json();
-            const id = data?.id;
-            if (typeof id !== 'string' || !id) throw new Error('Invalid session id');
-
-            url.searchParams.set('session', id);
-            window.history.replaceState({}, '', url.toString());
-            return id;
-        } catch (e) {
-            // eslint-disable-next-line no-console
-            console.error(e);
-        }
-    };
-
-    const handleCopyCurrentSessionLink = async () => {
-        const id = await ensureSessionId();
-        if (!id) return;
-        const url = new URL(window.location.href);
-        url.searchParams.set('session', id);
-        const ok = await copyToClipboard(url.toString());
-        setToastText(ok ? 'Ссылка скопирована' : 'Ссылка для копирования открыта');
-        setShowShareMenu(false);
-    };
-
-    const handleCreateNewEmptySession = async () => {
-        if (shareBusy) return;
-        setShareBusy('new');
-        const w = openLoadingTab();
-        try {
-            const res = await fetch('/api/sessions', {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({
-                    state: {
-                        nodes: [],
-                        edges: [],
-                        drawings: [],
-                        textBoxes: [],
-                        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {} },
-                    },
-                }),
-            });
-            if (!res.ok) throw new Error(`Failed to create session: ${res.status}`);
-            const data = await res.json();
-            const id = data?.id;
-            if (typeof id !== 'string' || !id) throw new Error('Invalid session id');
-
-            const url = new URL(window.location.href);
-            url.searchParams.set('session', id);
-            url.searchParams.set('reset', '1');
-            if (w) w.location.href = url.toString();
-            else window.open(url.toString(), '_blank');
-            setShowShareMenu(false);
-        } catch (e) {
-            // eslint-disable-next-line no-console
-            console.error(e);
-            try {
-                w?.close();
-            } catch {
-                // ignore
-            }
-            setToastText('Не удалось создать сессию');
-        } finally {
-            setShareBusy(null);
-        }
-    };
-
-    const handleCreateClonedSession = async () => {
-        if (shareBusy) return;
-        setShareBusy('clone');
-        const w = openLoadingTab();
-        try {
-            const sourceId = await ensureSessionId();
-            if (!sourceId) throw new Error('No session id');
-
-            let res = await fetch(`/api/sessions/${encodeURIComponent(sourceId)}/clone`, { method: 'POST' });
-            if (!res.ok) {
-                // Backward-compatible fallback: client-side clone by uploading snapshot.
-                const snapshot = ((s) => ({
-                    nodes: s.nodes,
-                    edges: s.edges,
-                    drawings: s.drawings,
-                    textBoxes: s.textBoxes,
-                    tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {} },
-                }))(useStore.getState());
-
-                res = await fetch('/api/sessions', {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify({ state: snapshot }),
-                });
-            }
-            if (!res.ok) throw new Error(`Failed to create session: ${res.status}`);
-            const data = await res.json();
-            const id = data?.id;
-            if (typeof id !== 'string' || !id) throw new Error('Invalid session id');
-
-            const url = new URL(window.location.href);
-            url.searchParams.set('session', id);
-            url.searchParams.set('reset', '1');
-            if (w) w.location.href = url.toString();
-            else window.open(url.toString(), '_blank');
-            setShowShareMenu(false);
-        } catch (e) {
-            // eslint-disable-next-line no-console
-            console.error(e);
-            try {
-                w?.close();
-            } catch {
-                // ignore
-            }
-            setToastText('Не удалось склонировать сессию');
-        } finally {
-            setShareBusy(null);
-        }
     };
 
     // Mobile-friendly positioning:
@@ -441,18 +237,15 @@ export const Controls: React.FC = () => {
     const bottomPadding = `calc(${baseBottom}px + env(safe-area-inset-bottom, 0px))`;
     const toastBottom = `calc(${baseBottom}px + env(safe-area-inset-bottom, 0px) + 70px)`;
 
-    const shareMenuBorderColor = theme === 'light' ? undefined : 'var(--border-share-menu)';
-    const shareMenuIconColor = theme === 'light' ? 'var(--border-share-menu)' : undefined;
     const penMenuBorderColor = theme === 'light' ? undefined : 'var(--accent-primary)';
     const penMenuInactiveFill = theme === 'light' ? 'var(--accent-glow)' : undefined;
     const displayMenuBorderColor = theme === 'light' ? undefined : 'var(--border-display-menu)';
     const displayMenuIconColor = theme === 'light' ? 'var(--border-display-menu)' : undefined;
 
-    const baseRowButtonCount = 6;
+    const baseRowButtonCount = 5;
     const modeAnchorOffset = (1 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP;
-    const penAnchorOffset = (2 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP; // Move, Modes, Pen, Text, Display, Share
+    const penAnchorOffset = (2 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP; // Move, Modes, Pen, Text, Display
     const displayAnchorOffset = (4 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP;
-    const shareAnchorOffset = (5 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP;
 
     // Sub-menus should “grow” vertically from their base button.
     // Place the submenu so its bottom-most button sits just above the base row.
@@ -564,78 +357,6 @@ export const Controls: React.FC = () => {
 	                        ))}
 	                    </div>
 	                )}
-
-                {/* Secondary stack for Share menu (vertical from base button) */}
-                {!focusMode && (
-	                    <div
-	                        style={{
-	                            position: 'fixed',
-	                            left: `calc(50% + ${shareAnchorOffset}px)`,
-	                            bottom: subStackBottom,
-	                            transform: `translateX(-50%) translateY(${showShareMenu ? 0 : 10}px) scale(${showShareMenu ? 1 : 0.96})`,
-	                            zIndex: 1600,
-	                            display: 'flex',
-	                            flexDirection: 'column-reverse',
-	                            gap: BUTTON_GAP,
-	                            transformOrigin: '50% 100%',
-	                            pointerEvents: showShareMenu ? 'auto' : 'none',
-	                            opacity: showShareMenu ? 1 : 0,
-	                            filter: showShareMenu ? 'blur(0)' : 'blur(0.8px)',
-	                            transition: 'opacity 180ms ease, transform 180ms ease, filter 180ms ease',
-	                        }}
-	                    >
-                        {[
-                            {
-                                key: 'new',
-                                title: 'New session (new tab)',
-                                onClick: handleCreateNewEmptySession,
-                                disabled: shareBusy !== null,
-                                child: shareBusy === 'new' ? <Loader2 size={18} className="controlsSpin" /> : <Plus size={18} />,
-                            },
-                            {
-                                key: 'clone',
-                                title: 'Clone session (new tab)',
-                                onClick: handleCreateClonedSession,
-                                disabled: shareBusy !== null,
-                                child: shareBusy === 'clone' ? <Loader2 size={18} className="controlsSpin" /> : <Copy size={18} />,
-                            },
-                            {
-                                key: 'copy',
-                                title: 'Copy current session link',
-                                onClick: handleCopyCurrentSessionLink,
-                                disabled: shareBusy !== null,
-                                child: <Share2 size={18} />,
-                            },
-                            {
-                                key: 'close',
-                                title: 'Close Share',
-                                onClick: handleCloseShare,
-                                disabled: shareBusy !== null,
-                                child: <X size={18} />,
-                            },
-                        ].map((b, idx) => (
-                            <div
-                                key={b.key}
-                                style={{
-                                    opacity: showShareMenu ? 1 : 0,
-                                    transform: `translateY(${showShareMenu ? 0 : 10}px) scale(${showShareMenu ? 1 : 0.92})`,
-                                    transition: 'opacity 180ms ease, transform 180ms ease',
-                                    transitionDelay: showShareMenu ? `${idx * 35}ms` : '0ms',
-                                }}
-                            >
-                                <ControlButton
-                                    onClick={b.onClick}
-                                    title={b.title}
-                                    disabled={b.disabled}
-                                    borderColor={shareMenuBorderColor}
-                                    iconColor={shareMenuIconColor}
-                                >
-                                    {b.child}
-                                </ControlButton>
-                            </div>
-                        ))}
-                    </div>
-                )}
 
                 {/* Secondary stack for Display menu (Theme + Snow) */}
                 {!focusMode && (
@@ -828,14 +549,6 @@ export const Controls: React.FC = () => {
                         >
                             <Paintbrush size={18} />
                         </ControlButton>
-
-	                    <ControlButton
-	                        onClick={handleShareClick}
-	                        title="Share"
-	                        active={showShareMenu}
-	                    >
-	                        <Link2 size={18} />
-	                    </ControlButton>
                         </>
                     )}
 	            </div>

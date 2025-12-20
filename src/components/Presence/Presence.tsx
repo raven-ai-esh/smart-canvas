@@ -397,6 +397,8 @@ export const Presence: React.FC = () => {
   const [touched, setTouched] = useState<{ name: boolean; email: boolean; password: boolean }>({ name: false, email: false, password: false });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [authNoticeVisible, setAuthNoticeVisible] = useState(false);
   const [devVerifyUrl, setDevVerifyUrl] = useState<string | null>(null);
   const [providers, setProviders] = useState<{ google: boolean; yandex: boolean; telegram: boolean; telegramBotUsername: string | null } | null>(null);
 
@@ -428,6 +430,34 @@ export const Presence: React.FC = () => {
     setMessage(null);
     setDevVerifyUrl(null);
   }, [mode, open]);
+
+  useEffect(() => {
+    if (!authNotice) {
+      setAuthNoticeVisible(false);
+      return;
+    }
+    setAuthNoticeVisible(true);
+    const fadeTimer = window.setTimeout(() => setAuthNoticeVisible(false), 1600);
+    const clearTimer = window.setTimeout(() => setAuthNotice(null), 2000);
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(clearTimer);
+    };
+  }, [authNotice]);
+
+  useEffect(() => {
+    const handler = (evt: Event) => {
+      const detail = (evt as CustomEvent)?.detail ?? {};
+      setOpen(true);
+      if (detail?.mode === 'login') setMode('login');
+      if (detail?.mode === 'signup') setMode('signup');
+      if (typeof detail?.message === 'string' && detail.message.trim()) {
+        setAuthNotice(detail.message);
+      }
+    };
+    window.addEventListener('open-auth', handler as EventListener);
+    return () => window.removeEventListener('open-auth', handler as EventListener);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -689,6 +719,29 @@ export const Presence: React.FC = () => {
           }}
           onPointerDown={close}
         >
+          <div style={{ display: 'grid', justifyItems: 'center', position: 'relative' }}>
+            {authNotice && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: '50%',
+                  transform: 'translate(-50%, -120%)',
+                  padding: '8px 12px',
+                  borderRadius: 999,
+                  border: '1px solid var(--border-strong)',
+                  background: 'var(--bg-node)',
+                  color: 'var(--text-primary)',
+                  fontSize: 12,
+                  boxShadow: '0 10px 24px rgba(0,0,0,0.35)',
+                  opacity: authNoticeVisible ? 0.72 : 0,
+                  transition: 'opacity 220ms ease',
+                  pointerEvents: 'none',
+                }}
+              >
+                {authNotice}
+              </div>
+            )}
             <div
               style={{
                 width: isCompactAuth ? 'min(680px, 100%)' : 'min(520px, 92vw)',
@@ -888,6 +941,7 @@ export const Presence: React.FC = () => {
             </div>
           </div>
         </div>
+      </div>
       )}
     </>
   );
