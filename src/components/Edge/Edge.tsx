@@ -1,6 +1,7 @@
 import React from 'react';
 import { useStore } from '../../store/useStore';
 import styles from './Edge.module.css';
+import { energyToColor } from '../../utils/energy';
 
 
 
@@ -22,6 +23,13 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
     const selectedTextBoxes = useStore((state) => state.selectedTextBoxes);
     const neighbors = useStore((state) => state.neighbors);
     const selectEdge = useStore((state) => state.selectEdge);
+    const monitoringMode = useStore((state) => state.monitoringMode);
+    const sourceEnergy = useStore((state) => {
+        const eff = state.effectiveEnergy[sourceId];
+        if (Number.isFinite(eff)) return eff;
+        const node = state.nodes.find((n) => n.id === sourceId);
+        return Number.isFinite(node?.energy) ? node?.energy ?? 0 : 0;
+    });
     // const canvas = useStore((state) => state.canvas); // Removed as unused
 
     // We need to re-render if nodes move. 
@@ -54,7 +62,7 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
             if (container) {
                 const isNoteMode = scale >= 1.2;
                 // Select the correct child based on expected mode
-                const targetSelector = isNoteMode ? '[class*="noteNode"]' : '[class*="cardNode"]';
+                const targetSelector = isNoteMode ? '[class*="noteNode"]' : '[class*="cardNode"], [class*="taskNode"]';
                 const target = container.querySelector(targetSelector) as HTMLElement;
 
                 if (target) {
@@ -222,9 +230,15 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
         return 0.1;
     };
 
+    const sourceStatus = sourceNode.status ?? ((sourceNode as { inWork?: boolean }).inWork ? 'in_progress' : 'queued');
+    const isMonitoringEdge = monitoringMode && sourceNode.type === 'task' && sourceStatus === 'in_progress';
+    const monitorColor = energyToColor(sourceEnergy);
+
     // Highlight Logic
     let className = styles.edgePath;
     if (isSelectedEdge) className += ` ${styles.edgeSelected}`;
+    if (isMonitoringEdge) className += ` ${styles.edgeMonitoring}`;
+    const monitorStyle = isMonitoringEdge ? ({ '--edge-monitor-color': monitorColor } as React.CSSProperties) : undefined;
 
     const selectThisEdge = (e: any) => {
         e?.preventDefault?.();
@@ -291,7 +305,7 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
     };
 
     const gradId = `edge-grad-${id}`;
-    const baseColor = isSelectedEdge ? 'var(--accent-primary)' : hasFocus ? 'var(--text-primary)' : 'var(--text-dim)';
+    const baseColor = isMonitoringEdge ? monitorColor : (isSelectedEdge ? 'var(--accent-primary)' : hasFocus ? 'var(--text-primary)' : 'var(--text-dim)');
     const sOpacity = isSelectedEdge ? 1 : (hasFocus ? focusOpacityFor(sourceId, sDist) : 1);
     const tOpacity = isSelectedEdge ? 1 : (hasFocus ? focusOpacityFor(targetId, tDist) : 1);
 
@@ -319,12 +333,13 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
                 className={className}
                 style={{
                     stroke: strokePaint,
+                    ...(monitorStyle ?? {}),
                 }}
             />
             <path
                 d={geom.arrowD}
-                className={`${styles.edgeArrow} ${isSelectedEdge ? styles.edgeArrowSelected : ''}`}
-                style={{ fill: strokePaint }}
+                className={`${styles.edgeArrow} ${isSelectedEdge ? styles.edgeArrowSelected : ''}${isMonitoringEdge ? ` ${styles.edgeArrowMonitoring}` : ''}`}
+                style={{ fill: strokePaint, ...(monitorStyle ?? {}) }}
             />
         </>
     );

@@ -43,6 +43,15 @@
     filter: drop-shadow(0 0 4px var(--accent-primary));
 }
 
+.edgeMonitoring {
+    stroke-dasharray: 8 10;
+    animation: edgeFlow 1.4s linear infinite;
+}
+
+.edgeArrowMonitoring {
+    filter: drop-shadow(0 0 4px var(--edge-monitor-color, rgba(163, 190, 140, 0.6)));
+}
+
 .edgeHighlightLevel0 {
     stroke: var(--accent-primary);
     stroke-width: 2px;
@@ -79,5 +88,11 @@
 @keyframes dash {
     to {
         stroke-dashoffset: -10;
+    }
+}
+
+@keyframes edgeFlow {
+    to {
+        stroke-dashoffset: -18;
     }
 }

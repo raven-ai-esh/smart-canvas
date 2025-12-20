@@ -15,6 +15,8 @@ export interface NodeData {
   // Task specific
   startDate?: string;
   endDate?: string;
+  status?: 'queued' | 'in_progress' | 'done';
+  progress?: number;
 }
 
 export interface EdgeData {

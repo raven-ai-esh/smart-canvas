@@ -28,6 +28,7 @@ const getDistToCenter = (x: number, y: number, canvas: { x: number, y: number, s
 };
 
 type TextSel = { start: number; end: number };
+const clampProgress = (value: number) => Math.min(100, Math.max(0, value));
 
 const NoteContentEditor: React.FC<{
     nodeId: string;
@@ -216,6 +217,7 @@ const NoteContentEditor: React.FC<{
 const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
     const updateNode = useStore((state) => state.updateNode);
     const [showEnergySelector, setShowEnergySelector] = React.useState(false);
+    const monitoringMode = useStore((state) => state.monitoringMode);
 
     // Missing state restored
     const [isEditing, setIsEditing] = React.useState(false);
@@ -250,145 +252,165 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
     }, [showEnergySelector]);
 
     const isTask = data.type === 'task';
+    const status = data.status ?? ((data as { inWork?: boolean }).inWork ? 'in_progress' : 'queued');
+    const statusLetter = status === 'done' ? 'D' : status === 'in_progress' ? 'P' : 'Q';
+    const progress = clampProgress(typeof data.progress === 'number' && Number.isFinite(data.progress) ? data.progress : 0);
+    const shouldPulse = monitoringMode && isTask && status === 'in_progress';
+    const cardClassName = `${isTask ? styles.taskNode : styles.cardNode}${shouldPulse ? ` ${styles.monitorPulse}` : ''}${isTask ? ` ${styles.cardProgressRing}` : ''}`;
+    const cardStyle = isTask ? ({ '--card-progress': progress, '--progress-color': energyColor } as React.CSSProperties) : undefined;
 
     return (
-        <div className={isTask ? styles.taskNode : styles.cardNode}>
+        <div className={cardClassName} style={cardStyle}>
             {/* Header / Title Area */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', width: '100%' }}>
-                {isEditing ? (
-                    <input
-                        className={styles.cardHeaderInput}
-                        value={data.title}
-                        onChange={(e) => updateNode(data.id, { title: e.target.value })}
-                        onBlur={() => setIsEditing(false)}
-                        onKeyDown={handleKeyDown}
-                        autoFocus
-                        onPointerDown={(e) => e.stopPropagation()}
-                        style={{ flex: 1, marginRight: 8 }}
-                    />
-                ) : (
-                    <div
-                        className={styles.cardHeader}
-                        onDoubleClick={() => setIsEditing(true)}
-                        data-interactive="true"
-                        onPointerDown={(e) => {
-                            e.stopPropagation();
-                            if (e.pointerType === 'touch') {
-                                titleTouchRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
-                            }
-                        }}
-                        onPointerUp={(e) => {
-                            if (e.pointerType !== 'touch') return;
-                            const ref = titleTouchRef.current;
-                            if (!ref || ref.id !== e.pointerId) return;
-                            const dist = Math.hypot(e.clientX - ref.x, e.clientY - ref.y);
-                            titleTouchRef.current = null;
-                            if (dist < 8) setIsEditing(true);
-                        }}
-                        onPointerCancel={() => {
-                            titleTouchRef.current = null;
-                        }}
-                        style={{ flex: 1, marginRight: 8 }}
-                    >
-                        {data.title}
-                    </div>
-                )}
-
-                {/* Interactive Energy Indicator */}
-                <div style={{ position: 'relative' }}>
-                    <div
-                        className={styles.energyIndicatorInteract}
-                        title={`Energy: ${Math.round(baseEnergy)} / ${Math.round(effectiveEnergy)}`}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            setShowEnergySelector(!showEnergySelector);
-                        }}
-                        data-interactive="true"
-                        onPointerDown={(e) => e.stopPropagation()}
-                        style={{
-                            backgroundColor: energyColor,
-                            boxShadow: `0 0 8px ${energyColor}, 0 0 16px ${energyColor}`,
-                        }}
-                    />
-
-                    {showEnergySelector && (
-                        <div className={styles.energySelector} data-interactive="true" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
-                            <div className={styles.energyMiniValuesRow}>
-                                <span className={styles.energyMiniValue} title="Собственная энергия" style={{ color: energyColor }}>
-                                    {Math.round(baseEnergy)}
-                                </span>
-                                <span className={styles.energyMiniDividerLine} aria-hidden="true" />
-                                <span className={styles.energyMiniValue} title="Суммарная энергия">
-                                    {Math.round(effectiveEnergy)}
-                                </span>
-                            </div>
-                            <div
-                                className={styles.energyLiquidGauge}
-                                onPointerDown={(e) => {
-                                    e.preventDefault();
-                                    const el = e.currentTarget;
-                                    const rect = el.getBoundingClientRect();
-                                    const t = (rect.bottom - e.clientY) / rect.height;
-                                    updateNode(data.id, { energy: clampEnergy(t * maxBaseEnergy) });
-
-                                    const onMove = (ev: PointerEvent) => {
-                                        const tt = (rect.bottom - ev.clientY) / rect.height;
-                                        updateNode(data.id, { energy: clampEnergy(tt * maxBaseEnergy) });
-                                    };
-                                    const onUp = () => {
-                                        window.removeEventListener('pointermove', onMove);
-                                        window.removeEventListener('pointerup', onUp);
-                                        window.removeEventListener('pointercancel', onUp);
-                                    };
-                                    window.addEventListener('pointermove', onMove);
-                                    window.addEventListener('pointerup', onUp, { once: true });
-                                    window.addEventListener('pointercancel', onUp, { once: true });
-                                }}
-                                role="slider"
-                                aria-label="Energy"
-                                aria-valuemin={0}
-                                aria-valuemax={Math.round(maxBaseEnergy)}
-                                aria-valuenow={Math.round(baseEnergy)}
-                            >
-                                <EnergySvgLiquidGauge level={baseEnergy} />
-                                {Math.abs(effectiveEnergy - baseEnergy) >= 0.5 && (
-                                    <div
-                                        className={styles.energyLiquidGaugeMarker}
-                                        style={{ bottom: `${clampEnergy(effectiveEnergy)}%` }}
-                                        aria-hidden="true"
-                                    />
-                                )}
-                            </div>
+            <div className={styles.cardHeaderRow}>
+                <div className={styles.cardTitleWrap}>
+                    {isTask && (
+                        <div
+                            className={styles.statusBadge}
+                            title={status === 'done' ? 'Done' : status === 'in_progress' ? 'In Progress' : 'Queued'}
+                            style={{
+                                borderColor: energyColor,
+                                color: energyColor,
+                                boxShadow: `0 0 6px ${energyColor}`,
+                            }}
+                        >
+                            <span className={styles.statusBadgeText}>{statusLetter}</span>
                         </div>
                     )}
+                    {isEditing ? (
+                        <input
+                            className={styles.cardHeaderInput}
+                            value={data.title}
+                            onChange={(e) => updateNode(data.id, { title: e.target.value })}
+                            onBlur={() => setIsEditing(false)}
+                            onKeyDown={handleKeyDown}
+                            autoFocus
+                            onPointerDown={(e) => e.stopPropagation()}
+                        />
+                    ) : (
+                        <div
+                            className={styles.cardHeader}
+                            onDoubleClick={() => setIsEditing(true)}
+                            data-interactive="true"
+                            onPointerDown={(e) => {
+                                e.stopPropagation();
+                                if (e.pointerType === 'touch') {
+                                    titleTouchRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+                                }
+                            }}
+                            onPointerUp={(e) => {
+                                if (e.pointerType !== 'touch') return;
+                                const ref = titleTouchRef.current;
+                                if (!ref || ref.id !== e.pointerId) return;
+                                const dist = Math.hypot(e.clientX - ref.x, e.clientY - ref.y);
+                                titleTouchRef.current = null;
+                                if (dist < 8) setIsEditing(true);
+                            }}
+                            onPointerCancel={() => {
+                                titleTouchRef.current = null;
+                            }}
+                        >
+                            {data.title}
+                        </div>
+                    )}
+                </div>
+
+                <div className={styles.cardHeaderActions}>
+                    {/* Interactive Energy Indicator */}
+                    <div style={{ position: 'relative' }}>
+                        <div
+                            className={styles.energyIndicatorInteract}
+                            title={`Energy: ${Math.round(baseEnergy)} / ${Math.round(effectiveEnergy)}`}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setShowEnergySelector(!showEnergySelector);
+                            }}
+                            data-interactive="true"
+                            onPointerDown={(e) => e.stopPropagation()}
+                            style={{
+                                backgroundColor: energyColor,
+                                boxShadow: `0 0 8px ${energyColor}, 0 0 16px ${energyColor}`,
+                            }}
+                        />
+
+                        {showEnergySelector && (
+                            <div className={styles.energySelector} data-interactive="true" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
+                                <div className={styles.energyMiniValuesRow}>
+                                    <span className={styles.energyMiniValue} title="Собственная энергия" style={{ color: energyColor }}>
+                                        {Math.round(baseEnergy)}
+                                    </span>
+                                    <span className={styles.energyMiniDividerLine} aria-hidden="true" />
+                                    <span className={styles.energyMiniValue} title="Суммарная энергия">
+                                        {Math.round(effectiveEnergy)}
+                                    </span>
+                                </div>
+                                <div
+                                    className={styles.energyLiquidGauge}
+                                    onPointerDown={(e) => {
+                                        e.preventDefault();
+                                        const el = e.currentTarget;
+                                        const rect = el.getBoundingClientRect();
+                                        const t = (rect.bottom - e.clientY) / rect.height;
+                                        updateNode(data.id, { energy: clampEnergy(t * maxBaseEnergy) });
+
+                                        const onMove = (ev: PointerEvent) => {
+                                            const tt = (rect.bottom - ev.clientY) / rect.height;
+                                            updateNode(data.id, { energy: clampEnergy(tt * maxBaseEnergy) });
+                                        };
+                                        const onUp = () => {
+                                            window.removeEventListener('pointermove', onMove);
+                                            window.removeEventListener('pointerup', onUp);
+                                            window.removeEventListener('pointercancel', onUp);
+                                        };
+                                        window.addEventListener('pointermove', onMove);
+                                        window.addEventListener('pointerup', onUp, { once: true });
+                                        window.addEventListener('pointercancel', onUp, { once: true });
+                                    }}
+                                    role="slider"
+                                    aria-label="Energy"
+                                    aria-valuemin={0}
+                                    aria-valuemax={Math.round(maxBaseEnergy)}
+                                    aria-valuenow={Math.round(baseEnergy)}
+                                >
+                                    <EnergySvgLiquidGauge level={baseEnergy} />
+                                    {Math.abs(effectiveEnergy - baseEnergy) >= 0.5 && (
+                                        <div
+                                            className={styles.energyLiquidGaugeMarker}
+                                            style={{ bottom: `${clampEnergy(effectiveEnergy)}%` }}
+                                            aria-hidden="true"
+                                        />
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
 
             <div className={styles.cardMeta}>
                 <span className={styles.type}>{data.type}</span>
-                {/* Old energy tag removed from here */}
+                {isTask && (data.startDate || data.endDate) && (
+                    <div className={styles.dateRow}>
+                        {data.startDate && (
+                            <div className={styles.dateTag} title="Start Date">
+                                <span>S:</span> {data.startDate}
+                            </div>
+                        )}
+                        {data.endDate && (
+                            <div className={styles.dateTag} title="End Date">
+                                <span>E:</span> {data.endDate}
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
-
-            {isTask && (data.startDate || data.endDate) && (
-                <div className={styles.dateRow}>
-                    {data.startDate && (
-                        <div className={styles.dateTag} title="Start Date">
-                            <span>S:</span> {data.startDate}
-                        </div>
-                    )}
-                    {data.endDate && (
-                        <div className={styles.dateTag} title="End Date">
-                            <span>E:</span> {data.endDate}
-                        </div>
-                    )}
-                </div>
-            )}
         </div>
     );
 };
 
 const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
     const updateNode = useStore((state) => state.updateNode);
+    const monitoringMode = useStore((state) => state.monitoringMode);
     // NoteView is explicitly for "Dive in", so maybe we allow direct editing?
     // User requested "Double click for renaming".
     // Let's keep NoteView title as double-click, but Content as direct?
@@ -398,6 +420,7 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
 
     const [isEditingTitle, setIsEditingTitle] = React.useState(false);
     const titleTouchRef = useRef<{ id: number; x: number; y: number } | null>(null);
+    const [isDraggingProgress, setIsDraggingProgress] = React.useState(false);
     const [showEnergyPanel, setShowEnergyPanel] = React.useState(false);
     const effectiveEnergy = useStore((state) => state.effectiveEnergy[data.id] ?? data.energy);
     const baseEnergy = clampEnergy(Number.isFinite(data.energy) ? data.energy : 50);
@@ -411,6 +434,10 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
         return incoming;
     });
     const maxBaseEnergy = Math.max(0, 100 - incomingEnergy);
+    const isTask = data.type === 'task';
+    const status = data.status ?? ((data as { inWork?: boolean }).inWork ? 'in_progress' : 'queued');
+    const progress = clampProgress(typeof data.progress === 'number' && Number.isFinite(data.progress) ? data.progress : 0);
+    const shouldPulse = monitoringMode && isTask && status === 'in_progress';
 
     React.useEffect(() => {
         if (!showEnergyPanel) return;
@@ -443,9 +470,39 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
         window.addEventListener('pointercancel', onUp, { once: true });
     };
 
+    const setProgressFromClientX = (clientX: number, el: HTMLElement) => {
+        const rect = el.getBoundingClientRect();
+        const t = (clientX - rect.left) / rect.width;
+        const next = clampProgress(t * 100);
+        updateNode(data.id, { progress: next });
+    };
+
+    const startProgressDrag = (clientX: number, el: HTMLElement) => {
+        setIsDraggingProgress(true);
+        setProgressFromClientX(clientX, el);
+        const onMove = (ev: PointerEvent) => setProgressFromClientX(ev.clientX, el);
+        const onUp = () => {
+            window.removeEventListener('pointermove', onMove);
+            window.removeEventListener('pointerup', onUp);
+            window.removeEventListener('pointercancel', onUp);
+            setIsDraggingProgress(false);
+        };
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp, { once: true });
+        window.addEventListener('pointercancel', onUp, { once: true });
+    };
+
+    const handleProgressPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const el = e.currentTarget;
+        startProgressDrag(e.clientX, el);
+    };
+
+
     return (
         <div className={styles.noteDetailWrap} data-interactive="true" onPointerDown={(e) => e.stopPropagation()}>
-            <div className={styles.noteNode}>
+            <div className={`${styles.noteNode}${shouldPulse ? ` ${styles.monitorPulse}` : ''}`}>
                 <div className={styles.noteHeaderRow}>
                     <div className={styles.noteTitleWrap}>
                         {isEditingTitle ? (
@@ -524,11 +581,36 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
                 </div>
 
                 <div className={styles.noteStack}>
-                {/* Date Pickers (Only for Task) */}
+                {isTask && (
+                    <div className={styles.noteProgressRow}>
+                        <div
+                            className={styles.noteProgressTrack}
+                            style={{ '--progress-color': energyColor } as React.CSSProperties}
+                            onPointerDown={handleProgressPointerDown}
+                            role="slider"
+                            aria-label="Progress"
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={Math.round(progress)}
+                            data-interactive="true"
+                        >
+                            <div
+                                className={styles.noteProgressFill}
+                                style={{
+                                    width: `${progress}%`,
+                                    transition: isDraggingProgress ? 'none' : undefined,
+                                }}
+                            />
+                        </div>
+                        <div className={styles.noteProgressValue}>{Math.round(progress)}%</div>
+                    </div>
+                )}
+
+                {/* Date Pickers + Status (Only for Task) */}
                 {data.type === 'task' && (
-                    <div style={{ display: 'flex', gap: 8 }}>
-                        <div style={{ flex: 1 }}>
-                            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 4, paddingLeft: 2 }}>START</div>
+                    <div className={styles.taskMetaRow}>
+                        <div className={styles.taskMetaItem}>
+                            <span className={styles.taskMetaLabel}>Start</span>
                             <input
                                 type="date"
                                 className={styles.customDateInput}
@@ -537,8 +619,8 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
                                 onPointerDown={(e) => e.stopPropagation()}
                             />
                         </div>
-                        <div style={{ flex: 1 }}>
-                            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 4, paddingLeft: 2 }}>DUE</div>
+                        <div className={styles.taskMetaItem}>
+                            <span className={styles.taskMetaLabel}>Due</span>
                             <input
                                 type="date"
                                 className={styles.customDateInput}
@@ -546,6 +628,27 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
                                 onChange={(e) => updateNode(data.id, { endDate: e.target.value })}
                                 onPointerDown={(e) => e.stopPropagation()}
                             />
+                        </div>
+                        <div className={styles.taskMetaItem}>
+                            <span className={styles.taskMetaLabel}>Status</span>
+                            <div className={styles.statusSwitcher}>
+                                {[
+                                    { key: 'queued' as const, label: 'Queued' },
+                                    { key: 'in_progress' as const, label: 'In Progress' },
+                                    { key: 'done' as const, label: 'Done' },
+                                ].map((item) => (
+                                    <button
+                                        key={item.key}
+                                        type="button"
+                                        className={`${styles.statusOption}${status === item.key ? ` ${styles.statusOptionActive}` : ''}`}
+                                        onClick={() => updateNode(data.id, { status: item.key })}
+                                        data-interactive="true"
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        {item.label}
+                                    </button>
+                                ))}
+                            </div>
                         </div>
                     </div>
                 )}
