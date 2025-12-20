@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Atom, Hand, Moon, Sun, PenTool, Eraser, Highlighter, Type, X, Link2, Plus, Copy, Share2, Loader2, Monitor, Snowflake, Grid3x3, Eye, Paintbrush } from 'lucide-react';
+import { Activity, Atom, Hand, Moon, Sun, PenTool, Eraser, Highlighter, Type, X, Link2, Plus, Copy, Share2, Loader2, SlidersHorizontal, Snowflake, Grid3x3, Eye, Paintbrush } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import type { PenToolType } from '../../types';
 
@@ -99,7 +99,7 @@ const ControlButton: React.FC<ControlButtonProps> = ({ title, onClick, active, d
 };
 
 export const Controls: React.FC = () => {
-    const { physicsEnabled, togglePhysicsMode, moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, theme, toggleTheme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, snowEnabled, toggleSnow } = useStore();
+    const { physicsEnabled, togglePhysicsMode, moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, monitoringMode, toggleMonitoringMode, theme, toggleTheme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, snowEnabled, toggleSnow } = useStore();
 
     const controlsRootRef = useRef<HTMLDivElement | null>(null);
 
@@ -467,14 +467,6 @@ export const Controls: React.FC = () => {
                     0% { transform: scale(0.05); opacity: 0.65; }
                     100% { transform: scale(1); opacity: 0; }
                   }
-                  @keyframes controlsSubRowIn {
-                    0% { opacity: 0; transform: translateX(-50%) translateY(10px) scale(0.96); filter: blur(0.8px); }
-                    100% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); filter: blur(0); }
-                  }
-                  @keyframes controlsSubBtnIn {
-                    0% { opacity: 0; transform: translateY(12px) scale(0.92); }
-                    100% { opacity: 1; transform: translateY(0) scale(1); }
-                  }
 	            `}</style>
 
 	            {toastText && (
@@ -502,20 +494,22 @@ export const Controls: React.FC = () => {
 	            )}
 
 	                {/* Secondary stack for Pen menu (vertical from base button) */}
-	                {!focusMode && showToolMenu && (
+	                {!focusMode && (
 	                    <div
 	                        style={{
 	                            position: 'fixed',
 	                            left: `calc(50% + ${penAnchorOffset}px)`,
 	                            bottom: subStackBottom,
-	                            transform: 'translateX(-50%)',
+	                            transform: `translateX(-50%) translateY(${showToolMenu ? 0 : 10}px) scale(${showToolMenu ? 1 : 0.96})`,
 	                            zIndex: 1600,
 	                            display: 'flex',
 	                            flexDirection: 'column-reverse',
 	                            gap: BUTTON_GAP,
-	                            animation: 'controlsSubRowIn 180ms ease-out both',
 	                            transformOrigin: '50% 100%',
-	                            pointerEvents: 'auto',
+	                            pointerEvents: showToolMenu ? 'auto' : 'none',
+	                            opacity: showToolMenu ? 1 : 0,
+	                            filter: showToolMenu ? 'blur(0)' : 'blur(0.8px)',
+	                            transition: 'opacity 180ms ease, transform 180ms ease, filter 180ms ease',
 	                        }}
 	                    >
                         {[
@@ -548,7 +542,15 @@ export const Controls: React.FC = () => {
                                 child: <X size={18} />,
                             },
 	                        ].map((b, idx) => (
-	                            <div key={b.key} style={{ animation: 'controlsSubBtnIn 220ms ease-out both', animationDelay: `${idx * 35}ms` }}>
+	                            <div
+                                    key={b.key}
+                                    style={{
+                                        opacity: showToolMenu ? 1 : 0,
+                                        transform: `translateY(${showToolMenu ? 0 : 10}px) scale(${showToolMenu ? 1 : 0.92})`,
+                                        transition: 'opacity 180ms ease, transform 180ms ease',
+                                        transitionDelay: showToolMenu ? `${idx * 35}ms` : '0ms',
+                                    }}
+                                >
 	                                <ControlButton
 	                                    onClick={b.onClick}
 	                                    title={b.title}
@@ -564,20 +566,22 @@ export const Controls: React.FC = () => {
 	                )}
 
                 {/* Secondary stack for Share menu (vertical from base button) */}
-                {!focusMode && showShareMenu && (
+                {!focusMode && (
 	                    <div
 	                        style={{
 	                            position: 'fixed',
 	                            left: `calc(50% + ${shareAnchorOffset}px)`,
 	                            bottom: subStackBottom,
-	                            transform: 'translateX(-50%)',
+	                            transform: `translateX(-50%) translateY(${showShareMenu ? 0 : 10}px) scale(${showShareMenu ? 1 : 0.96})`,
 	                            zIndex: 1600,
 	                            display: 'flex',
 	                            flexDirection: 'column-reverse',
 	                            gap: BUTTON_GAP,
-	                            animation: 'controlsSubRowIn 180ms ease-out both',
 	                            transformOrigin: '50% 100%',
-	                            pointerEvents: 'auto',
+	                            pointerEvents: showShareMenu ? 'auto' : 'none',
+	                            opacity: showShareMenu ? 1 : 0,
+	                            filter: showShareMenu ? 'blur(0)' : 'blur(0.8px)',
+	                            transition: 'opacity 180ms ease, transform 180ms ease, filter 180ms ease',
 	                        }}
 	                    >
                         {[
@@ -610,7 +614,15 @@ export const Controls: React.FC = () => {
                                 child: <X size={18} />,
                             },
                         ].map((b, idx) => (
-                            <div key={b.key} style={{ animation: 'controlsSubBtnIn 220ms ease-out both', animationDelay: `${idx * 35}ms` }}>
+                            <div
+                                key={b.key}
+                                style={{
+                                    opacity: showShareMenu ? 1 : 0,
+                                    transform: `translateY(${showShareMenu ? 0 : 10}px) scale(${showShareMenu ? 1 : 0.92})`,
+                                    transition: 'opacity 180ms ease, transform 180ms ease',
+                                    transitionDelay: showShareMenu ? `${idx * 35}ms` : '0ms',
+                                }}
+                            >
                                 <ControlButton
                                     onClick={b.onClick}
                                     title={b.title}
@@ -626,20 +638,22 @@ export const Controls: React.FC = () => {
                 )}
 
                 {/* Secondary stack for Display menu (Theme + Snow) */}
-                {!focusMode && showDisplayMenu && (
+                {!focusMode && (
                     <div
                         style={{
                             position: 'fixed',
                             left: `calc(50% + ${displayAnchorOffset}px)`,
                             bottom: subStackBottom,
-                            transform: 'translateX(-50%)',
+                            transform: `translateX(-50%) translateY(${showDisplayMenu ? 0 : 10}px) scale(${showDisplayMenu ? 1 : 0.96})`,
                             zIndex: 1600,
                             display: 'flex',
                             flexDirection: 'column-reverse',
                             gap: BUTTON_GAP,
-                            animation: 'controlsSubRowIn 180ms ease-out both',
                             transformOrigin: '50% 100%',
-                            pointerEvents: 'auto',
+                            pointerEvents: showDisplayMenu ? 'auto' : 'none',
+                            opacity: showDisplayMenu ? 1 : 0,
+                            filter: showDisplayMenu ? 'blur(0)' : 'blur(0.8px)',
+                            transition: 'opacity 180ms ease, transform 180ms ease, filter 180ms ease',
                         }}
                     >
                         {[
@@ -658,7 +672,15 @@ export const Controls: React.FC = () => {
                                 child: <Snowflake size={18} />,
                             },
                         ].map((b, idx) => (
-                            <div key={b.key} style={{ animation: 'controlsSubBtnIn 220ms ease-out both', animationDelay: `${idx * 35}ms` }}>
+                            <div
+                                key={b.key}
+                                style={{
+                                    opacity: showDisplayMenu ? 1 : 0,
+                                    transform: `translateY(${showDisplayMenu ? 0 : 10}px) scale(${showDisplayMenu ? 1 : 0.92})`,
+                                    transition: 'opacity 180ms ease, transform 180ms ease',
+                                    transitionDelay: showDisplayMenu ? `${idx * 35}ms` : '0ms',
+                                }}
+                            >
                                 <ControlButton
                                     onClick={b.onClick}
                                     title={b.title}
@@ -674,20 +696,22 @@ export const Controls: React.FC = () => {
                 )}
 
                 {/* Secondary stack for Mode menu (Physics + Grid + Focus) */}
-                {!focusMode && showModeMenu && (
+                {!focusMode && (
                     <div
                         style={{
                             position: 'fixed',
                             left: `calc(50% + ${modeAnchorOffset}px)`,
                             bottom: subStackBottom,
-                            transform: 'translateX(-50%)',
+                            transform: `translateX(-50%) translateY(${showModeMenu ? 0 : 10}px) scale(${showModeMenu ? 1 : 0.96})`,
                             zIndex: 1600,
                             display: 'flex',
                             flexDirection: 'column-reverse',
                             gap: BUTTON_GAP,
-                            animation: 'controlsSubRowIn 180ms ease-out both',
                             transformOrigin: '50% 100%',
-                            pointerEvents: 'auto',
+                            pointerEvents: showModeMenu ? 'auto' : 'none',
+                            opacity: showModeMenu ? 1 : 0,
+                            filter: showModeMenu ? 'blur(0)' : 'blur(0.8px)',
+                            transition: 'opacity 180ms ease, transform 180ms ease, filter 180ms ease',
                         }}
                     >
                         {[
@@ -712,8 +736,23 @@ export const Controls: React.FC = () => {
                                 active: focusMode,
                                 child: <Eye size={18} />,
                             },
+                            {
+                                key: 'monitoring',
+                                title: monitoringMode ? 'Disable Monitoring' : 'Enable Monitoring',
+                                onClick: toggleMonitoringMode,
+                                active: monitoringMode,
+                                child: <Activity size={18} />,
+                            },
                         ].map((b, idx) => (
-                            <div key={b.key} style={{ animation: 'controlsSubBtnIn 220ms ease-out both', animationDelay: `${idx * 35}ms` }}>
+                            <div
+                                key={b.key}
+                                style={{
+                                    opacity: showModeMenu ? 1 : 0,
+                                    transform: `translateY(${showModeMenu ? 0 : 10}px) scale(${showModeMenu ? 1 : 0.92})`,
+                                    transition: 'opacity 180ms ease, transform 180ms ease',
+                                    transitionDelay: showModeMenu ? `${idx * 35}ms` : '0ms',
+                                }}
+                            >
                                 <ControlButton
                                     onClick={b.onClick}
                                     title={b.title}
@@ -759,9 +798,9 @@ export const Controls: React.FC = () => {
                             <ControlButton
                                 onClick={handleModeClick}
                                 title="Modes"
-                                active={showModeMenu || physicsEnabled || snapMode || focusMode}
+                                active={showModeMenu || physicsEnabled || snapMode || focusMode || monitoringMode}
                             >
-                                <Monitor size={18} />
+                                <SlidersHorizontal size={18} />
                             </ControlButton>
 
 		                    <ControlButton

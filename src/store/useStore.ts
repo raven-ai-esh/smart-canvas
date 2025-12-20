@@ -13,6 +13,7 @@ type UndoSnapshot = {
 };
 
 const ts = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
+const clampProgress = (x: unknown) => Math.min(100, Math.max(0, Number.isFinite(Number(x)) ? Number(x) : 0));
 const tombstoneFor = (now: number, updatedAt?: number) => Math.max(now, ts(updatedAt) + 1);
 
 interface AppState {
@@ -40,6 +41,8 @@ interface AppState {
     toggleSnapMode: () => void;
     focusMode: boolean;
     toggleFocusMode: () => void;
+    monitoringMode: boolean;
+    toggleMonitoringMode: () => void;
 
     me: { id: string; email: string; name: string; avatarSeed: string; verified: boolean } | null;
     setMe: (me: AppState['me']) => void;
@@ -192,6 +195,8 @@ export const useStore = create<AppState>()(
             toggleSnapMode: () => set((state) => ({ snapMode: !state.snapMode })),
             focusMode: false,
             toggleFocusMode: () => set((state) => ({ focusMode: !state.focusMode })),
+            monitoringMode: false,
+            toggleMonitoringMode: () => set((state) => ({ monitoringMode: !state.monitoringMode })),
 
             me: null,
             setMe: (me) => set({ me }),
@@ -255,8 +260,15 @@ export const useStore = create<AppState>()(
 
             addNode: (node) => set((state) => {
                 const now = Date.now();
+                const legacyInWork = (node as { inWork?: boolean }).inWork;
+                const status = node.type === 'task'
+                    ? (node.status ?? (legacyInWork ? 'in_progress' : 'queued'))
+                    : node.status;
+                const progress = node.type === 'task' ? clampProgress(node.progress ?? 0) : undefined;
                 const normalized: NodeData = {
                     ...node,
+                    status,
+                    progress,
                     createdAt: node.createdAt ?? now,
                     updatedAt: node.updatedAt ?? now,
                 };
@@ -280,6 +292,23 @@ export const useStore = create<AppState>()(
                 const nextData = { ...data } as Partial<NodeData>;
                 if (Object.prototype.hasOwnProperty.call(nextData, 'energy')) {
                     nextData.energy = clampEnergy(Number(nextData.energy));
+                }
+                if (Object.prototype.hasOwnProperty.call(nextData, 'progress')) {
+                    nextData.progress = clampProgress(nextData.progress);
+                }
+                if (Object.prototype.hasOwnProperty.call(nextData, 'type')) {
+                    const existing = state.nodes.find((node) => node.id === id);
+                    const legacyInWork = (existing as { inWork?: boolean } | undefined)?.inWork;
+                    if (nextData.type === 'task') {
+                        const status = nextData.status ?? existing?.status ?? (legacyInWork ? 'in_progress' : 'queued');
+                        nextData.status = status;
+                        const progress = nextData.progress ?? existing?.progress ?? 0;
+                        nextData.progress = clampProgress(progress);
+                    }
+                    if (nextData.type === 'idea') {
+                        nextData.status = undefined;
+                        nextData.progress = undefined;
+                    }
                 }
                 const nodes = state.nodes.map((node) => (node.id === id ? { ...node, ...nextData, updatedAt: now } : node));
                 const shouldRecomputeEnergy = Object.prototype.hasOwnProperty.call(nextData, 'energy');

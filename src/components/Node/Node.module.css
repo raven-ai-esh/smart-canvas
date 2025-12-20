@@ -113,6 +113,29 @@
     gap: 8px;
 }
 
+.cardHeaderRow {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    width: 100%;
+    gap: 8px;
+}
+
+.cardTitleWrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+}
+
+.cardHeaderActions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+
 .cardNode:hover {
     border-color: #FF9F1C;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 12px rgba(255, 159, 28, 0.3);
@@ -137,6 +160,8 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    min-width: 0;
+    flex: 1;
 }
 
 .cardHeaderInput {
@@ -150,11 +175,33 @@
     outline: none;
     padding: 0;
     font-family: inherit;
+    min-width: 0;
+    flex: 1;
 }
 
 .cardHeaderInput:focus {
     background: rgba(255, 255, 255, 0.05);
     border-radius: 4px;
+}
+
+.statusBadge {
+    width: 15px;
+    height: 15px;
+    border-radius: 5px;
+    border: 1px solid var(--border-strong);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.04);
+    font-weight: 700;
+    font-size: 9px;
+    text-transform: uppercase;
+    flex: 0 0 auto;
+}
+
+.statusBadgeText {
+    line-height: 1;
+    margin-top: -0.5px;
 }
 
 .cardMeta {
@@ -213,9 +260,8 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    margin-bottom: 16px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    margin-bottom: 10px;
+    padding-bottom: 0;
 }
 
 .noteHeaderActions {
@@ -250,6 +296,128 @@
     flex: 1;
     min-height: 0;
 }
+
+.taskMetaRow {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.taskMetaItem {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+
+.taskMetaLabel {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.statusSwitcher {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+}
+
+.statusOption {
+    padding: 5px 7px;
+    font-size: 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle);
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: var(--transition-smooth);
+    text-align: center;
+    white-space: nowrap;
+}
+
+.statusOption:hover {
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.statusOptionActive {
+    color: var(--text-primary);
+    border-color: rgba(163, 190, 140, 0.35);
+    background: rgba(163, 190, 140, 0.16);
+}
+
+.cardProgressRing {
+    position: relative;
+    border-color: transparent;
+}
+
+.cardProgressRing::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 2px;
+    background: conic-gradient(
+        from -90deg,
+        var(--progress-color, var(--accent-task)) calc(var(--card-progress, 0) * 1%),
+        var(--progress-track-color, rgba(255, 255, 255, 0.16)) 0
+    );
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    mask-composite: exclude;
+    pointer-events: none;
+}
+
+.cardProgressRing:hover::after {
+    padding: 3px;
+}
+
+:global(body.light-theme) .cardProgressRing::after {
+    --progress-track-color: rgba(0, 0, 0, 0.14);
+}
+
+.noteProgressRow {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 6px 0 12px;
+}
+
+.noteProgressTrack {
+    flex: 1;
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border-subtle);
+    overflow: hidden;
+    position: relative;
+    cursor: pointer;
+    touch-action: none;
+}
+
+.noteProgressFill {
+    height: 100%;
+    width: 0;
+    background: var(--progress-color, var(--accent-task));
+    transition: width 0.2s ease;
+}
+
+.noteProgressValue {
+    font-size: 12px;
+    color: var(--text-primary);
+    min-width: 46px;
+    text-align: right;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+:global(body.light-theme) .noteProgressTrack {
+    background: rgba(0, 0, 0, 0.08);
+}
+
 
 .noteTitle {
     font-size: 20px;
@@ -559,33 +727,78 @@
     /* backdrop-filter: blur(12px); Removed for consistency with theme switching */
     transition: var(--transition-smooth);
     position: relative;
-    /* Task Accent indicator on left */
-    border-left: 3px solid var(--accent-task);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.monitorPulse {
+    position: relative;
+    --monitor-pulse-color: rgba(163, 190, 140, 0.5);
+}
+
+.monitorPulse::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: inherit;
+    background: transparent;
+    opacity: 0;
+    pointer-events: none;
+    animation: monitorPulseGlow 2.3s ease-in-out infinite;
+}
+
+:global(body.light-theme) .monitorPulse {
+    --monitor-pulse-color: rgba(46, 52, 64, 0.5);
+}
+
+@keyframes monitorPulseGlow {
+    0% {
+        opacity: 0;
+        transform: scale(1);
+        box-shadow: 0 0 0 0 transparent;
+    }
+    50% {
+        opacity: 0.6;
+        transform: scale(1.01);
+        box-shadow: 0 0 12px 0 var(--monitor-pulse-color);
+    }
+    100% {
+        opacity: 0;
+        transform: scale(1.015);
+        box-shadow: 0 0 0 0 transparent;
+    }
 }
 
 .taskNode:hover {
     transform: translateY(-2px);
-    border-color: var(--accent-task);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
 }
 
 .dateRow {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     font-size: 11px;
-    color: var(--text-dim);
-    margin-top: 4px;
+    color: var(--text-secondary);
+    margin-top: 0;
+    align-items: center;
 }
 
 .dateTag {
     display: flex;
     align-items: center;
     gap: 4px;
-    background: var(--border-subtle);
+    background: rgba(255, 255, 255, 0.08);
     padding: 2px 6px;
     border-radius: 4px;
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border-strong);
+}
+
+:global(body.light-theme) .dateRow {
+    color: var(--text-dim);
+}
+
+:global(body.light-theme) .dateTag {
+    background: var(--border-subtle);
+    border-color: var(--border-subtle);
 }
 
 .dateTag.overdue {
