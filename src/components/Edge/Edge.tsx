@@ -230,7 +230,8 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
         return 0.1;
     };
 
-    const sourceStatus = sourceNode.status ?? ((sourceNode as { inWork?: boolean }).inWork ? 'in_progress' : 'queued');
+    const sourceProgress = Math.min(100, Math.max(0, Number.isFinite(sourceNode.progress as number) ? (sourceNode.progress as number) : 0));
+    const sourceStatus = sourceProgress >= 100 ? 'done' : sourceProgress <= 0 ? 'queued' : 'in_progress';
     const isMonitoringEdge = monitoringMode && sourceNode.type === 'task' && sourceStatus === 'in_progress';
     const monitorColor = energyToColor(sourceEnergy);
 

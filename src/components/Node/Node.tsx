@@ -14,8 +14,8 @@ const GraphView: React.FC<{ data: NodeData }> = ({ data }) => (
     <div className={`${styles.graphNode} ${data.type === 'task' ? styles.task : ''}`} />
 );
 
-// Helper to get distance to center
-const getDistToCenter = (x: number, y: number, canvas: { x: number, y: number, scale: number }) => {
+// Helper to get delta to center
+const getDeltaToCenter = (x: number, y: number, canvas: { x: number, y: number, scale: number }) => {
     // Current Viewport Center in Screen Coords
     const screenCX = window.innerWidth / 2;
     const screenCY = window.innerHeight / 2;
@@ -24,11 +24,16 @@ const getDistToCenter = (x: number, y: number, canvas: { x: number, y: number, s
     const worldCX = (screenCX - canvas.x) / canvas.scale;
     const worldCY = (screenCY - canvas.y) / canvas.scale;
 
-    return Math.sqrt(Math.pow(x - worldCX, 2) + Math.pow(y - worldCY, 2));
+    return { dx: x - worldCX, dy: y - worldCY };
 };
 
 type TextSel = { start: number; end: number };
 const clampProgress = (value: number) => Math.min(100, Math.max(0, value));
+const statusFromProgress = (progress: number) => {
+    if (progress >= 100) return 'done';
+    if (progress <= 0) return 'queued';
+    return 'in_progress';
+};
 
 const NoteContentEditor: React.FC<{
     nodeId: string;
@@ -252,9 +257,9 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
     }, [showEnergySelector]);
 
     const isTask = data.type === 'task';
-    const status = data.status ?? ((data as { inWork?: boolean }).inWork ? 'in_progress' : 'queued');
-    const statusLetter = status === 'done' ? 'D' : status === 'in_progress' ? 'P' : 'Q';
     const progress = clampProgress(typeof data.progress === 'number' && Number.isFinite(data.progress) ? data.progress : 0);
+    const status = statusFromProgress(progress);
+    const statusLetter = status === 'done' ? 'D' : status === 'in_progress' ? 'P' : 'Q';
     const shouldPulse = monitoringMode && isTask && status === 'in_progress';
     const cardClassName = `${isTask ? styles.taskNode : styles.cardNode}${shouldPulse ? ` ${styles.monitorPulse}` : ''}${isTask ? ` ${styles.cardProgressRing}` : ''}`;
     const cardStyle = isTask ? ({ '--card-progress': progress, '--progress-color': energyColor } as React.CSSProperties) : undefined;
@@ -435,8 +440,8 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
     });
     const maxBaseEnergy = Math.max(0, 100 - incomingEnergy);
     const isTask = data.type === 'task';
-    const status = data.status ?? ((data as { inWork?: boolean }).inWork ? 'in_progress' : 'queued');
     const progress = clampProgress(typeof data.progress === 'number' && Number.isFinite(data.progress) ? data.progress : 0);
+    const status = statusFromProgress(progress);
     const shouldPulse = monitoringMode && isTask && status === 'in_progress';
 
     React.useEffect(() => {
@@ -631,23 +636,8 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
                         </div>
                         <div className={styles.taskMetaItem}>
                             <span className={styles.taskMetaLabel}>Status</span>
-                            <div className={styles.statusSwitcher}>
-                                {[
-                                    { key: 'queued' as const, label: 'Queued' },
-                                    { key: 'in_progress' as const, label: 'In Progress' },
-                                    { key: 'done' as const, label: 'Done' },
-                                ].map((item) => (
-                                    <button
-                                        key={item.key}
-                                        type="button"
-                                        className={`${styles.statusOption}${status === item.key ? ` ${styles.statusOptionActive}` : ''}`}
-                                        onClick={() => updateNode(data.id, { status: item.key })}
-                                        data-interactive="true"
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        {item.label}
-                                    </button>
-                                ))}
+                            <div className={styles.taskMetaValue}>
+                                {status === 'done' ? 'Done' : status === 'in_progress' ? 'In Progress' : 'Queued'}
                             </div>
                         </div>
                     </div>
@@ -707,8 +697,13 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
     // 1. Scale is high enough (> 1.1)
     // 2. Node is close to center (e.g. within 400px radius in world space, roughly)
 
-    const dist = getDistToCenter(data.x, data.y, canvas);
-    const isFocusedInViewport = dist < 250;
+    const { dx, dy } = getDeltaToCenter(data.x, data.y, canvas);
+    const focusRadiusX = 180 / Math.max(0.0001, scale);
+    const focusRadiusY = focusRadiusX * 0.7;
+    const focusNorm = (dx * dx) / (focusRadiusX * focusRadiusX)
+        + (dy * dy) / (focusRadiusY * focusRadiusY);
+    const focusScore = Math.max(0, 1 - Math.min(1, focusNorm));
+    const isFocusedInViewport = focusNorm < 1;
 
     // Determine Active View
     let activeView: 'graph' | 'card' | 'note' = 'card';
@@ -748,6 +743,7 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
     const graphClass = `${styles.viewContainer} ${isGraph ? styles.visible : styles.hidden}`;
     const cardClass = `${styles.viewContainer} ${isCard ? styles.visible : styles.hidden}`;
     const noteClass = `${styles.viewContainer} ${isNote ? styles.visible : styles.hidden}`;
+    const noteFocusZ = isNote ? Math.round(520 + focusScore * 180) : undefined;
 
     // Valid Wrapper Class Logic
     const neighbors = useStore((state) => state.neighbors);
@@ -760,6 +756,7 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
     const isTarget = connectionTargetId === data.id;
 
     let wrapperClass = `${styles.nodeWrapper} ${isTarget ? styles.targetGlow : ''}`;
+    if (isNote) wrapperClass += ` ${styles.noteFocus}`;
 
     const hasAnySelection = !!selectedNode || selectedNodes.length > 0;
     if (isSelected) {
@@ -778,6 +775,7 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
             style={{
                 left: data.x,
                 top: data.y,
+                ...(noteFocusZ !== undefined ? ({ '--note-focus-z': noteFocusZ } as React.CSSProperties) : {}),
             }}
             data-node-bounds="true"
             data-node-id={data.id}

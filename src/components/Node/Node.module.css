@@ -318,35 +318,9 @@
     letter-spacing: 0.06em;
 }
 
-.statusSwitcher {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 6px;
-}
-
-.statusOption {
-    padding: 5px 7px;
-    font-size: 10px;
-    border-radius: 8px;
-    border: 1px solid var(--border-subtle);
-    background: transparent;
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: var(--transition-smooth);
-    text-align: center;
-    white-space: nowrap;
-}
-
-.statusOption:hover {
+.taskMetaValue {
+    font-size: 11px;
     color: var(--text-primary);
-    border-color: var(--border-strong);
-    background: rgba(255, 255, 255, 0.05);
-}
-
-.statusOptionActive {
-    color: var(--text-primary);
-    border-color: rgba(163, 190, 140, 0.35);
-    background: rgba(163, 190, 140, 0.16);
 }
 
 .cardProgressRing {
@@ -370,6 +344,7 @@
     mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
     mask-composite: exclude;
     pointer-events: none;
+    z-index: 1;
 }
 
 .cardProgressRing:hover::after {
@@ -698,6 +673,10 @@
     z-index: 60;
 }
 
+.noteFocus {
+    z-index: var(--note-focus-z, 520) !important;
+}
+
 /* Children Styling for Target Glow */
 .targetGlow .cardNode,
 .targetGlow .graphNode,
@@ -735,7 +714,7 @@
     --monitor-pulse-color: rgba(163, 190, 140, 0.5);
 }
 
-.monitorPulse::after {
+.monitorPulse::before {
     content: '';
     position: absolute;
     inset: -4px;
@@ -744,6 +723,7 @@
     opacity: 0;
     pointer-events: none;
     animation: monitorPulseGlow 2.3s ease-in-out infinite;
+    z-index: 0;
 }
 
 :global(body.light-theme) .monitorPulse {

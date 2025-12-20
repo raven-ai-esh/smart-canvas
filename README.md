@@ -1,73 +1,109 @@
-# React + TypeScript + Vite
+# Release Notes
+- Session ownership and saving with a top-left Save bar, session name display, and a sessions side panel (new, copy, share, delete).
+- Monitoring mode for tasks: in-progress cards pulse and outgoing links animate in the task energy color.
+- Task progress UI: status badges, percent progress, and a circular progress ring on the card border.
+- Grid snapping, focus mode, and improved control grouping for modes and display.
+- Light theme canvas tuning and snow overlay adjustments.
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+# Living Canvas (Smart Tracker)
+A spatial thinking canvas for tasks and ideas. You place nodes in an infinite space, connect them, and let energy and structure emerge. The project combines a realtime canvas frontend with a session-based backend API and WebSocket sync.
 
-Currently, two official plugins are available:
+## Core Concepts
+- Nodes: `idea` and `task` types with energy, clarity, and spatial position.
+- Edges: directed links that propagate energy from source to target.
+- Views: Graph, Card, and Note (details) views for different zoom levels.
+- Sessions: every canvas state lives in a session that can be temporary or saved to an account.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Features
+- Infinite zoomable canvas with pan, selection, and multi-node operations.
+- Task cards with status (`queued`, `in_progress`, `done`), start/end dates, and progress ring.
+- Realtime sync via WebSocket with server-side state merge.
+- Pen mode with pen, eraser, highlighter and touch/stylus optimizations.
+- Text boxes for free-form notes.
+- Energy propagation and color mapping across edges.
+- Modes:
+  - Move mode
+  - Grid snapping
+  - Physics
+  - Focus
+  - Monitoring
+- Display:
+  - Light/dark themes
+  - Snow overlay
 
-## React Compiler
+## Sessions and Ownership
+- Unsaved sessions are temporary and expire after a TTL (default 7 days).
+- Saved sessions are tied to the authenticated user and never expire.
+- Side panel actions:
+  - New session (opens a new tab)
+  - Copy session (creates a new unsaved session with full content)
+  - Share (copies a direct link)
+  - Delete (blocked for the default session)
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Auth
+- Email/password with verification.
+- OAuth providers: Google, Yandex, Telegram (when configured).
 
-## Expanding the ESLint configuration
+## Tech Stack
+- Frontend: React 19 + Vite + Zustand
+- Backend: Express + WebSocket (`ws`)
+- Database: Postgres
+- Docker + Nginx for local and deployment
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Architecture Overview
+- `app` container serves the static frontend with Nginx.
+- `api` container hosts REST and WebSocket endpoints.
+- `db` container stores sessions, users, and oauth accounts.
+- WebSocket path: `/ws`
+- API path: `/api/*`
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## Local Development
+### Using Docker (recommended)
+```bash
+docker compose up -d --build
+```
+- App: http://localhost:8080
+- API (internal): http://api:8787
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+### Without Docker
+1) Start Postgres locally and set `DATABASE_URL`.
+2) Start API:
+```bash
+npm run dev:api
+```
+3) Start frontend:
+```bash
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Environment Variables
+Create `.env` (see `.env.example`) and configure:
+- `DATABASE_URL` - Postgres connection string
+- `JWT_SECRET` - auth token secret
+- `AUTH_COOKIE_NAME` - auth cookie name
+- `COOKIE_SECURE` - set `false` for localhost, `true` for HTTPS
+- `APP_ORIGIN` - app base URL (ex: https://canvas.example.com)
+- `CORS_ORIGIN` - CORS setting (`true`, `false`, or origin)
+- `DEFAULT_SESSION_ID` - pinned default session id
+- `TEMP_SESSION_TTL_DAYS` - TTL for temporary sessions (default 7)
+- `SMTP_URL`, `MAIL_FROM` - email verification
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+- `YANDEX_CLIENT_ID`, `YANDEX_CLIENT_SECRET`
+- `TELEGRAM_BOT_USERNAME`, `TELEGRAM_BOT_TOKEN`
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## API Notes
+- `GET /api/sessions/:id` - fetch session state + meta
+- `PUT /api/sessions/:id` - merge updates
+- `POST /api/sessions/:id/save` - save or rename session
+- `GET /api/sessions/mine` - list saved sessions for current user
+- `DELETE /api/sessions/:id` - delete owned session
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+## Troubleshooting
+- OAuth `bad_oauth_state` on localhost: set `COOKIE_SECURE=false` in `.env`.
+- WebSocket errors: ensure the app is running via Docker and `/ws` is reachable.
+
+## Scripts
+- `npm run dev` - frontend dev server
+- `npm run dev:api` - run API locally
+- `npm run build` - build frontend
+- `npm run lint` - lint

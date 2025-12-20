@@ -40,13 +40,16 @@ export function energyToColor(energy0to100: number) {
 export function computeEffectiveEnergy(
   nodes: NodeData[],
   edges: EdgeData[],
-  opts?: { maxIterations?: number },
+  opts?: { maxIterations?: number; blockDoneTasks?: boolean },
 ): Record<string, number> {
   const maxIterations = opts?.maxIterations ?? 20;
+  const blockDoneTasks = !!opts?.blockDoneTasks;
 
   const baseById: Record<string, number> = {};
+  const byId: Record<string, NodeData> = {};
   nodes.forEach((n) => {
     baseById[n.id] = clampEnergy(Number.isFinite(n.energy) ? n.energy : 50);
+    byId[n.id] = n;
   });
 
   // Start from base energy.
@@ -61,6 +64,13 @@ export function computeEffectiveEnergy(
       let incoming = 0;
       for (const edge of edges) {
         if (edge.target !== node.id) continue;
+        if (blockDoneTasks) {
+          const srcNode = byId[edge.source];
+          if (srcNode?.type === 'task') {
+            const progress = typeof srcNode.progress === 'number' && Number.isFinite(srcNode.progress) ? srcNode.progress : 0;
+            if (progress >= 100 || srcNode.status === 'done') continue;
+          }
+        }
         incoming += relu(effective[edge.source] ?? baseById[edge.source] ?? 0);
       }
       const base = baseById[node.id] ?? 0;

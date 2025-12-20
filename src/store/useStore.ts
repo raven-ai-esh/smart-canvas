@@ -14,6 +14,18 @@ type UndoSnapshot = {
 
 const ts = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
 const clampProgress = (x: unknown) => Math.min(100, Math.max(0, Number.isFinite(Number(x)) ? Number(x) : 0));
+const statusFromProgress = (progress: number) => {
+    if (progress >= 100) return 'done' as const;
+    if (progress <= 0) return 'queued' as const;
+    return 'in_progress' as const;
+};
+const progressFromStatus = (status?: NodeData['status'], legacyInWork?: boolean) => {
+    if (status === 'done') return 100;
+    if (status === 'in_progress') return 50;
+    if (status === 'queued') return 0;
+    if (legacyInWork) return 50;
+    return 0;
+};
 const tombstoneFor = (now: number, updatedAt?: number) => Math.max(now, ts(updatedAt) + 1);
 
 interface AppState {
@@ -158,6 +170,11 @@ const normalizeEnergies = (nodes: NodeData[], edges: EdgeData[], opts?: { maxIte
     return { nodes: working, effectiveEnergy: effective };
 };
 
+const effectiveForMode = (nodes: NodeData[], edges: EdgeData[], monitoringMode: boolean, fallback?: Record<string, number>) => {
+    if (monitoringMode) return computeEffectiveEnergy(nodes, edges, { blockDoneTasks: true });
+    return fallback ?? computeEffectiveEnergy(nodes, edges);
+};
+
 export const useStore = create<AppState>()(
     persist(
         (set, get) => ({
@@ -215,7 +232,14 @@ export const useStore = create<AppState>()(
             focusMode: false,
             toggleFocusMode: () => set((state) => ({ focusMode: !state.focusMode })),
             monitoringMode: false,
-            toggleMonitoringMode: () => set((state) => ({ monitoringMode: !state.monitoringMode })),
+            toggleMonitoringMode: () =>
+                set((state) => {
+                    const next = !state.monitoringMode;
+                    return {
+                        monitoringMode: next,
+                        effectiveEnergy: effectiveForMode(state.nodes, state.edges, next, state.effectiveEnergy),
+                    };
+                }),
 
             me: null,
             setMe: (me) => set({ me }),
@@ -248,7 +272,7 @@ export const useStore = create<AppState>()(
 	                    neighbors: {},
 	                    connectionTargetId: null,
 	                    editingTextBoxId: null,
-	                    effectiveEnergy: computeEffectiveEnergy(prev.nodes, prev.edges),
+	                    effectiveEnergy: effectiveForMode(prev.nodes, prev.edges, state.monitoringMode),
 	                };
 	            }),
 	            redo: () => set((state) => {
@@ -273,17 +297,17 @@ export const useStore = create<AppState>()(
 	                    neighbors: {},
 	                    connectionTargetId: null,
 	                    editingTextBoxId: null,
-	                    effectiveEnergy: computeEffectiveEnergy(next.nodes, next.edges),
+	                    effectiveEnergy: effectiveForMode(next.nodes, next.edges, state.monitoringMode),
 	                };
 	            }),
 
             addNode: (node) => set((state) => {
                 const now = Date.now();
                 const legacyInWork = (node as { inWork?: boolean }).inWork;
-                const status = node.type === 'task'
-                    ? (node.status ?? (legacyInWork ? 'in_progress' : 'queued'))
-                    : node.status;
-                const progress = node.type === 'task' ? clampProgress(node.progress ?? 0) : undefined;
+                const progress = node.type === 'task'
+                    ? clampProgress(node.progress ?? progressFromStatus(node.status, legacyInWork))
+                    : undefined;
+                const status = node.type === 'task' ? statusFromProgress(progress ?? 0) : node.status;
                 const normalized: NodeData = {
                     ...node,
                     status,
@@ -298,11 +322,12 @@ export const useStore = create<AppState>()(
                 };
                 delete tombstones.nodes[normalized.id];
                 const normalizedEnergy = normalizeEnergies(nodes, state.edges);
+                const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, state.edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
                 return {
                     ...pushHistoryReducer(state),
                     nodes: normalizedEnergy.nodes,
                     tombstones,
-                    effectiveEnergy: normalizedEnergy.effectiveEnergy,
+                    effectiveEnergy,
                 };
             }),
 
@@ -315,25 +340,41 @@ export const useStore = create<AppState>()(
                 if (Object.prototype.hasOwnProperty.call(nextData, 'progress')) {
                     nextData.progress = clampProgress(nextData.progress);
                 }
+                const existing = state.nodes.find((node) => node.id === id);
+                const legacyInWork = (existing as { inWork?: boolean } | undefined)?.inWork;
                 if (Object.prototype.hasOwnProperty.call(nextData, 'type')) {
-                    const existing = state.nodes.find((node) => node.id === id);
-                    const legacyInWork = (existing as { inWork?: boolean } | undefined)?.inWork;
                     if (nextData.type === 'task') {
-                        const status = nextData.status ?? existing?.status ?? (legacyInWork ? 'in_progress' : 'queued');
-                        nextData.status = status;
-                        const progress = nextData.progress ?? existing?.progress ?? 0;
-                        nextData.progress = clampProgress(progress);
+                        const progress = clampProgress(
+                            nextData.progress ?? existing?.progress ?? progressFromStatus(nextData.status ?? existing?.status, legacyInWork),
+                        );
+                        nextData.progress = progress;
+                        nextData.status = statusFromProgress(progress);
                     }
                     if (nextData.type === 'idea') {
                         nextData.status = undefined;
                         nextData.progress = undefined;
                     }
                 }
+                if ((existing?.type === 'task' || nextData.type === 'task') && Object.prototype.hasOwnProperty.call(nextData, 'progress')) {
+                    const progress = clampProgress(nextData.progress);
+                    nextData.progress = progress;
+                    nextData.status = statusFromProgress(progress);
+                }
                 const nodes = state.nodes.map((node) => (node.id === id ? { ...node, ...nextData, updatedAt: now } : node));
-                const shouldRecomputeEnergy = Object.prototype.hasOwnProperty.call(nextData, 'energy');
-                if (!shouldRecomputeEnergy) return { nodes };
-                const normalizedEnergy = normalizeEnergies(nodes, state.edges);
-                return { nodes: normalizedEnergy.nodes, effectiveEnergy: normalizedEnergy.effectiveEnergy };
+                const hasEnergyUpdate = Object.prototype.hasOwnProperty.call(nextData, 'energy');
+                const affectsMonitoring = state.monitoringMode && (
+                    Object.prototype.hasOwnProperty.call(nextData, 'progress')
+                    || Object.prototype.hasOwnProperty.call(nextData, 'status')
+                    || Object.prototype.hasOwnProperty.call(nextData, 'type')
+                );
+                if (!hasEnergyUpdate && !affectsMonitoring) return { nodes };
+                if (hasEnergyUpdate) {
+                    const normalizedEnergy = normalizeEnergies(nodes, state.edges);
+                    const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, state.edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
+                    return { nodes: normalizedEnergy.nodes, effectiveEnergy };
+                }
+                const effectiveEnergy = effectiveForMode(nodes, state.edges, state.monitoringMode, state.effectiveEnergy);
+                return { nodes, effectiveEnergy };
             }),
 
             deleteNode: (id) => set((state) => {
@@ -359,7 +400,7 @@ export const useStore = create<AppState>()(
                     nodes,
                     edges,
                     tombstones,
-                    effectiveEnergy: computeEffectiveEnergy(nodes, edges),
+                    effectiveEnergy: effectiveForMode(nodes, edges, state.monitoringMode),
                 };
             }),
 
@@ -377,12 +418,13 @@ export const useStore = create<AppState>()(
                 };
                 delete tombstones.edges[normalized.id];
                 const normalizedEnergy = normalizeEnergies(state.nodes, edges);
+                const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
                 return {
                     ...pushHistoryReducer(state),
                     edges,
                     nodes: normalizedEnergy.nodes,
                     tombstones,
-                    effectiveEnergy: normalizedEnergy.effectiveEnergy,
+                    effectiveEnergy,
                 };
             }),
 
@@ -397,12 +439,13 @@ export const useStore = create<AppState>()(
                 };
                 debugLog({ type: 'delete_call', t: performance.now(), kind: 'edge', id, now, updatedAt: edge?.updatedAt, tombstone: tombstoneEdge });
                 const normalizedEnergy = normalizeEnergies(state.nodes, edges);
+                const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
                 return {
                     ...pushHistoryReducer(state),
                     edges,
                     nodes: normalizedEnergy.nodes,
                     tombstones,
-                    effectiveEnergy: normalizedEnergy.effectiveEnergy,
+                    effectiveEnergy,
                 };
             }),
 
@@ -569,6 +612,7 @@ export const useStore = create<AppState>()(
                 }
 
                 const normalizedEnergy = normalizeEnergies(nodes, edges);
+                const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
 
                 return {
                     ...pushHistoryReducer(state),
@@ -576,7 +620,7 @@ export const useStore = create<AppState>()(
                     edges,
                     textBoxes,
                     tombstones,
-                    effectiveEnergy: normalizedEnergy.effectiveEnergy,
+                    effectiveEnergy,
                     selectedNode: null,
                     selectedNodes: [],
                     selectedEdge: null,
