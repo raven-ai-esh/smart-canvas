@@ -168,7 +168,8 @@ export const Controls: React.FC = () => {
 
     useEffect(() => {
         const handlePointerDown = (e: PointerEvent) => {
-            if (e.pointerType === 'pen') return;
+            // Keep menus open while actively drawing with pen mode, but allow pen taps to close otherwise.
+            if (e.pointerType === 'pen' && penMode) return;
             const root = controlsRootRef.current;
             if (!root) return;
             if (root.contains(e.target as Node)) return;
@@ -178,7 +179,7 @@ export const Controls: React.FC = () => {
         };
         document.addEventListener('pointerdown', handlePointerDown);
         return () => document.removeEventListener('pointerdown', handlePointerDown);
-    }, []);
+    }, [penMode]);
 
     useEffect(() => {
         if (!focusMode) return;

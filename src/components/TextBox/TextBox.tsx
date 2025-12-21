@@ -50,6 +50,7 @@ export function TextBox({
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const measureRef = React.useRef<HTMLDivElement | null>(null);
   const editHistoryRef = React.useRef(false);
+  const lastTapRef = React.useRef<{ t: number; x: number; y: number } | null>(null);
 
   const [fontSize, setFontSize] = React.useState(14);
 
@@ -191,7 +192,10 @@ export function TextBox({
       committed: false,
     };
 
-    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    // iOS Safari can be flaky with touch pointer capture; keep it for mouse/pen only.
+    if (e.pointerType !== 'touch') {
+      (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    }
   };
 
   const startGroupDrag = (e: React.PointerEvent) => {
@@ -221,7 +225,10 @@ export function TextBox({
       committed: false,
     };
 
-    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    // Match Canvas behavior: avoid touch capture to prevent stuck gestures on iOS.
+    if (e.pointerType !== 'touch') {
+      (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    }
   };
 
   const startTouchMoveDragFromCandidate = (
@@ -269,10 +276,13 @@ export function TextBox({
       };
     }
 
-    try {
-      (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-    } catch {
-      // ignore
+    // Avoid touch capture to keep iOS drag streams stable.
+    if (e.pointerType !== 'touch') {
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+      } catch {
+        // ignore
+      }
     }
   };
 
@@ -391,7 +401,21 @@ export function TextBox({
       e.stopPropagation();
       clearAlignmentGuides?.();
       if (isClick && !opened && !isEditing) {
-        selectTextBox(box.id);
+        const now = Date.now();
+        const last = lastTapRef.current;
+        const dist = last ? Math.hypot(e.clientX - last.x, e.clientY - last.y) : Number.POSITIVE_INFINITY;
+        // Use a double-tap on touch to enter edit mode; single tap keeps selection.
+        if (last && now - last.t < 320 && dist < 24) {
+          lastTapRef.current = null;
+          selectTextBox(box.id);
+          setEditingId(box.id);
+        } else {
+          lastTapRef.current = { t: now, x: e.clientX, y: e.clientY };
+          selectTextBox(box.id);
+        }
+      } else if (opened) {
+        // Reset tap history when a long-press context menu is shown.
+        lastTapRef.current = null;
       }
       return;
     }
@@ -400,10 +424,12 @@ export function TextBox({
     if (group && group.pointerId === e.pointerId) {
       groupDragRef.current = null;
       e.stopPropagation();
-      try {
-        (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
-      } catch {
-        // ignore
+      if (e.pointerType !== 'touch') {
+        try {
+          (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+        } catch {
+          // ignore
+        }
       }
       clearAlignmentGuides?.();
       return;
@@ -413,10 +439,12 @@ export function TextBox({
     if (!st || st.pointerId !== e.pointerId) return;
     dragStateRef.current = null;
     e.stopPropagation();
-    try {
-      (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
-    } catch {
-      // ignore
+    if (e.pointerType !== 'touch') {
+      try {
+        (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+      } catch {
+        // ignore
+      }
     }
     clearAlignmentGuides?.();
   };

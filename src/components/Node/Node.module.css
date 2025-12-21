@@ -250,6 +250,11 @@
     flex-direction: column;
 }
 
+.noteShell {
+    position: relative;
+    display: inline-block;
+}
+
 .noteDetailWrap {
     position: relative;
     display: inline-block;
@@ -490,6 +495,102 @@
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 10px rgba(255, 255, 255, 0.25);
     pointer-events: none;
     z-index: 5;
+}
+
+/* Phone layout: detailed card is centered with margins and keeps space for UI. */
+@media (max-width: 520px) {
+    .noteDetailWrap {
+        /* Phone margins keep the note view away from top/bottom UI overlays. */
+        --note-phone-margin-x: 16px;
+        --note-phone-margin-top: 72px;
+        --note-phone-margin-bottom: 120px;
+        /* Shift the note overlay to the visual center (offsets are in world units). */
+        transform: translate(var(--note-offset-x, 0px), var(--note-offset-y, 0px));
+    }
+
+    .noteShell {
+        /* Scale the whole note cluster (card + energy panel) and keep it in view. */
+        display: flex;
+        align-items: stretch;
+        gap: 12px;
+        width: calc(
+            var(--visual-width, 100vw)
+            - (var(--note-phone-margin-x, 16px) * 2)
+            - env(safe-area-inset-left, 0px)
+            - env(safe-area-inset-right, 0px)
+        );
+        height: calc(
+            var(--visual-height, 100vh)
+            - var(--note-phone-margin-top, 72px)
+            - var(--note-phone-margin-bottom, 120px)
+            - env(safe-area-inset-top, 0px)
+            - env(safe-area-inset-bottom, 0px)
+        );
+        max-height: calc(
+            var(--visual-height, 100vh)
+            - var(--note-phone-margin-top, 72px)
+            - var(--note-phone-margin-bottom, 120px)
+            - env(safe-area-inset-top, 0px)
+            - env(safe-area-inset-bottom, 0px)
+        );
+        box-sizing: border-box;
+        /* Cancel canvas zoom so the note stays readable on phones. */
+        transform: scale(var(--note-scale, 1));
+        transform-origin: center;
+    }
+
+    .noteNode {
+        width: auto;
+        height: 100%;
+        max-height: 100%;
+        padding:
+            calc(16px + env(safe-area-inset-top, 0px))
+            16px
+            calc(16px + env(safe-area-inset-bottom, 0px));
+        border-radius: 12px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .noteHeaderRow {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .noteHeaderActions {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .noteTitle {
+        font-size: 18px;
+        white-space: normal;
+    }
+
+    .noteTitleInput {
+        font-size: 18px;
+    }
+
+    .noteProgressRow {
+        gap: 10px;
+        margin: 4px 0 10px;
+    }
+
+    .noteProgressValue {
+        min-width: 40px;
+        font-size: 11px;
+    }
+
+    .noteEnergySide {
+        /* Keep the energy panel inline so it fits within the phone width. */
+        position: static;
+        top: auto;
+        left: auto;
+        height: 100%;
+        flex: 0 0 56px;
+        width: 56px;
+    }
 }
 
 .editorRoot {
