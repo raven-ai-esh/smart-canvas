@@ -20,6 +20,7 @@ export function useAuth() {
         email: String(user.email ?? ''),
         name: String(user.name ?? ''),
         avatarSeed: String(user.avatarSeed ?? ''),
+        avatarUrl: typeof user.avatarUrl === 'string' ? user.avatarUrl : null,
         verified: !!user.verified,
       });
       window.dispatchEvent(new Event('auth-changed'));
