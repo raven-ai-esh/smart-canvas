@@ -683,8 +683,14 @@ export const Canvas: React.FC = () => {
 
                 if (timeDiff < 300 && dist < 30) {
                     // Double-tap detected! Create node
-                    const target = document.elementFromPoint(touch.clientX, touch.clientY) as HTMLElement;
-                    if (!target?.closest('[data-node-id]') && !target?.closest('button')) {
+                    const target = document.elementFromPoint(touch.clientX, touch.clientY) as HTMLElement | null;
+                    // Avoid creating nodes when the double-tap hits any interactive UI or an existing object.
+                    if (
+                        !target?.closest?.('[data-node-id]')
+                        && !target?.closest?.('[data-textbox-id]')
+                        && !target?.closest?.('[data-interactive="true"]')
+                        && !target?.closest?.('button')
+                    ) {
                         const worldPos = screenToWorldLatest(touch.clientX, touch.clientY);
                         addNode({
                             id: uuidv4(),
@@ -1771,7 +1777,12 @@ export const Canvas: React.FC = () => {
         if (penMode || textMode) return;
         // Only create if clicking on empty canvas
         const target = e.target as HTMLElement;
-        if (target.closest('[data-node-id]')) return;
+        // Prevent node creation when double-clicking on existing objects or interactive UI.
+        if (
+            target.closest('[data-node-id]')
+            || target.closest('[data-textbox-id]')
+            || target.closest('[data-interactive="true"]')
+        ) return;
 
         const worldPos = screenToWorld(e.clientX, e.clientY);
         addNode({
@@ -1834,6 +1845,8 @@ export const Canvas: React.FC = () => {
         const d = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
         return d;
     };
+
+    const noteScale = 1 / Math.max(0.0001, canvas.scale);
 
     return (
         <div
@@ -2003,8 +2016,10 @@ export const Canvas: React.FC = () => {
                 className={`${styles.canvasLayer} ${styles.nodeLayer}`}
                 style={{
                     transform: `translate(${canvas.x}px, ${canvas.y}px) scale(${canvas.scale})`,
+                    // Keep phone note overlays visually stable regardless of zoom level.
+                    '--note-scale': String(noteScale),
                     zIndex: 1
-                }}
+                } as React.CSSProperties}
             >
 	                {textBoxes.map((tb) => (
 	                    <TextBox

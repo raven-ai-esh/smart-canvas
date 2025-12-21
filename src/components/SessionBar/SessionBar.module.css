@@ -128,9 +128,13 @@
     z-index: 1800;
     display: flex;
     flex-direction: column;
-    padding: calc(18px + env(safe-area-inset-top, 0px)) 16px 18px;
+    padding: calc(18px + env(safe-area-inset-top, 0px)) 16px calc(18px + env(safe-area-inset-bottom, 0px));
     box-sizing: border-box;
     pointer-events: none;
+    /* Allow long session lists to scroll on small screens. */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
 }
 
 .sessionsPanelOpen {

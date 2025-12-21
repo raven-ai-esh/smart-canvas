@@ -16,9 +16,14 @@ const GraphView: React.FC<{ data: NodeData }> = ({ data }) => (
 
 // Helper to get delta to center
 const getDeltaToCenter = (x: number, y: number, canvas: { x: number, y: number, scale: number }) => {
+    // Use the stable app viewport when the mobile keyboard shifts the visual viewport.
+    const viewport = (window as any).__livingCanvasViewport;
+    const screenW = Number.isFinite(viewport?.appWidth) ? viewport.appWidth : window.innerWidth;
+    const screenH = Number.isFinite(viewport?.appHeight) ? viewport.appHeight : window.innerHeight;
+
     // Current Viewport Center in Screen Coords
-    const screenCX = window.innerWidth / 2;
-    const screenCY = window.innerHeight / 2;
+    const screenCX = screenW / 2;
+    const screenCY = screenH / 2;
 
     // Convert to World Coords
     const worldCX = (screenCX - canvas.x) / canvas.scale;
@@ -384,22 +389,29 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
                                         e.preventDefault();
                                         useStore.getState().pushHistory();
                                         const el = e.currentTarget;
+                                        const pointerId = e.pointerId;
                                         const rect = el.getBoundingClientRect();
                                         const t = (rect.bottom - e.clientY) / rect.height;
                                         updateNode(data.id, { energy: clampEnergy(t * maxBaseEnergy) });
 
+                                        // Track only the initiating pointer to avoid multi-touch interference.
                                         const onMove = (ev: PointerEvent) => {
+                                            if (ev.pointerId !== pointerId) return;
                                             const tt = (rect.bottom - ev.clientY) / rect.height;
                                             updateNode(data.id, { energy: clampEnergy(tt * maxBaseEnergy) });
                                         };
-                                        const onUp = () => {
+                                        const cleanup = () => {
                                             window.removeEventListener('pointermove', onMove);
                                             window.removeEventListener('pointerup', onUp);
                                             window.removeEventListener('pointercancel', onUp);
                                         };
+                                        const onUp = (ev: PointerEvent) => {
+                                            if (ev.pointerId !== pointerId) return;
+                                            cleanup();
+                                        };
                                         window.addEventListener('pointermove', onMove);
-                                        window.addEventListener('pointerup', onUp, { once: true });
-                                        window.addEventListener('pointercancel', onUp, { once: true });
+                                        window.addEventListener('pointerup', onUp);
+                                        window.addEventListener('pointercancel', onUp);
                                     }}
                                     role="slider"
                                     aria-label="Energy"
@@ -505,16 +517,25 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
         e.preventDefault();
         useStore.getState().pushHistory();
         const el = e.currentTarget;
+        const pointerId = e.pointerId;
         setBaseEnergyFromClientY(e.clientY, el);
-        const onMove = (ev: PointerEvent) => setBaseEnergyFromClientY(ev.clientY, el);
-        const onUp = () => {
+        // Track only the initiating pointer to prevent stray touches from changing the value.
+        const onMove = (ev: PointerEvent) => {
+            if (ev.pointerId !== pointerId) return;
+            setBaseEnergyFromClientY(ev.clientY, el);
+        };
+        const cleanup = () => {
             window.removeEventListener('pointermove', onMove);
             window.removeEventListener('pointerup', onUp);
             window.removeEventListener('pointercancel', onUp);
         };
+        const onUp = (ev: PointerEvent) => {
+            if (ev.pointerId !== pointerId) return;
+            cleanup();
+        };
         window.addEventListener('pointermove', onMove);
-        window.addEventListener('pointerup', onUp, { once: true });
-        window.addEventListener('pointercancel', onUp, { once: true });
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
     };
 
     const setProgressFromClientX = (clientX: number, el: HTMLElement) => {
@@ -524,19 +545,27 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
         updateNode(data.id, { progress: next });
     };
 
-    const startProgressDrag = (clientX: number, el: HTMLElement) => {
+    const startProgressDrag = (clientX: number, el: HTMLElement, pointerId: number) => {
         setIsDraggingProgress(true);
         setProgressFromClientX(clientX, el);
-        const onMove = (ev: PointerEvent) => setProgressFromClientX(ev.clientX, el);
-        const onUp = () => {
+        // Track only the initiating pointer to prevent stray touches from changing the value.
+        const onMove = (ev: PointerEvent) => {
+            if (ev.pointerId !== pointerId) return;
+            setProgressFromClientX(ev.clientX, el);
+        };
+        const cleanup = () => {
             window.removeEventListener('pointermove', onMove);
             window.removeEventListener('pointerup', onUp);
             window.removeEventListener('pointercancel', onUp);
             setIsDraggingProgress(false);
         };
+        const onUp = (ev: PointerEvent) => {
+            if (ev.pointerId !== pointerId) return;
+            cleanup();
+        };
         window.addEventListener('pointermove', onMove);
-        window.addEventListener('pointerup', onUp, { once: true });
-        window.addEventListener('pointercancel', onUp, { once: true });
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
     };
 
     const handleProgressPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -544,13 +573,15 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
         e.stopPropagation();
         const el = e.currentTarget;
         useStore.getState().pushHistory();
-        startProgressDrag(e.clientX, el);
+        startProgressDrag(e.clientX, el, e.pointerId);
     };
 
 
     return (
         <div className={styles.noteDetailWrap} data-interactive="true" onPointerDown={(e) => e.stopPropagation()}>
-            <div className={`${styles.noteNode}${shouldPulse ? ` ${styles.monitorPulse}` : ''}`}>
+            {/* Wrap the detailed card + energy panel so phone layout can scale them together. */}
+            <div className={styles.noteShell}>
+                <div className={`${styles.noteNode}${shouldPulse ? ` ${styles.monitorPulse}` : ''}`}>
                 <div className={styles.noteHeaderRow}>
                     <div className={styles.noteTitleWrap}>
                         {isEditingTitle ? (
@@ -638,106 +669,107 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
                 </div>
 
                 <div className={styles.noteStack}>
-                {isTask && (
-                    <div className={styles.noteProgressRow}>
-                        <div
-                            className={styles.noteProgressTrack}
-                            style={{ '--progress-color': energyColor } as React.CSSProperties}
-                            onPointerDown={handleProgressPointerDown}
-                            role="slider"
-                            aria-label="Progress"
-                            aria-valuemin={0}
-                            aria-valuemax={100}
-                            aria-valuenow={Math.round(progress)}
-                            data-interactive="true"
-                        >
+                    {isTask && (
+                        <div className={styles.noteProgressRow}>
                             <div
-                                className={styles.noteProgressFill}
-                                style={{
-                                    width: `${progress}%`,
-                                    transition: isDraggingProgress ? 'none' : undefined,
-                                }}
-                            />
+                                className={styles.noteProgressTrack}
+                                style={{ '--progress-color': energyColor } as React.CSSProperties}
+                                onPointerDown={handleProgressPointerDown}
+                                role="slider"
+                                aria-label="Progress"
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-valuenow={Math.round(progress)}
+                                data-interactive="true"
+                            >
+                                <div
+                                    className={styles.noteProgressFill}
+                                    style={{
+                                        width: `${progress}%`,
+                                        transition: isDraggingProgress ? 'none' : undefined,
+                                    }}
+                                />
+                            </div>
+                            <div className={styles.noteProgressValue}>{Math.round(progress)}%</div>
                         </div>
-                        <div className={styles.noteProgressValue}>{Math.round(progress)}%</div>
-                    </div>
-                )}
+                    )}
 
-                {/* Date Pickers + Status (Only for Task) */}
-                {data.type === 'task' && (
-                    <div className={styles.taskMetaRow}>
-                        <div className={styles.taskMetaItem}>
-                            <span className={styles.taskMetaLabel}>Start</span>
-                            <input
-                                type="date"
-                                className={styles.customDateInput}
-                                value={data.startDate || ''}
-                                onChange={(e) => {
-                                    useStore.getState().pushHistory();
-                                    updateNode(data.id, { startDate: e.target.value });
-                                }}
-                                onPointerDown={(e) => e.stopPropagation()}
-                            />
-                        </div>
-                        <div className={styles.taskMetaItem}>
-                            <span className={styles.taskMetaLabel}>Due</span>
-                            <input
-                                type="date"
-                                className={styles.customDateInput}
-                                value={data.endDate || ''}
-                                onChange={(e) => {
-                                    useStore.getState().pushHistory();
-                                    updateNode(data.id, { endDate: e.target.value });
-                                }}
-                                onPointerDown={(e) => e.stopPropagation()}
-                            />
-                        </div>
-                        <div className={styles.taskMetaItem}>
-                            <span className={styles.taskMetaLabel}>Status</span>
-                            <div className={styles.taskMetaValue}>
-                                {status === 'done' ? 'Done' : status === 'in_progress' ? 'In Progress' : 'Queued'}
+                    {/* Date Pickers + Status (Only for Task) */}
+                    {data.type === 'task' && (
+                        <div className={styles.taskMetaRow}>
+                            <div className={styles.taskMetaItem}>
+                                <span className={styles.taskMetaLabel}>Start</span>
+                                <input
+                                    type="date"
+                                    className={styles.customDateInput}
+                                    value={data.startDate || ''}
+                                    onChange={(e) => {
+                                        useStore.getState().pushHistory();
+                                        updateNode(data.id, { startDate: e.target.value });
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                />
+                            </div>
+                            <div className={styles.taskMetaItem}>
+                                <span className={styles.taskMetaLabel}>Due</span>
+                                <input
+                                    type="date"
+                                    className={styles.customDateInput}
+                                    value={data.endDate || ''}
+                                    onChange={(e) => {
+                                        useStore.getState().pushHistory();
+                                        updateNode(data.id, { endDate: e.target.value });
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                />
+                            </div>
+                            <div className={styles.taskMetaItem}>
+                                <span className={styles.taskMetaLabel}>Status</span>
+                                <div className={styles.taskMetaValue}>
+                                    {status === 'done' ? 'Done' : status === 'in_progress' ? 'In Progress' : 'Queued'}
+                                </div>
                             </div>
                         </div>
+                    )}
+
+                    <NoteContentEditor nodeId={data.id} value={data.content} />
+                </div>
+                </div>
+
+                {showEnergyPanel && (
+                    <div
+                        className={styles.noteEnergySide}
+                        data-interactive="true"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className={styles.noteEnergyValuesRow}>
+                            <span className={styles.noteEnergyValue} title="Собственная энергия" style={{ color: energyColor }}>
+                                {Math.round(baseEnergy)}
+                            </span>
+                            <span className={styles.noteEnergyDividerLine} aria-hidden="true" />
+                            <span className={styles.noteEnergyValue} title="Суммарная энергия">
+                                {Math.round(effectiveEnergy)}
+                            </span>
+                        </div>
+
+                        <div
+                            className={styles.noteEnergyScale}
+                            onPointerDown={handleEnergyScalePointerDown}
+                            role="slider"
+                            aria-label="Energy"
+                            aria-valuemin={0}
+                            aria-valuemax={Math.round(maxBaseEnergy)}
+                            aria-valuenow={Math.round(baseEnergy)}
+                        >
+                            <EnergySvgLiquidGauge level={baseEnergy} className={styles.noteEnergyFluidCanvas} />
+                            {Math.abs(effectiveEnergy - baseEnergy) >= 0.5 && (
+                                <div className={styles.noteEnergyScaleMarker} style={{ bottom: `${effectiveEnergy}%` }} aria-hidden="true" />
+                            )}
+                        </div>
                     </div>
                 )}
-
-                <NoteContentEditor nodeId={data.id} value={data.content} />
-                </div>
             </div>
-
-            {showEnergyPanel && (
-                <div
-                    className={styles.noteEnergySide}
-                    data-interactive="true"
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => e.stopPropagation()}
-                >
-                    <div className={styles.noteEnergyValuesRow}>
-                        <span className={styles.noteEnergyValue} title="Собственная энергия" style={{ color: energyColor }}>
-                            {Math.round(baseEnergy)}
-                        </span>
-                        <span className={styles.noteEnergyDividerLine} aria-hidden="true" />
-                        <span className={styles.noteEnergyValue} title="Суммарная энергия">
-                            {Math.round(effectiveEnergy)}
-                        </span>
-                    </div>
-
-                    <div
-                        className={styles.noteEnergyScale}
-                        onPointerDown={handleEnergyScalePointerDown}
-                        role="slider"
-                        aria-label="Energy"
-                        aria-valuemin={0}
-                        aria-valuemax={Math.round(maxBaseEnergy)}
-                        aria-valuenow={Math.round(baseEnergy)}
-                    >
-                        <EnergySvgLiquidGauge level={baseEnergy} className={styles.noteEnergyFluidCanvas} />
-                        {Math.abs(effectiveEnergy - baseEnergy) >= 0.5 && (
-                            <div className={styles.noteEnergyScaleMarker} style={{ bottom: `${effectiveEnergy}%` }} aria-hidden="true" />
-                        )}
-                    </div>
-                </div>
-            )}
         </div>
     );
 };
@@ -801,6 +833,13 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
     const graphClass = `${styles.viewContainer} ${isGraph ? styles.visible : styles.hidden}`;
     const cardClass = `${styles.viewContainer} ${isCard ? styles.visible : styles.hidden}`;
     const noteClass = `${styles.viewContainer} ${isNote ? styles.visible : styles.hidden}`;
+    const noteViewStyle = isNote
+        ? ({
+            // Phone note view uses this offset so the detailed card stays centered on the viewport.
+            '--note-offset-x': `${-dx}px`,
+            '--note-offset-y': `${-dy}px`,
+        } as React.CSSProperties)
+        : undefined;
     const noteFocusZ = isNote ? Math.round(520 + focusScore * 180) : undefined;
 
     // Valid Wrapper Class Logic
@@ -861,6 +900,7 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
                 className={noteClass}
                 data-node-rect={isNote ? 'true' : undefined}
                 data-node-rect-id={data.id}
+                style={noteViewStyle}
             >
                 <NoteView data={data} />
             </div>

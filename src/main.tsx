@@ -52,6 +52,14 @@ function installViewportVars() {
     root.style.setProperty('--app-height', `${stableH}px`);
     root.style.setProperty('--visual-width', `${visualW}px`);
     root.style.setProperty('--visual-height', `${visualH}px`);
+
+    // Expose a stable viewport snapshot for components that need keyboard-safe sizing.
+    w.__livingCanvasViewport = {
+      appWidth: stableW,
+      appHeight: stableH,
+      visualWidth: visualW,
+      visualHeight: visualH,
+    };
   };
 
   setVars();

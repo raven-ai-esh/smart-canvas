@@ -59,6 +59,10 @@
   white-space: pre-wrap;
   word-break: break-word;
   transition: font-size 140ms ease;
+  /* Allow vertical scroll inside the editor on touch devices. */
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .editor::-webkit-scrollbar {
