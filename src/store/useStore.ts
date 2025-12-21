@@ -63,10 +63,10 @@ interface AppState {
     monitoringMode: boolean;
     toggleMonitoringMode: () => void;
 
-    me: { id: string; email: string; name: string; avatarSeed: string; verified: boolean } | null;
+    me: { id: string; email: string; name: string; avatarSeed: string; avatarUrl?: string | null; verified: boolean } | null;
     setMe: (me: AppState['me']) => void;
 
-    presence: { selfId: string | null; peers: { id: string; name: string; avatarSeed: string; registered: boolean }[] };
+    presence: { selfId: string | null; peers: { id: string; name: string; avatarSeed: string; avatarUrl?: string | null; registered: boolean }[] };
     setPresence: (presence: AppState['presence']) => void;
 
     history: UndoSnapshot[];

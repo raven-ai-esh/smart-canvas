@@ -97,6 +97,7 @@ async function initDb() {
       password_hash TEXT,
       name TEXT NOT NULL,
       avatar_seed TEXT NOT NULL,
+      avatar_url TEXT,
       verified BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -106,6 +107,13 @@ async function initDb() {
   // Migration: allow OAuth providers without email.
   try {
     await pool.query('ALTER TABLE users ALTER COLUMN email DROP NOT NULL');
+  } catch {
+    // ignore
+  }
+
+  // Migration: allow custom avatars.
+  try {
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT');
   } catch {
     // ignore
   }
@@ -123,6 +131,16 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS email_verification_tokens (
       token_hash TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_change_tokens (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      new_email TEXT NOT NULL,
       expires_at TIMESTAMPTZ NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -154,23 +172,64 @@ async function getSession(id) {
 }
 
 async function getUserById(id) {
-  const res = await pool.query('SELECT id, email, name, avatar_seed, verified FROM users WHERE id = $1', [id]);
+  const res = await pool.query('SELECT id, email, name, avatar_seed, avatar_url, verified FROM users WHERE id = $1', [id]);
   return res.rows[0] ?? null;
 }
 
 async function getUserByEmail(email) {
-  const res = await pool.query('SELECT id, email, password_hash, name, avatar_seed, verified FROM users WHERE email = $1', [email]);
+  const res = await pool.query('SELECT id, email, password_hash, name, avatar_seed, avatar_url, verified FROM users WHERE email = $1', [email]);
   return res.rows[0] ?? null;
 }
 
-async function createUser({ id, email, passwordHash, name, avatarSeed, verified }) {
+async function createUser({ id, email, passwordHash, name, avatarSeed, verified, avatarUrl }) {
   const res = await pool.query(
-    `INSERT INTO users (id, email, password_hash, name, avatar_seed, verified)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING id, email, name, avatar_seed, verified`,
-    [id, email, passwordHash, name, avatarSeed, verified],
+    `INSERT INTO users (id, email, password_hash, name, avatar_seed, avatar_url, verified)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id, email, name, avatar_seed, avatar_url, verified`,
+    [id, email, passwordHash, name, avatarSeed, avatarUrl ?? null, verified],
   );
   return res.rows[0];
+}
+
+async function updateUserProfile({ userId, name, email, passwordHash, avatarUrl }) {
+  // Build a partial update so callers can change name/email/password independently.
+  const fields = [];
+  const values = [];
+  let idx = 1;
+
+  if (typeof name === 'string') {
+    fields.push(`name = $${idx}`);
+    values.push(name);
+    idx += 1;
+  }
+  if (typeof email === 'string') {
+    fields.push(`email = $${idx}`);
+    values.push(email);
+    idx += 1;
+  }
+  if (typeof passwordHash === 'string') {
+    fields.push(`password_hash = $${idx}`);
+    values.push(passwordHash);
+    idx += 1;
+  }
+  if (avatarUrl !== undefined) {
+    fields.push(`avatar_url = $${idx}`);
+    values.push(avatarUrl);
+    idx += 1;
+  }
+
+  if (!fields.length) return null;
+
+  fields.push('updated_at = NOW()');
+  values.push(userId);
+  const res = await pool.query(
+    `UPDATE users
+        SET ${fields.join(', ')}
+      WHERE id = $${idx}
+      RETURNING id, email, name, avatar_seed, avatar_url, verified`,
+    values,
+  );
+  return res.rows[0] ?? null;
 }
 
 async function setUserVerified(userId) {
@@ -182,6 +241,14 @@ async function insertEmailVerificationToken({ tokenHash, userId, expiresAt }) {
     `INSERT INTO email_verification_tokens (token_hash, user_id, expires_at)
      VALUES ($1, $2, $3)`,
     [tokenHash, userId, expiresAt],
+  );
+}
+
+async function insertEmailChangeToken({ tokenHash, userId, newEmail, expiresAt }) {
+  await pool.query(
+    `INSERT INTO email_change_tokens (token_hash, user_id, new_email, expires_at)
+     VALUES ($1, $2, $3, $4)`,
+    [tokenHash, userId, newEmail, expiresAt],
   );
 }
 
@@ -202,6 +269,37 @@ async function consumeEmailVerificationToken(tokenHash) {
       return null;
     }
     await client.query('DELETE FROM email_verification_tokens WHERE token_hash = $1', [tokenHash]);
+    await client.query('COMMIT');
+    return row;
+  } catch (e) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore
+    }
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+async function consumeEmailChangeToken(tokenHash) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const res = await client.query(
+      `SELECT token_hash, user_id, new_email, expires_at
+         FROM email_change_tokens
+        WHERE token_hash = $1
+        FOR UPDATE`,
+      [tokenHash],
+    );
+    const row = res.rows[0];
+    if (!row) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    await client.query('DELETE FROM email_change_tokens WHERE token_hash = $1', [tokenHash]);
     await client.query('COMMIT');
     return row;
   } catch (e) {
@@ -475,7 +573,122 @@ app.get('/api/auth/me', async (req, res) => {
   if (!auth) return res.json({ user: null });
   const user = await getUserById(auth.userId);
   if (!user) return res.json({ user: null });
-  res.json({ user: { id: user.id, email: user.email, name: user.name, avatarSeed: user.avatar_seed, verified: user.verified } });
+  res.json({ user: { id: user.id, email: user.email, name: user.name, avatarSeed: user.avatar_seed, avatarUrl: user.avatar_url, verified: user.verified } });
+});
+
+// Allow authenticated users to update profile fields from the settings modal.
+app.patch('/api/auth/me', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const current = await getUserById(auth.userId);
+  if (!current) return res.status(401).json({ error: 'unauthorized' });
+
+  const updates = {};
+  const rawName = req.body?.name;
+  const rawEmail = req.body?.email;
+  const rawPassword = req.body?.password;
+  const rawAvatarData = req.body?.avatarData;
+  const rawAvatarRemove = req.body?.avatarRemove;
+  let pendingEmail = null;
+  let emailChangeSent = false;
+  let devEmailChangeUrl = null;
+
+  if (typeof rawName === 'string') {
+    const nextName = rawName.trim();
+    if (!nextName || nextName.length < 2) return res.status(400).json({ error: 'bad_name' });
+    if (nextName !== current.name) updates.name = nextName.slice(0, 120);
+  }
+
+  if (typeof rawEmail === 'string') {
+    const nextEmail = rawEmail.trim().toLowerCase();
+    const currentEmail = (current.email ?? '').toLowerCase();
+    if (!nextEmail || !nextEmail.includes('@')) return res.status(400).json({ error: 'bad_email' });
+    if (nextEmail !== currentEmail) {
+      const existing = await getUserByEmail(nextEmail);
+      if (existing && existing.id !== current.id) return res.status(409).json({ error: 'email_in_use' });
+      pendingEmail = nextEmail;
+    }
+  }
+
+  if (typeof rawPassword === 'string' && rawPassword.length) {
+    if (rawPassword.length < 8) return res.status(400).json({ error: 'bad_password' });
+    // Hash the new password so OAuth users can set one, too.
+    updates.passwordHash = await bcrypt.hash(rawPassword, 10);
+  }
+
+  if (rawAvatarRemove === true) {
+    updates.avatarUrl = null;
+  } else if (typeof rawAvatarData === 'string' && rawAvatarData.length) {
+    if (!rawAvatarData.startsWith('data:image/')) return res.status(400).json({ error: 'bad_avatar' });
+    if (rawAvatarData.length > 2_000_000) return res.status(400).json({ error: 'avatar_too_large' });
+    updates.avatarUrl = rawAvatarData;
+  }
+
+  if (!Object.keys(updates).length && !pendingEmail) {
+    return res.status(400).json({ error: 'no_changes' });
+  }
+
+  let updated = current;
+  if (Object.keys(updates).length) {
+    updated = await updateUserProfile({
+      userId: current.id,
+      name: updates.name,
+      passwordHash: updates.passwordHash,
+      avatarUrl: updates.avatarUrl,
+    });
+    if (!updated) return res.status(500).json({ error: 'update_failed' });
+  }
+
+  if (pendingEmail) {
+    const rawToken = randomBytes(32).toString('hex');
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24);
+    await insertEmailChangeToken({ tokenHash, userId: current.id, newEmail: pendingEmail, expiresAt });
+    const confirmUrl = `${getBaseUrl(req)}/api/auth/change-email?token=${encodeURIComponent(rawToken)}`;
+    if (SMTP_URL) {
+      const transport = nodemailer.createTransport(SMTP_URL);
+      await transport.sendMail({
+        from: MAIL_FROM,
+        to: pendingEmail,
+        subject: 'Confirm your new email',
+        text: `Confirm your new email: ${confirmUrl}`,
+        html: `<p>Confirm your new email:</p><p><a href="${confirmUrl}">${confirmUrl}</a></p>`,
+      });
+      emailChangeSent = true;
+    } else {
+      devEmailChangeUrl = confirmUrl;
+    }
+  }
+
+  if (updates.passwordHash && current.email && SMTP_URL) {
+    try {
+      const transport = nodemailer.createTransport(SMTP_URL);
+      await transport.sendMail({
+        from: MAIL_FROM,
+        to: current.email,
+        subject: 'Password changed',
+        text: 'Your password was changed. If this was not you, please reset your password immediately.',
+        html: '<p>Your password was changed. If this was not you, please reset your password immediately.</p>',
+      });
+    } catch {
+      // Ignore email errors so profile updates still succeed.
+    }
+  }
+
+  res.json({
+    user: {
+      id: updated.id,
+      email: updated.email,
+      name: updated.name,
+      avatarSeed: updated.avatar_seed,
+      avatarUrl: updated.avatar_url,
+      verified: updated.verified,
+    },
+    emailChangePending: !!pendingEmail,
+    pendingEmail,
+    emailChangeSent,
+    devEmailChangeUrl,
+  });
 });
 
 app.get('/api/auth/providers', async (_req, res) => {
@@ -554,6 +767,27 @@ app.get('/api/auth/verify', async (req, res) => {
   res.redirect(`${getBaseUrl(req)}/?verified=1`);
 });
 
+app.get('/api/auth/change-email', async (req, res) => {
+  const token = String(req.query?.token ?? '');
+  if (!token) return res.status(400).send('bad_request');
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  const row = await consumeEmailChangeToken(tokenHash);
+  if (!row) return res.status(404).send('invalid_token');
+  const expiresAt = new Date(row.expires_at);
+  if (Number.isFinite(expiresAt.valueOf()) && expiresAt.getTime() < Date.now()) return res.status(410).send('expired');
+
+  const nextEmail = String(row.new_email ?? '').trim().toLowerCase();
+  if (!nextEmail || !nextEmail.includes('@')) return res.status(400).send('bad_email');
+  const existing = await getUserByEmail(nextEmail);
+  if (existing && existing.id !== row.user_id) return res.status(409).send('email_in_use');
+
+  const updated = await updateUserProfile({ userId: row.user_id, email: nextEmail });
+  if (!updated) return res.status(500).send('update_failed');
+  await setUserVerified(row.user_id);
+  setAuthCookie(res, signAuthToken({ userId: row.user_id }));
+  res.redirect(`${getBaseUrl(req)}/?emailChanged=1`);
+});
+
 app.post('/api/auth/login', async (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase();
   const password = String(req.body?.password ?? '');
@@ -567,7 +801,7 @@ app.post('/api/auth/login', async (req, res) => {
   if (!user.verified) return res.status(403).json({ error: 'email_not_verified' });
 
   setAuthCookie(res, signAuthToken({ userId: user.id }));
-  res.json({ ok: true, user: { id: user.id, email: user.email, name: user.name, avatarSeed: user.avatar_seed, verified: user.verified } });
+  res.json({ ok: true, user: { id: user.id, email: user.email, name: user.name, avatarSeed: user.avatar_seed, avatarUrl: user.avatar_url, verified: user.verified } });
 });
 
 app.get('/api/auth/google/start', async (req, res) => {
@@ -1059,6 +1293,7 @@ function sendPresence(sessionId) {
       id: meta.connId,
       name: meta.name,
       avatarSeed: meta.avatarSeed,
+      avatarUrl: meta.avatarUrl,
       registered: !!meta.userId,
     });
   }
@@ -1104,7 +1339,8 @@ wss.on('connection', async (ws, req) => {
 
   const name = user?.name ?? guestNameFromClientId(clientId);
   const avatarSeed = user?.avatar_seed ?? (clientId || connId);
-  ws._meta = { sessionId, connId, clientId, userId: user?.id ?? null, name, avatarSeed };
+  const avatarUrl = user?.avatar_url ?? null;
+  ws._meta = { sessionId, connId, clientId, userId: user?.id ?? null, name, avatarSeed, avatarUrl };
 
   roomFor(sessionId).add(ws);
   const payload = serializeSession(session);

@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Moon, Sun, Snowflake } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 
 const palette = ['#5E81AC', '#A3BE8C', '#B48EAD', '#D08770', '#88C0D0', '#EBCB8B', '#BF616A', '#8FBCBB'];
@@ -351,12 +352,36 @@ function TelegramOAuthButton({
   );
 }
 
-function Avatar({ name, seed, registered, onClick, highlight, theme }: { name: string; seed: string; registered: boolean; highlight?: boolean; onClick?: () => void; theme: 'dark' | 'light' }) {
+function Avatar({
+  name,
+  seed,
+  registered,
+  onClick,
+  highlight,
+  theme,
+  imageUrl,
+  size,
+}: {
+  name: string;
+  seed: string;
+  registered: boolean;
+  highlight?: boolean;
+  onClick?: () => void;
+  theme: 'dark' | 'light';
+  imageUrl?: string | null;
+  size?: number;
+}) {
+  const [imageFailed, setImageFailed] = useState(false);
+  useEffect(() => {
+    setImageFailed(false);
+  }, [imageUrl]);
   const h = useMemo(() => hashString(seed || name), [seed, name]);
   const bg = palette[h % palette.length];
   const kind = (h >>> 8) % 6;
   const fg = theme === 'dark' ? '#fff' : '#111';
   const border = highlight ? '2px solid var(--accent-primary)' : registered ? '1px solid var(--border-strong)' : '1px solid var(--border-subtle)';
+  const avatarSize = size ?? 36;
+  const showImage = !!imageUrl && !imageFailed;
 
   return (
     <button
@@ -364,8 +389,8 @@ function Avatar({ name, seed, registered, onClick, highlight, theme }: { name: s
       onClick={onClick}
       title={name}
       style={{
-        width: 36,
-        height: 36,
+        width: avatarSize,
+        height: avatarSize,
         borderRadius: 999,
         border,
         padding: 0,
@@ -375,9 +400,19 @@ function Avatar({ name, seed, registered, onClick, highlight, theme }: { name: s
         placeItems: 'center',
         cursor: onClick ? 'pointer' : 'default',
         boxShadow: highlight ? '0 0 0 2px var(--accent-glow)' : '0 6px 18px rgba(0,0,0,0.25)',
+        overflow: 'hidden',
       }}
     >
-      <AnimalIcon kind={kind} />
+      {showImage ? (
+        <img
+          src={imageUrl ?? ''}
+          alt=""
+          onError={() => setImageFailed(true)}
+          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+        />
+      ) : (
+        <AnimalIcon kind={kind} />
+      )}
     </button>
   );
 }
@@ -386,6 +421,9 @@ export const Presence: React.FC = () => {
   const presence = useStore((s) => s.presence);
   const me = useStore((s) => s.me);
   const theme = useStore((s) => s.theme);
+  const snowEnabled = useStore((s) => s.snowEnabled);
+  const toggleTheme = useStore((s) => s.toggleTheme);
+  const toggleSnow = useStore((s) => s.toggleSnow);
   const isCompactAuth = useIsCompactAuthModal();
 
   const [open, setOpen] = useState(false);
@@ -401,6 +439,21 @@ export const Presence: React.FC = () => {
   const [authNoticeVisible, setAuthNoticeVisible] = useState(false);
   const [devVerifyUrl, setDevVerifyUrl] = useState<string | null>(null);
   const [providers, setProviders] = useState<{ google: boolean; yandex: boolean; telegram: boolean; telegramBotUsername: string | null } | null>(null);
+  // Account settings modal state (separate from auth modal).
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsName, setSettingsName] = useState('');
+  const [settingsEmail, setSettingsEmail] = useState('');
+  const [settingsPassword, setSettingsPassword] = useState('');
+  const [settingsPasswordConfirm, setSettingsPasswordConfirm] = useState('');
+  const [settingsAvatarData, setSettingsAvatarData] = useState<string | null>(null);
+  const [settingsAvatarRemoved, setSettingsAvatarRemoved] = useState(false);
+  const [settingsSubmitAttempted, setSettingsSubmitAttempted] = useState(false);
+  const [settingsTouched, setSettingsTouched] = useState<{ name: boolean; email: boolean; password: boolean; passwordConfirm: boolean }>({ name: false, email: false, password: false, passwordConfirm: false });
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
+  const [settingsNoticeVisible, setSettingsNoticeVisible] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   const selfId = presence.selfId;
   const peers = presence.peers;
@@ -409,7 +462,9 @@ export const Presence: React.FC = () => {
 
   const myName = me?.name ?? selfPeer?.name ?? 'Guest';
   const mySeed = me?.avatarSeed ?? selfPeer?.avatarSeed ?? (window.localStorage.getItem('living-canvas-client-id') ?? '');
+  const myAvatarUrl = me?.avatarUrl ?? selfPeer?.avatarUrl ?? null;
   const myRegistered = !!me;
+  const settingsAvatarPreview = settingsAvatarRemoved ? null : (settingsAvatarData ?? me?.avatarUrl ?? null);
 
   const returnTo = useMemo(() => window.location.pathname + window.location.search, []);
 
@@ -421,6 +476,53 @@ export const Presence: React.FC = () => {
     setSubmitAttempted(false);
     setTouched({ name: false, email: false, password: false });
   };
+
+  const openSettings = () => {
+    if (!me) return;
+    // Close the mini popover and open the full settings modal.
+    setOpen(false);
+    setSettingsOpen(true);
+  };
+
+  const closeSettings = () => {
+    setSettingsOpen(false);
+    setSettingsMessage(null);
+    setSettingsBusy(false);
+    setSettingsSubmitAttempted(false);
+    setSettingsTouched({ name: false, email: false, password: false, passwordConfirm: false });
+    setSettingsPasswordConfirm('');
+    setSettingsAvatarData(null);
+    setSettingsAvatarRemoved(false);
+    setSettingsNotice(null);
+    setSettingsNoticeVisible(false);
+  };
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    // Seed the settings form from the latest profile data.
+    setSettingsName(me?.name ?? '');
+    setSettingsEmail(me?.email ?? '');
+    setSettingsPassword('');
+    setSettingsPasswordConfirm('');
+    setSettingsAvatarData(null);
+    setSettingsAvatarRemoved(false);
+    setSettingsMessage(null);
+    setSettingsNotice(null);
+    setSettingsNoticeVisible(false);
+    setSettingsSubmitAttempted(false);
+    setSettingsTouched({ name: false, email: false, password: false, passwordConfirm: false });
+  }, [settingsOpen, me]);
+
+  useEffect(() => {
+    if (settingsOpen && !me) {
+      // If the session becomes unauthenticated, close the settings modal.
+      closeSettings();
+    }
+  }, [settingsOpen, me]);
+
+  useEffect(() => {
+    if (!settingsPassword) setSettingsPasswordConfirm('');
+  }, [settingsPassword]);
 
   useEffect(() => {
     if (!open) return;
@@ -444,6 +546,20 @@ export const Presence: React.FC = () => {
       window.clearTimeout(clearTimer);
     };
   }, [authNotice]);
+
+  useEffect(() => {
+    if (!settingsNotice) {
+      setSettingsNoticeVisible(false);
+      return;
+    }
+    setSettingsNoticeVisible(true);
+    const fadeTimer = window.setTimeout(() => setSettingsNoticeVisible(false), 1600);
+    const clearTimer = window.setTimeout(() => setSettingsNotice(null), 2000);
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(clearTimer);
+    };
+  }, [settingsNotice]);
 
   useEffect(() => {
     const handler = (evt: Event) => {
@@ -510,6 +626,32 @@ export const Presence: React.FC = () => {
     return validatePassword(password);
   };
 
+  const shouldValidateSettings = (field: keyof typeof settingsTouched) => settingsSubmitAttempted || settingsTouched[field];
+
+  const getSettingsNameUi = () => {
+    if (!shouldValidateSettings('name')) return { status: 'ok' as const, error: null };
+    return validateName(settingsName);
+  };
+
+  const getSettingsEmailUi = () => {
+    if (!shouldValidateSettings('email')) return { status: 'ok' as const, error: null };
+    return validateEmail(settingsEmail);
+  };
+
+  const getSettingsPasswordUi = () => {
+    if (!shouldValidateSettings('password')) return { status: 'ok' as const, error: null };
+    if (!settingsPassword) return { status: 'ok' as const, error: null };
+    return validatePassword(settingsPassword);
+  };
+
+  const getSettingsPasswordConfirmUi = () => {
+    if (!shouldValidateSettings('passwordConfirm')) return { status: 'ok' as const, error: null };
+    if (!settingsPassword) return { status: 'ok' as const, error: null };
+    if (!settingsPasswordConfirm) return { status: 'missing' as const, error: 'Confirm your password' };
+    if (settingsPasswordConfirm !== settingsPassword) return { status: 'invalid' as const, error: 'Passwords do not match' };
+    return { status: 'ok' as const, error: null };
+  };
+
   const validateBeforeSubmit = () => {
     const issues: Array<{ field: 'name' | 'email' | 'password'; status: FieldStatus }> = [];
     if (mode === 'signup') {
@@ -532,6 +674,7 @@ export const Presence: React.FC = () => {
       email: String(data.user.email ?? ''),
       name: String(data.user.name ?? ''),
       avatarSeed: String(data.user.avatarSeed ?? ''),
+      avatarUrl: typeof data.user.avatarUrl === 'string' ? data.user.avatarUrl : null,
       verified: !!data.user.verified,
     } : null);
     window.dispatchEvent(new Event('auth-changed'));
@@ -593,6 +736,126 @@ export const Presence: React.FC = () => {
     }
   };
 
+  // Save only the changed profile fields and keep the modal responsive while updating.
+  const saveSettings = async () => {
+    if (!me) return;
+    setSettingsSubmitAttempted(true);
+
+    const payload: { name?: string; email?: string; password?: string; avatarData?: string; avatarRemove?: boolean } = {};
+    const nextName = settingsName.trim();
+    const nextEmail = settingsEmail.trim().toLowerCase();
+    const currentEmail = (me.email ?? '').trim().toLowerCase();
+
+    if (nextName !== (me.name ?? '').trim()) {
+      const n = validateName(settingsName);
+      if (n.status !== 'ok') {
+        setSettingsTouched((t) => ({ ...t, name: true }));
+        return;
+      }
+      payload.name = nextName;
+    }
+
+    if (nextEmail !== currentEmail) {
+      const e = validateEmail(settingsEmail);
+      if (e.status !== 'ok') {
+        setSettingsTouched((t) => ({ ...t, email: true }));
+        return;
+      }
+      payload.email = nextEmail;
+    }
+
+    if (settingsPassword) {
+      const p = validatePassword(settingsPassword);
+      if (p.status !== 'ok') {
+        setSettingsTouched((t) => ({ ...t, password: true }));
+        return;
+      }
+      if (!settingsPasswordConfirm || settingsPasswordConfirm !== settingsPassword) {
+        setSettingsTouched((t) => ({ ...t, passwordConfirm: true }));
+        return;
+      }
+      payload.password = settingsPassword;
+    }
+
+    if (settingsAvatarRemoved) {
+      payload.avatarRemove = true;
+    } else if (settingsAvatarData) {
+      payload.avatarData = settingsAvatarData;
+    }
+
+    if (!Object.keys(payload).length) {
+      setSettingsMessage('No changes to save');
+      return;
+    }
+
+    setSettingsBusy(true);
+    setSettingsMessage(null);
+    try {
+      const res = await fetch('/api/auth/me', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const err = String(data?.error ?? 'update_failed');
+        if (err === 'email_in_use') setSettingsMessage('Email is already in use');
+        else if (err === 'bad_email') setSettingsMessage('Enter a valid email');
+        else if (err === 'bad_name') setSettingsMessage('Name is too short');
+        else if (err === 'bad_password') setSettingsMessage('Password must be at least 8 characters');
+        else if (err === 'bad_avatar') setSettingsMessage('Avatar must be an image file');
+        else if (err === 'avatar_too_large') setSettingsMessage('Avatar is too large');
+        else if (err === 'no_changes') setSettingsMessage('No changes to save');
+        else setSettingsMessage('Failed to update profile');
+        return;
+      }
+      await refreshMe();
+      setSettingsPassword('');
+      setSettingsPasswordConfirm('');
+      setSettingsAvatarData(null);
+      setSettingsAvatarRemoved(false);
+      if (data?.pendingEmail) {
+        setSettingsNotice(`Confirmation sent to ${data.pendingEmail}`);
+      } else {
+        setSettingsNotice('Changes saved');
+      }
+      if (typeof data?.devEmailChangeUrl === 'string' && data.devEmailChangeUrl) {
+        setSettingsMessage(`Dev email confirmation: ${data.devEmailChangeUrl}`);
+      } else {
+        setSettingsMessage(null);
+      }
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
+  const handleAvatarPick = () => {
+    avatarInputRef.current?.click();
+  };
+
+  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.currentTarget.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setSettingsMessage('Avatar must be an image file');
+      return;
+    }
+    if (file.size > 1_000_000) {
+      setSettingsMessage('Avatar is too large (max 1MB)');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== 'string') return;
+      setSettingsAvatarData(result);
+      setSettingsAvatarRemoved(false);
+      setSettingsMessage(null);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const openOAuth = (provider: 'google' | 'yandex' | 'telegram') => {
     if (providers && !providers[provider]) {
       setMessage(`${provider} не настроен`);
@@ -632,6 +895,7 @@ export const Presence: React.FC = () => {
           registered={myRegistered}
           highlight
           theme={theme}
+          imageUrl={myAvatarUrl}
           onClick={() => setOpen((v) => !v)}
         />
         <div style={{ display: 'flex', alignItems: 'center' }}>
@@ -644,7 +908,7 @@ export const Presence: React.FC = () => {
                 zIndex: idx,
               }}
             >
-              <Avatar name={p.name} seed={p.avatarSeed} registered={p.registered} theme={theme} />
+              <Avatar name={p.name} seed={p.avatarSeed} registered={p.registered} theme={theme} imageUrl={p.avatarUrl} />
             </div>
           ))}
         </div>
@@ -669,26 +933,10 @@ export const Presence: React.FC = () => {
         >
           <div style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 600 }}>{me.name}</div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>{me.email || '—'}</div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
             <button
               type="button"
-              onClick={doLogout}
-              disabled={busy}
-              style={{
-                flex: 1,
-                borderRadius: 10,
-                border: '1px solid var(--border-strong)',
-                background: 'transparent',
-                color: 'var(--text-primary)',
-                padding: '8px 10px',
-                cursor: busy ? 'not-allowed' : 'pointer',
-              }}
-            >
-              Logout
-            </button>
-            <button
-              type="button"
-              onClick={close}
+              onClick={openSettings}
               style={{
                 borderRadius: 10,
                 border: '1px solid var(--border-strong)',
@@ -696,10 +944,304 @@ export const Presence: React.FC = () => {
                 color: 'var(--text-primary)',
                 padding: '8px 10px',
                 cursor: 'pointer',
+                textAlign: 'left',
               }}
             >
-              Close
+              Account settings
             </button>
+            <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.45 }} />
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <button
+                type="button"
+                onClick={toggleTheme}
+                title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: 999,
+                  border: '1px solid var(--border-strong)',
+                  background: theme === 'light' ? 'var(--accent-glow)' : 'transparent',
+                  color: 'var(--text-primary)',
+                  display: 'grid',
+                  placeItems: 'center',
+                  cursor: 'pointer',
+                }}
+              >
+                {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+              </button>
+              <button
+                type="button"
+                onClick={toggleSnow}
+                title={snowEnabled ? 'Disable Snow' : 'Enable Snow'}
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: 999,
+                  border: '1px solid var(--border-strong)',
+                  background: snowEnabled ? 'var(--accent-glow)' : 'transparent',
+                  color: 'var(--text-primary)',
+                  display: 'grid',
+                  placeItems: 'center',
+                  cursor: 'pointer',
+                }}
+              >
+                <Snowflake size={18} />
+              </button>
+            </div>
+            <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.45 }} />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                type="button"
+                onClick={doLogout}
+                disabled={busy}
+                style={{
+                  flex: 1,
+                  borderRadius: 10,
+                  border: '1px solid var(--border-strong)',
+                  background: 'transparent',
+                  color: 'var(--text-primary)',
+                  padding: '8px 10px',
+                  cursor: busy ? 'not-allowed' : 'pointer',
+                }}
+              >
+                Logout
+              </button>
+              <button
+                type="button"
+                onClick={close}
+                style={{
+                  borderRadius: 10,
+                  border: '1px solid var(--border-strong)',
+                  background: 'transparent',
+                  color: 'var(--text-primary)',
+                  padding: '8px 10px',
+                  cursor: 'pointer',
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Account settings modal for authenticated users */}
+      {settingsOpen && me && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 2000,
+            background: 'rgba(0,0,0,0.45)',
+            display: 'grid',
+            placeItems: isCompactAuth ? 'end center' : 'center',
+            padding:
+              'calc(12px + env(safe-area-inset-top, 0px)) calc(12px + env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px))',
+          }}
+          onPointerDown={closeSettings}
+        >
+          <div style={{ display: 'grid', justifyItems: 'center', position: 'relative' }}>
+            {settingsNotice && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: '50%',
+                  transform: 'translate(-50%, -120%)',
+                  padding: '8px 12px',
+                  borderRadius: 999,
+                  border: '1px solid var(--border-strong)',
+                  background: 'var(--bg-node)',
+                  color: 'var(--text-primary)',
+                  fontSize: 12,
+                  boxShadow: '0 10px 24px rgba(0,0,0,0.35)',
+                  opacity: settingsNoticeVisible ? 0.72 : 0,
+                  transition: 'opacity 220ms ease',
+                  pointerEvents: 'none',
+                }}
+              >
+                {settingsNotice}
+              </div>
+            )}
+            <div
+              style={{
+                width: isCompactAuth ? 'min(680px, 100%)' : 'min(520px, 92vw)',
+                borderRadius: isCompactAuth ? '16px 16px 14px 14px' : 16,
+                background: 'var(--bg-node)',
+                border: '1px solid var(--border-strong)',
+                boxShadow: '0 20px 70px rgba(0,0,0,0.55)',
+                padding: 16,
+                boxSizing: 'border-box',
+                maxHeight: isCompactAuth ? 'calc(var(--visual-height, 100vh) - env(safe-area-inset-top, 0px) - 12px)' : undefined,
+                overflowY: isCompactAuth ? 'auto' : undefined,
+                paddingBottom: isCompactAuth ? 'calc(16px + env(safe-area-inset-bottom, 0px))' : 16,
+                WebkitOverflowScrolling: isCompactAuth ? 'touch' : undefined,
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>Account settings</div>
+                <button
+                  type="button"
+                  onClick={closeSettings}
+                  style={{
+                    borderRadius: 10,
+                    border: '1px solid var(--border-strong)',
+                    background: 'transparent',
+                    color: 'var(--text-primary)',
+                    padding: '6px 10px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
+                <Avatar
+                  name={settingsName || myName}
+                  seed={mySeed}
+                  registered
+                  theme={theme}
+                  imageUrl={settingsAvatarPreview}
+                  size={64}
+                />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Profile photo</div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      onClick={handleAvatarPick}
+                      style={{
+                        borderRadius: 10,
+                        border: '1px solid var(--border-strong)',
+                        background: 'transparent',
+                        color: 'var(--text-primary)',
+                        padding: '8px 10px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {settingsAvatarPreview ? 'Change' : 'Upload'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSettingsAvatarData(null);
+                        setSettingsAvatarRemoved(true);
+                      }}
+                      disabled={!settingsAvatarPreview}
+                      style={{
+                        borderRadius: 10,
+                        border: '1px solid var(--border-strong)',
+                        background: 'transparent',
+                        color: 'var(--text-primary)',
+                        padding: '8px 10px',
+                        cursor: settingsAvatarPreview ? 'pointer' : 'not-allowed',
+                        opacity: settingsAvatarPreview ? 1 : 0.6,
+                      }}
+                    >
+                      Remove
+                    </button>
+                    <input
+                      ref={avatarInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={handleAvatarChange}
+                      style={{ display: 'none' }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 12 }}>
+                <LabeledInputField
+                  id="settings-name"
+                  label="Name"
+                  value={settingsName}
+                  onChange={setSettingsName}
+                  onBlur={() => setSettingsTouched((t) => ({ ...t, name: true }))}
+                  placeholder="Your name"
+                  status={getSettingsNameUi().status}
+                  errorText={getSettingsNameUi().error}
+                />
+                <LabeledInputField
+                  id="settings-email"
+                  label="Email"
+                  value={settingsEmail}
+                  onChange={setSettingsEmail}
+                  onBlur={() => setSettingsTouched((t) => ({ ...t, email: true }))}
+                  placeholder="email@example.com"
+                  autoComplete="email"
+                  inputMode="email"
+                  status={getSettingsEmailUi().status}
+                  errorText={getSettingsEmailUi().error}
+                />
+                <LabeledInputField
+                  id="settings-password"
+                  label="New password"
+                  value={settingsPassword}
+                  onChange={setSettingsPassword}
+                  onBlur={() => setSettingsTouched((t) => ({ ...t, password: true }))}
+                  placeholder="Leave empty to keep current"
+                  type="password"
+                  autoComplete="new-password"
+                  status={getSettingsPasswordUi().status}
+                  errorText={getSettingsPasswordUi().error}
+                />
+                <LabeledInputField
+                  id="settings-password-confirm"
+                  label="Confirm password"
+                  value={settingsPasswordConfirm}
+                  onChange={setSettingsPasswordConfirm}
+                  onBlur={() => setSettingsTouched((t) => ({ ...t, passwordConfirm: true }))}
+                  placeholder="Repeat new password"
+                  type="password"
+                  autoComplete="new-password"
+                  status={getSettingsPasswordConfirmUi().status}
+                  errorText={getSettingsPasswordConfirmUi().error}
+                />
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                  Leave the password empty if you do not want to change it.
+                </div>
+              </div>
+
+              {settingsMessage && (
+                <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-secondary)' }}>{settingsMessage}</div>
+              )}
+
+              <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+                <button
+                  type="button"
+                  onClick={saveSettings}
+                  disabled={settingsBusy}
+                  style={{
+                    flex: 1,
+                    borderRadius: 12,
+                    border: '1px solid var(--border-strong)',
+                    background: 'var(--accent-primary)',
+                    color: '#fff',
+                    padding: '10px 12px',
+                    cursor: settingsBusy ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  Save changes
+                </button>
+                <button
+                  type="button"
+                  onClick={closeSettings}
+                  style={{
+                    borderRadius: 12,
+                    border: '1px solid var(--border-strong)',
+                    background: 'transparent',
+                    color: 'var(--text-primary)',
+                    padding: '10px 12px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

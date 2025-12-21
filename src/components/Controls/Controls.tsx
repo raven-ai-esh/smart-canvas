@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Activity, Hand, Moon, Sun, PenTool, Eraser, Highlighter, Type, X, SlidersHorizontal, Snowflake, Grid3x3, Eye, Paintbrush } from 'lucide-react';
+import { Activity, Hand, PenTool, Eraser, Highlighter, Type, X, SlidersHorizontal, Grid3x3, Eye } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import type { PenToolType } from '../../types';
 
@@ -99,13 +99,12 @@ const ControlButton: React.FC<ControlButtonProps> = ({ title, onClick, active, d
 };
 
 export const Controls: React.FC = () => {
-    const { moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, monitoringMode, toggleMonitoringMode, theme, toggleTheme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, snowEnabled, toggleSnow } = useStore();
+    const { moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, monitoringMode, toggleMonitoringMode, theme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode } = useStore();
 
     const controlsRootRef = useRef<HTMLDivElement | null>(null);
 
     // Tool menu visibility
     const [showToolMenu, setShowToolMenu] = useState(false);
-    const [showDisplayMenu, setShowDisplayMenu] = useState(false);
     const [showModeMenu, setShowModeMenu] = useState(false);
     const [toastText, setToastText] = useState<string | null>(null);
     const [toastVisible, setToastVisible] = useState(false);
@@ -174,7 +173,6 @@ export const Controls: React.FC = () => {
             if (!root) return;
             if (root.contains(e.target as Node)) return;
             setShowToolMenu(false);
-            setShowDisplayMenu(false);
             setShowModeMenu(false);
         };
         document.addEventListener('pointerdown', handlePointerDown);
@@ -184,19 +182,16 @@ export const Controls: React.FC = () => {
     useEffect(() => {
         if (!focusMode) return;
         setShowToolMenu(false);
-        setShowDisplayMenu(false);
         setShowModeMenu(false);
     }, [focusMode]);
 
     const handlePenClick = () => {
-        setShowDisplayMenu(false);
         setShowModeMenu(false);
         setShowToolMenu(!showToolMenu);
     };
 
     const handleTextClick = () => {
         setShowToolMenu(false);
-        setShowDisplayMenu(false);
         setShowModeMenu(false);
         toggleTextMode();
     };
@@ -212,21 +207,13 @@ export const Controls: React.FC = () => {
         setShowToolMenu(false);
     };
 
-    const handleDisplayClick = () => {
-        setShowToolMenu(false);
-        setShowModeMenu(false);
-        setShowDisplayMenu((v) => !v);
-    };
-
     const handleModeClick = () => {
         setShowToolMenu(false);
-        setShowDisplayMenu(false);
         setShowModeMenu((v) => !v);
     };
 
     const handleFocusClick = () => {
         setShowToolMenu(false);
-        setShowDisplayMenu(false);
         setShowModeMenu(false);
         toggleFocusMode();
     };
@@ -240,13 +227,10 @@ export const Controls: React.FC = () => {
 
     const penMenuBorderColor = theme === 'light' ? undefined : 'var(--accent-primary)';
     const penMenuInactiveFill = theme === 'light' ? 'var(--accent-glow)' : undefined;
-    const displayMenuBorderColor = theme === 'light' ? undefined : 'var(--border-display-menu)';
-    const displayMenuIconColor = theme === 'light' ? 'var(--border-display-menu)' : undefined;
 
-    const baseRowButtonCount = 5;
+    const baseRowButtonCount = 4;
     const modeAnchorOffset = (1 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP;
-    const penAnchorOffset = (2 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP; // Move, Modes, Pen, Text, Display
-    const displayAnchorOffset = (4 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP;
+    const penAnchorOffset = (2 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP; // Move, Modes, Pen, Text
 
     // Sub-menus should “grow” vertically from their base button.
     // Place the submenu so its bottom-most button sits just above the base row.
@@ -358,64 +342,6 @@ export const Controls: React.FC = () => {
 	                        ))}
 	                    </div>
 	                )}
-
-                {/* Secondary stack for Display menu (Theme + Snow) */}
-                {!focusMode && (
-                    <div
-                        style={{
-                            position: 'fixed',
-                            left: `calc(50% + ${displayAnchorOffset}px)`,
-                            bottom: subStackBottom,
-                            transform: `translateX(-50%) translateY(${showDisplayMenu ? 0 : 10}px) scale(${showDisplayMenu ? 1 : 0.96})`,
-                            zIndex: 1600,
-                            display: 'flex',
-                            flexDirection: 'column-reverse',
-                            gap: BUTTON_GAP,
-                            transformOrigin: '50% 100%',
-                            pointerEvents: showDisplayMenu ? 'auto' : 'none',
-                            opacity: showDisplayMenu ? 1 : 0,
-                            filter: showDisplayMenu ? 'blur(0)' : 'blur(0.8px)',
-                            transition: 'opacity 180ms ease, transform 180ms ease, filter 180ms ease',
-                        }}
-                    >
-                        {[
-                            {
-                                key: 'theme',
-                                title: theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode',
-                                onClick: toggleTheme,
-                                active: false,
-                                child: theme === 'dark' ? <Moon size={18} /> : <Sun size={18} />,
-                            },
-                            {
-                                key: 'snow',
-                                title: snowEnabled ? 'Disable Snow' : 'Enable Snow',
-                                onClick: toggleSnow,
-                                active: snowEnabled,
-                                child: <Snowflake size={18} />,
-                            },
-                        ].map((b, idx) => (
-                            <div
-                                key={b.key}
-                                style={{
-                                    opacity: showDisplayMenu ? 1 : 0,
-                                    transform: `translateY(${showDisplayMenu ? 0 : 10}px) scale(${showDisplayMenu ? 1 : 0.92})`,
-                                    transition: 'opacity 180ms ease, transform 180ms ease',
-                                    transitionDelay: showDisplayMenu ? `${idx * 35}ms` : '0ms',
-                                }}
-                            >
-                                <ControlButton
-                                    onClick={b.onClick}
-                                    title={b.title}
-                                    active={b.active}
-                                    borderColor={displayMenuBorderColor}
-                                    iconColor={displayMenuIconColor}
-                                >
-                                    {b.child}
-                                </ControlButton>
-                            </div>
-                        ))}
-                    </div>
-                )}
 
                 {/* Secondary stack for Mode menu (Physics + Grid + Focus) */}
                 {!focusMode && (
@@ -536,13 +462,6 @@ export const Controls: React.FC = () => {
                             <Type size={18} />
                         </ControlButton>
 
-                        <ControlButton
-                            onClick={handleDisplayClick}
-                            title="Display"
-                            active={showDisplayMenu}
-                        >
-                            <Paintbrush size={18} />
-                        </ControlButton>
                         </>
                     )}
 	            </div>
