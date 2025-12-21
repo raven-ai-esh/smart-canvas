@@ -643,6 +643,13 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+.editorPreview :global(img) {
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+    display: block;
+}
+
 .editorPlaceholder {
     color: var(--text-dim);
 }

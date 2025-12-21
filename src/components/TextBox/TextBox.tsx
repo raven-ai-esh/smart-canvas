@@ -46,6 +46,7 @@ export function TextBox({
   const selectTextBox = useStore((s) => s.selectTextBox);
 
   const isEditing = editingId === box.id;
+  const isImage = box.kind === 'image' && typeof box.src === 'string' && box.src.length > 0;
   const isSelected = selectedId === box.id || selectedIds.includes(box.id);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const measureRef = React.useRef<HTMLDivElement | null>(null);
@@ -81,6 +82,7 @@ export function TextBox({
   // Auto-fit font size to the current box (smooth updates, no jumping).
   React.useEffect(() => {
     const el = measureRef.current;
+    if (isImage) return;
     if (!el) return;
 
     // The container uses `box-sizing: border-box` and has a 1px border even when transparent.
@@ -408,7 +410,7 @@ export function TextBox({
         if (last && now - last.t < 320 && dist < 24) {
           lastTapRef.current = null;
           selectTextBox(box.id);
-          setEditingId(box.id);
+          if (!isImage) setEditingId(box.id);
         } else {
           lastTapRef.current = { t: now, x: e.clientX, y: e.clientY };
           selectTextBox(box.id);
@@ -451,6 +453,7 @@ export function TextBox({
 
   const onDoubleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (isImage) return;
     setEditingId(box.id);
     selectTextBox(box.id);
   };
@@ -565,13 +568,17 @@ export function TextBox({
         />
       ) : (
         <div
-          className={`${styles.display} ${box.text ? '' : styles.placeholder}`}
+          className={`${styles.display} ${(!isImage && !box.text) ? styles.placeholder : ''}`}
           style={{ fontSize, lineHeight: 1.25 }}
           onPointerMove={onDragMove}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
         >
-          {box.text || 'Type…'}
+          {isImage ? (
+            <img className={styles.imageDisplay} src={box.src} alt="" draggable={false} />
+          ) : (
+            (box.text || 'Type…')
+          )}
         </div>
       )}
 

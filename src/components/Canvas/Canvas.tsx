@@ -176,6 +176,8 @@ export const Canvas: React.FC = () => {
     const isPinching = useRef(false); // Block panning during pinch
     const clipboardRef = useRef<ClipboardPayload | null>(null);
     const pasteCountRef = useRef(0);
+    const pasteEventHandledAtRef = useRef(0);
+    const pasteFallbackTimerRef = useRef<number | null>(null);
 	    const pendingDragUndoSnapshotRef = useRef<{ nodes: NodeData[]; edges: EdgeData[]; drawings: any[]; textBoxes: any[]; tombstones: any } | null>(null);
     const dragUndoCommittedRef = useRef(false);
     const dragStartPosRef = useRef<{ x: number; y: number } | null>(null);
@@ -724,6 +726,484 @@ export const Canvas: React.FC = () => {
 
     // Handle Hotkeys
     useEffect(() => {
+        const isEditableTarget = (target: EventTarget | null) => {
+            if (!(target instanceof HTMLElement)) return false;
+            if (target.closest('input, textarea, select')) return true;
+            if (target.isContentEditable) return true;
+            const ce = target.closest('[contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]');
+            return !!ce;
+        };
+
+        const getPasteWorldPos = () => {
+            const el = containerRef.current;
+            if (!el) return { x: 0, y: 0 };
+            if (lastPointerKnownRef.current) {
+                return screenToWorld(lastPointerPos.current.x, lastPointerPos.current.y);
+            }
+            const rect = el.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            return screenToWorld(cx, cy);
+        };
+
+        const tryParsePayload = (raw: string): ClipboardPayload | null => {
+            try {
+                const obj = JSON.parse(raw);
+                if (!obj || typeof obj !== 'object') return null;
+                if (obj.kind === 'node' && obj.data && typeof obj.data === 'object') return obj;
+                if (obj.kind === 'edge' && obj.data && typeof obj.data === 'object') return obj;
+                if (
+                    obj.kind === 'selection'
+                    && Array.isArray(obj.nodes)
+                    && Array.isArray(obj.edges)
+                    && Array.isArray(obj.textBoxes)
+                ) return obj;
+                return null;
+            } catch {
+                return null;
+            }
+        };
+
+        const getPastePlacement = () => {
+            const n = pasteCountRef.current++;
+            return {
+                pos: getPasteWorldPos(),
+                offset: 36 + (n % 6) * 10,
+            };
+        };
+
+        const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+        const normalizeUrl = (raw: string) => {
+            const trimmed = raw.trim();
+            if (!trimmed) return null;
+            try {
+                return new URL(trimmed);
+            } catch {
+                if (trimmed.startsWith('www.')) {
+                    try {
+                        return new URL(`https://${trimmed}`);
+                    } catch {
+                        return null;
+                    }
+                }
+                return null;
+            }
+        };
+
+        const isLikelyImageUrl = (url: URL) => /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(url.pathname);
+
+        const createTextBoxFromText = (text: string) => {
+            const { pos, offset } = getPastePlacement();
+            const lines = text.split(/\r?\n/);
+            const maxLine = lines.reduce((acc, line) => Math.max(acc, line.length), 1);
+            const width = clamp(maxLine * 7 + 48, 160, 420);
+            const height = clamp(lines.length * 22 + 32, 64, 260);
+            addTextBox({
+                id: uuidv4(),
+                x: pos.x + offset - width / 2,
+                y: pos.y + offset - height / 2,
+                width,
+                height,
+                text,
+            });
+        };
+
+        const createNode = (title: string, content: string) => {
+            const { pos, offset } = getPastePlacement();
+            addNode({
+                id: uuidv4(),
+                title,
+                content,
+                type: 'idea',
+                x: pos.x + offset,
+                y: pos.y + offset,
+                clarity: 0.5,
+                energy: 50,
+            });
+        };
+
+        const createNodeFromText = (text: string) => {
+            const trimmed = text.trim();
+            if (!trimmed) return;
+            const lines = trimmed.split(/\r?\n/);
+            const title = (lines[0] || 'Note').trim().slice(0, 80) || 'Note';
+            const body = lines.slice(1).join('\n').trim();
+            const content = body || trimmed;
+            createNode(title, content);
+        };
+
+        const createLinkBox = (url: URL) => {
+            createTextBoxFromText(url.toString());
+        };
+
+        const createImageBox = (src: string) => {
+            const { pos, offset } = getPastePlacement();
+            const maxSize = 360;
+            const minSize = 140;
+            const fallbackW = 320;
+            const fallbackH = 240;
+
+            const addImageBox = (w: number, h: number) => {
+                const width = clamp(w, minSize, maxSize);
+                const height = clamp(h, minSize, maxSize);
+                addTextBox({
+                    id: uuidv4(),
+                    x: pos.x + offset - width / 2,
+                    y: pos.y + offset - height / 2,
+                    width,
+                    height,
+                    text: '',
+                    kind: 'image',
+                    src,
+                });
+            };
+
+            const img = new Image();
+            img.onload = () => {
+                const w = img.naturalWidth || fallbackW;
+                const h = img.naturalHeight || fallbackH;
+                if (!w || !h) {
+                    addImageBox(fallbackW, fallbackH);
+                    return;
+                }
+                const scale = Math.min(1, maxSize / Math.max(w, h));
+                addImageBox(w * scale, h * scale);
+            };
+            img.onerror = () => addImageBox(fallbackW, fallbackH);
+            img.src = src;
+        };
+
+        const extractImageFromHtml = (html: string) => {
+            try {
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                const img = doc.querySelector('img');
+                const src = img?.getAttribute('src');
+                return src || null;
+            } catch {
+                return null;
+            }
+        };
+
+        const readBlobAsDataUrl = (blob: Blob) => new Promise<string | null>((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : null);
+            reader.onerror = () => resolve(null);
+            reader.readAsDataURL(blob);
+        });
+
+        const downscaleImageBlob = async (blob: Blob) => {
+            const fallback = () => readBlobAsDataUrl(blob);
+            if (!blob.type.startsWith('image/')) return fallback();
+            if (typeof createImageBitmap !== 'function') return fallback();
+
+            try {
+                const bitmap = await createImageBitmap(blob);
+                const w = bitmap.width || 0;
+                const h = bitmap.height || 0;
+                if (!w || !h) {
+                    bitmap.close?.();
+                    return fallback();
+                }
+                const maxDim = 960;
+                const scale = Math.min(1, maxDim / Math.max(w, h));
+                if (scale >= 1) {
+                    bitmap.close?.();
+                    return fallback();
+                }
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.max(1, Math.round(w * scale));
+                canvas.height = Math.max(1, Math.round(h * scale));
+                const ctx = canvas.getContext('2d');
+                if (!ctx) {
+                    bitmap.close?.();
+                    return fallback();
+                }
+                ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+                bitmap.close?.();
+                const webp = canvas.toDataURL('image/webp', 0.92);
+                if (webp.startsWith('data:image/webp')) return webp;
+                return canvas.toDataURL('image/png');
+            } catch {
+                return fallback();
+            }
+        };
+
+        const doPasteSelection = (payload: ClipboardPayload | null) => {
+            if (!payload) return;
+
+            const { pos, offset } = getPastePlacement();
+            if (payload.kind === 'node') {
+                const node = payload.data;
+                addNode({
+                    ...node,
+                    id: uuidv4(),
+                    x: pos.x + offset,
+                    y: pos.y + offset,
+                    createdAt: undefined,
+                    updatedAt: undefined,
+                });
+                return;
+            }
+
+            if (payload.kind === 'edge') {
+                const edge = payload.data;
+                // Only paste edge if nodes exist
+                const { nodes } = useStore.getState();
+                const hasSource = nodes.some((nn) => nn.id === edge.source);
+                const hasTarget = nodes.some((nn) => nn.id === edge.target);
+                if (!hasSource || !hasTarget) return;
+                addEdge({
+                    ...edge,
+                    id: uuidv4(),
+                    createdAt: undefined,
+                    updatedAt: undefined,
+                });
+                return;
+            }
+
+            const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+            const textBoxes = Array.isArray(payload.textBoxes) ? payload.textBoxes : [];
+            const edges = Array.isArray(payload.edges) ? payload.edges : [];
+            if (nodes.length === 0 && textBoxes.length === 0 && edges.length === 0) return;
+
+            const points = [
+                ...nodes.map((node) => ({ x: node.x, y: node.y })),
+                ...textBoxes.map((tb) => ({ x: tb.x + tb.width / 2, y: tb.y + tb.height / 2 })),
+            ];
+            const centerX = points.length ? points.reduce((acc, p) => acc + p.x, 0) / points.length : pos.x;
+            const centerY = points.length ? points.reduce((acc, p) => acc + p.y, 0) / points.length : pos.y;
+            const dx = pos.x - centerX + offset;
+            const dy = pos.y - centerY + offset;
+
+            const idMap = new Map<string, string>();
+            const nextNodes = nodes.map((node) => {
+                const nextId = uuidv4();
+                idMap.set(node.id, nextId);
+                return {
+                    ...node,
+                    id: nextId,
+                    x: node.x + dx,
+                    y: node.y + dy,
+                    createdAt: undefined,
+                    updatedAt: undefined,
+                };
+            });
+            const nextTextBoxes = textBoxes.map((tb) => ({
+                ...tb,
+                id: uuidv4(),
+                x: tb.x + dx,
+                y: tb.y + dy,
+                createdAt: undefined,
+                updatedAt: undefined,
+            }));
+            const existingIds = new Set(useStore.getState().nodes.map((nn) => nn.id));
+            const nextEdges = edges
+                .map((edge) => {
+                    const mappedSource = idMap.get(edge.source);
+                    const mappedTarget = idMap.get(edge.target);
+                    const source = mappedSource ?? edge.source;
+                    const target = mappedTarget ?? edge.target;
+                    const hasSource = !!mappedSource || existingIds.has(edge.source);
+                    const hasTarget = !!mappedTarget || existingIds.has(edge.target);
+                    if (!hasSource || !hasTarget) return null;
+                    return {
+                        ...edge,
+                        id: uuidv4(),
+                        source,
+                        target,
+                        createdAt: undefined,
+                        updatedAt: undefined,
+                    };
+                })
+                .filter(Boolean) as EdgeData[];
+
+            nextNodes.forEach((node) => addNode(node));
+            nextTextBoxes.forEach((tb) => addTextBox(tb));
+            nextEdges.forEach((edge) => addEdge(edge));
+        };
+
+        const pasteFromText = (raw: string) => {
+            const text = raw.replace(/\r\n/g, '\n');
+            const trimmed = text.trim();
+            if (!trimmed) return;
+            if (trimmed.startsWith('data:image/')) {
+                createImageBox(trimmed);
+                return;
+            }
+            const url = normalizeUrl(trimmed);
+            if (url) {
+                if (isLikelyImageUrl(url)) {
+                    createImageBox(url.toString());
+                } else {
+                    createLinkBox(url);
+                }
+                return;
+            }
+            const lines = trimmed.split('\n');
+            if (lines.length > 1 || trimmed.length > 140) {
+                createNodeFromText(trimmed);
+            } else {
+                createTextBoxFromText(trimmed);
+            }
+        };
+
+        const pasteFromClipboardData = async (clipboardData: DataTransfer | null, localPayload: ClipboardPayload | null) => {
+            if (!clipboardData) return false;
+            const items = Array.from(clipboardData.items || []);
+            let imageBlob: Blob | null = null;
+
+            for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                    const file = item.getAsFile();
+                    if (file) {
+                        imageBlob = file;
+                        break;
+                    }
+                }
+            }
+
+            if (!imageBlob && clipboardData.files?.length) {
+                const file = Array.from(clipboardData.files).find((f) => f.type.startsWith('image/'));
+                imageBlob = file ?? null;
+            }
+
+            if (imageBlob) {
+                const dataUrl = await downscaleImageBlob(imageBlob);
+                if (dataUrl) {
+                    createImageBox(dataUrl);
+                    return true;
+                }
+            }
+
+            const htmlText = clipboardData.getData('text/html');
+            const plainText = clipboardData.getData('text/plain');
+            const uriText = clipboardData.getData('text/uri-list');
+
+            const uriLine = uriText
+                ? uriText.split(/\r?\n/).map((line) => line.trim()).find((line) => line && !line.startsWith('#')) ?? ''
+                : '';
+            const rawText = plainText || uriLine;
+
+            if (rawText) {
+                const parsed = tryParsePayload(rawText);
+                if (parsed) {
+                    doPasteSelection(parsed);
+                    return true;
+                }
+            }
+
+            if (htmlText) {
+                const imgSrc = extractImageFromHtml(htmlText);
+                if (imgSrc) {
+                    createImageBox(imgSrc);
+                    return true;
+                }
+                const htmlTextContent = htmlText.replace(/<[^>]+>/g, ' ').trim();
+                if (htmlTextContent) {
+                    pasteFromText(htmlTextContent);
+                    return true;
+                }
+            }
+
+            if (rawText) {
+                pasteFromText(rawText);
+                return true;
+            }
+
+            if (localPayload) {
+                doPasteSelection(localPayload);
+                return true;
+            }
+
+            return false;
+        };
+
+        const pasteFromClipboard = async (localPayload: ClipboardPayload | null) => {
+            if (navigator.clipboard?.read) {
+                try {
+                    const items = await navigator.clipboard.read();
+                    let imageBlob: Blob | null = null;
+                    let htmlText: string | null = null;
+                    let plainText: string | null = null;
+                    let uriText: string | null = null;
+
+                    for (const item of items) {
+                        for (const type of item.types) {
+                            if (!imageBlob && type.startsWith('image/')) {
+                                imageBlob = await item.getType(type);
+                            } else if (!htmlText && type === 'text/html') {
+                                htmlText = await item.getType(type).then((b) => b.text());
+                            } else if (!plainText && type === 'text/plain') {
+                                plainText = await item.getType(type).then((b) => b.text());
+                            } else if (!uriText && type === 'text/uri-list') {
+                                uriText = await item.getType(type).then((b) => b.text());
+                            }
+                        }
+                    }
+
+                    const uriLine = uriText
+                        ? uriText.split(/\r?\n/).map((line) => line.trim()).find((line) => line && !line.startsWith('#')) ?? ''
+                        : '';
+                    const rawText = plainText ?? uriLine;
+                    if (rawText) {
+                        const parsed = tryParsePayload(rawText);
+                        if (parsed) {
+                            doPasteSelection(parsed);
+                            return;
+                        }
+                    }
+
+                    if (imageBlob) {
+                        const dataUrl = await downscaleImageBlob(imageBlob);
+                        if (dataUrl) {
+                            createImageBox(dataUrl);
+                            return;
+                        }
+                    }
+
+                    if (htmlText) {
+                        const imgSrc = extractImageFromHtml(htmlText);
+                        if (imgSrc) {
+                            createImageBox(imgSrc);
+                            return;
+                        }
+                        const htmlTextContent = htmlText.replace(/<[^>]+>/g, ' ').trim();
+                        if (htmlTextContent) {
+                            pasteFromText(htmlTextContent);
+                            return;
+                        }
+                    }
+
+                    if (rawText) {
+                        pasteFromText(rawText);
+                        return;
+                    }
+
+                    doPasteSelection(localPayload);
+                    return;
+                } catch {
+                    // Fall back to text-only paste.
+                }
+            }
+
+            if (navigator.clipboard?.readText) {
+                navigator.clipboard
+                    .readText()
+                    .then((text) => {
+                        const parsed = tryParsePayload(text);
+                        if (parsed) {
+                            doPasteSelection(parsed);
+                        } else {
+                            pasteFromText(text);
+                        }
+                    })
+                    .catch(() => doPasteSelection(localPayload));
+            } else {
+                doPasteSelection(localPayload);
+            }
+        };
+
         const handleKeyDown = (e: KeyboardEvent) => {
             // Ignore if typing in an input
             const target = e.target as any;
@@ -754,18 +1234,6 @@ export const Canvas: React.FC = () => {
 
             const isMod = e.ctrlKey || e.metaKey;
             const key = String(e.key || '').toLowerCase();
-
-            const getPasteWorldPos = () => {
-                const el = containerRef.current;
-                if (!el) return { x: 0, y: 0 };
-                if (lastPointerKnownRef.current) {
-                    return screenToWorld(lastPointerPos.current.x, lastPointerPos.current.y);
-                }
-                const rect = el.getBoundingClientRect();
-                const cx = rect.left + rect.width / 2;
-                const cy = rect.top + rect.height / 2;
-                return screenToWorld(cx, cy);
-            };
 
             // Cmd/Ctrl + Z: undo / redo
             if (isMod && key === 'z') {
@@ -806,134 +1274,12 @@ export const Canvas: React.FC = () => {
 
             // Cmd/Ctrl + V: paste
             if (isMod && key === 'v') {
-                e.preventDefault();
-
-                const tryParsePayload = (raw: string): ClipboardPayload | null => {
-                    try {
-                        const obj = JSON.parse(raw);
-                        if (!obj || typeof obj !== 'object') return null;
-                        if (obj.kind === 'node' && obj.data && typeof obj.data === 'object') return obj;
-                        if (obj.kind === 'edge' && obj.data && typeof obj.data === 'object') return obj;
-                        if (
-                            obj.kind === 'selection'
-                            && Array.isArray(obj.nodes)
-                            && Array.isArray(obj.edges)
-                            && Array.isArray(obj.textBoxes)
-                        ) return obj;
-                        return null;
-                    } catch {
-                        return null;
-                    }
-                };
-
-                const doPaste = (payload: ClipboardPayload | null) => {
-                    if (!payload) return;
-
-                    const n = pasteCountRef.current++;
-                    const offset = 36 + (n % 6) * 10;
-                    const pos = getPasteWorldPos();
-                    if (payload.kind === 'node') {
-                        const node = payload.data;
-                        addNode({
-                            ...node,
-                            id: uuidv4(),
-                            x: pos.x + offset,
-                            y: pos.y + offset,
-                            createdAt: undefined,
-                            updatedAt: undefined,
-                        });
-                        return;
-                    }
-
-                    if (payload.kind === 'edge') {
-                        const edge = payload.data;
-                        // Only paste edge if nodes exist
-                        const { nodes } = useStore.getState();
-                        const hasSource = nodes.some((nn) => nn.id === edge.source);
-                        const hasTarget = nodes.some((nn) => nn.id === edge.target);
-                        if (!hasSource || !hasTarget) return;
-                        addEdge({
-                            ...edge,
-                            id: uuidv4(),
-                            createdAt: undefined,
-                            updatedAt: undefined,
-                        });
-                        return;
-                    }
-
-                    const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
-                    const textBoxes = Array.isArray(payload.textBoxes) ? payload.textBoxes : [];
-                    const edges = Array.isArray(payload.edges) ? payload.edges : [];
-                    if (nodes.length === 0 && textBoxes.length === 0 && edges.length === 0) return;
-
-                    const points = [
-                        ...nodes.map((node) => ({ x: node.x, y: node.y })),
-                        ...textBoxes.map((tb) => ({ x: tb.x + tb.width / 2, y: tb.y + tb.height / 2 })),
-                    ];
-                    const centerX = points.length ? points.reduce((acc, p) => acc + p.x, 0) / points.length : pos.x;
-                    const centerY = points.length ? points.reduce((acc, p) => acc + p.y, 0) / points.length : pos.y;
-                    const dx = pos.x - centerX + offset;
-                    const dy = pos.y - centerY + offset;
-
-                    const idMap = new Map<string, string>();
-                    const nextNodes = nodes.map((node) => {
-                        const nextId = uuidv4();
-                        idMap.set(node.id, nextId);
-                        return {
-                            ...node,
-                            id: nextId,
-                            x: node.x + dx,
-                            y: node.y + dy,
-                            createdAt: undefined,
-                            updatedAt: undefined,
-                        };
-                    });
-                    const nextTextBoxes = textBoxes.map((tb) => ({
-                        ...tb,
-                        id: uuidv4(),
-                        x: tb.x + dx,
-                        y: tb.y + dy,
-                        createdAt: undefined,
-                        updatedAt: undefined,
-                    }));
-                    const existingIds = new Set(useStore.getState().nodes.map((nn) => nn.id));
-                    const nextEdges = edges
-                        .map((edge) => {
-                            const mappedSource = idMap.get(edge.source);
-                            const mappedTarget = idMap.get(edge.target);
-                            const source = mappedSource ?? edge.source;
-                            const target = mappedTarget ?? edge.target;
-                            const hasSource = !!mappedSource || existingIds.has(edge.source);
-                            const hasTarget = !!mappedTarget || existingIds.has(edge.target);
-                            if (!hasSource || !hasTarget) return null;
-                            return {
-                                ...edge,
-                                id: uuidv4(),
-                                source,
-                                target,
-                                createdAt: undefined,
-                                updatedAt: undefined,
-                            };
-                        })
-                        .filter(Boolean) as EdgeData[];
-
-                    nextNodes.forEach((node) => addNode(node));
-                    nextTextBoxes.forEach((tb) => addTextBox(tb));
-                    nextEdges.forEach((edge) => addEdge(edge));
-                };
-
-                const localPayload = clipboardRef.current;
-                if (navigator.clipboard?.readText) {
-                    navigator.clipboard
-                        .readText()
-                        .then((text) => {
-                            const parsed = tryParsePayload(text);
-                            doPaste(parsed ?? localPayload);
-                        })
-                        .catch(() => doPaste(localPayload));
-                } else {
-                    doPaste(localPayload);
-                }
+                if (pasteFallbackTimerRef.current) window.clearTimeout(pasteFallbackTimerRef.current);
+                const requestedAt = Date.now();
+                pasteFallbackTimerRef.current = window.setTimeout(() => {
+                    if (pasteEventHandledAtRef.current >= requestedAt) return;
+                    void pasteFromClipboard(clipboardRef.current);
+                }, 120);
                 return;
             }
 
@@ -952,8 +1298,24 @@ export const Canvas: React.FC = () => {
             }
         };
 
+        const handlePaste = (e: ClipboardEvent) => {
+            if (isEditableTarget(e.target)) return;
+            pasteEventHandledAtRef.current = Date.now();
+            if (pasteFallbackTimerRef.current) {
+                window.clearTimeout(pasteFallbackTimerRef.current);
+                pasteFallbackTimerRef.current = null;
+            }
+            e.preventDefault();
+            void pasteFromClipboardData(e.clipboardData, clipboardRef.current);
+        };
+
         window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
+        window.addEventListener('paste', handlePaste);
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('paste', handlePaste);
+            if (pasteFallbackTimerRef.current) window.clearTimeout(pasteFallbackTimerRef.current);
+        };
     }, [addEdge, addNode, addTextBox, screenToWorld]);
 
     // Physics Simulation Loop
