@@ -49,6 +49,8 @@ export interface TextBox {
   width: number; // world
   height: number; // world
   text: string;
+  kind?: 'text' | 'image';
+  src?: string;
   createdAt?: number; // epoch ms
   updatedAt?: number; // epoch ms
 }

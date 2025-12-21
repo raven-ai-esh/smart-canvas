@@ -681,13 +681,14 @@ export const useStore = create<AppState>()(
                     // Make tools mutually exclusive with Pen Mode.
                     return next ? { textMode: true, penMode: false } : { textMode: false };
                 }),
-	            addTextBox: (tb) =>
-	                set((state) => {
+            addTextBox: (tb) =>
+                set((state) => {
                     const now = Date.now();
                     const normalized: TextBox = {
                         ...tb,
                         createdAt: tb.createdAt ?? now,
                         updatedAt: tb.updatedAt ?? now,
+                        kind: tb.kind ?? 'text',
                         text: String(tb.text ?? ''),
                     };
                     const textBoxes = [...state.textBoxes, normalized];
@@ -696,17 +697,17 @@ export const useStore = create<AppState>()(
                         textBoxes: { ...state.tombstones.textBoxes },
                     };
                     delete tombstones.textBoxes[normalized.id];
-	                    return {
-	                        ...pushHistoryReducer(state),
-	                        textBoxes,
-	                        tombstones,
-	                        editingTextBoxId: normalized.id,
-	                        selectedTextBoxId: normalized.id,
-	                        selectedTextBoxes: [normalized.id],
-	                        selectedNode: null,
-	                        selectedNodes: [],
-	                        selectedEdge: null,
-	                        selectedEdges: [],
+                    return {
+                        ...pushHistoryReducer(state),
+                        textBoxes,
+                        tombstones,
+                        editingTextBoxId: normalized.kind === 'image' ? null : normalized.id,
+                        selectedTextBoxId: normalized.id,
+                        selectedTextBoxes: [normalized.id],
+                        selectedNode: null,
+                        selectedNodes: [],
+                        selectedEdge: null,
+                        selectedEdges: [],
 	                        neighbors: {},
 	                    };
 	                }),
