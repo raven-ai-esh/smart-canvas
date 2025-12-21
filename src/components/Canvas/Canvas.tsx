@@ -6,7 +6,7 @@ import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
 import { Link2, X } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
-import type { EdgeData, NodeData } from '../../types';
+import type { EdgeData, NodeData, TextBox as TextBoxType } from '../../types';
 import { debugLog } from '../../utils/debug';
 import { TextBox } from '../TextBox/TextBox';
 import { SnowOverlay } from '../Snow/SnowOverlay';
@@ -31,6 +31,10 @@ type SnapRequest = {
     excludeNodeIds?: string[];
     excludeTextBoxIds?: string[];
 };
+type ClipboardPayload =
+    | { kind: 'node'; data: NodeData }
+    | { kind: 'edge'; data: EdgeData }
+    | { kind: 'selection'; nodes: NodeData[]; edges: EdgeData[]; textBoxes: TextBoxType[] };
 
 export const Canvas: React.FC = () => {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -170,7 +174,7 @@ export const Canvas: React.FC = () => {
     const pinchCenter = useRef({ x: 0, y: 0 });
     const pinchStartWorld = useRef<{ x: number; y: number } | null>(null);
     const isPinching = useRef(false); // Block panning during pinch
-    const clipboardRef = useRef<{ kind: 'node'; data: NodeData } | { kind: 'edge'; data: EdgeData } | null>(null);
+    const clipboardRef = useRef<ClipboardPayload | null>(null);
     const pasteCountRef = useRef(0);
 	    const pendingDragUndoSnapshotRef = useRef<{ nodes: NodeData[]; edges: EdgeData[]; drawings: any[]; textBoxes: any[]; tombstones: any } | null>(null);
     const dragUndoCommittedRef = useRef(false);
@@ -767,26 +771,30 @@ export const Canvas: React.FC = () => {
 
             // Cmd/Ctrl + C: copy selected
             if (isMod && key === 'c') {
-                const { selectedNode, selectedEdge } = useStore.getState();
-                if (!selectedNode && !selectedEdge) return;
+                const st = useStore.getState();
+                const selectedNodes = st.selectedNodes?.length ? st.selectedNodes : (st.selectedNode ? [st.selectedNode] : []);
+                const selectedEdges = st.selectedEdges?.length ? st.selectedEdges : (st.selectedEdge ? [st.selectedEdge] : []);
+                const selectedTextBoxes = st.selectedTextBoxes?.length ? st.selectedTextBoxes : (st.selectedTextBoxId ? [st.selectedTextBoxId] : []);
+                if (selectedNodes.length === 0 && selectedEdges.length === 0 && selectedTextBoxes.length === 0) return;
                 e.preventDefault();
 
-                if (selectedNode) {
-                    const node = useStore.getState().nodes.find((n) => n.id === selectedNode);
-                    if (!node) return;
-                    const payload = { kind: 'node' as const, data: node };
-                    clipboardRef.current = payload;
-                    navigator.clipboard?.writeText?.(JSON.stringify(payload)).catch(() => undefined);
-                    return;
+                const nodes = selectedNodes
+                    .map((id) => st.nodes.find((n) => n.id === id))
+                    .filter(Boolean) as NodeData[];
+                let edges = selectedEdges
+                    .map((id) => st.edges.find((ed) => ed.id === id))
+                    .filter(Boolean) as EdgeData[];
+                if (edges.length === 0 && nodes.length > 0) {
+                    const nodeSet = new Set(nodes.map((n) => n.id));
+                    edges = st.edges.filter((ed) => nodeSet.has(ed.source) && nodeSet.has(ed.target));
                 }
+                const textBoxes = selectedTextBoxes
+                    .map((id) => st.textBoxes.find((tb) => tb.id === id))
+                    .filter(Boolean) as TextBoxType[];
 
-                if (selectedEdge) {
-                    const edge = useStore.getState().edges.find((ed) => ed.id === selectedEdge);
-                    if (!edge) return;
-                    const payload = { kind: 'edge' as const, data: edge };
-                    clipboardRef.current = payload;
-                    navigator.clipboard?.writeText?.(JSON.stringify(payload)).catch(() => undefined);
-                }
+                const payload: ClipboardPayload = { kind: 'selection', nodes, edges, textBoxes };
+                clipboardRef.current = payload;
+                navigator.clipboard?.writeText?.(JSON.stringify(payload)).catch(() => undefined);
                 return;
             }
 
@@ -794,19 +802,25 @@ export const Canvas: React.FC = () => {
             if (isMod && key === 'v') {
                 e.preventDefault();
 
-                const tryParsePayload = (raw: string): { kind: 'node'; data: NodeData } | { kind: 'edge'; data: EdgeData } | null => {
+                const tryParsePayload = (raw: string): ClipboardPayload | null => {
                     try {
                         const obj = JSON.parse(raw);
                         if (!obj || typeof obj !== 'object') return null;
                         if (obj.kind === 'node' && obj.data && typeof obj.data === 'object') return obj;
                         if (obj.kind === 'edge' && obj.data && typeof obj.data === 'object') return obj;
+                        if (
+                            obj.kind === 'selection'
+                            && Array.isArray(obj.nodes)
+                            && Array.isArray(obj.edges)
+                            && Array.isArray(obj.textBoxes)
+                        ) return obj;
                         return null;
                     } catch {
                         return null;
                     }
                 };
 
-                const doPaste = (payload: { kind: 'node'; data: NodeData } | { kind: 'edge'; data: EdgeData } | null) => {
+                const doPaste = (payload: ClipboardPayload | null) => {
                     if (!payload) return;
 
                     const n = pasteCountRef.current++;
@@ -825,18 +839,81 @@ export const Canvas: React.FC = () => {
                         return;
                     }
 
-                    const edge = payload.data;
-                    // Only paste edge if nodes exist
-                    const { nodes } = useStore.getState();
-                    const hasSource = nodes.some((nn) => nn.id === edge.source);
-                    const hasTarget = nodes.some((nn) => nn.id === edge.target);
-                    if (!hasSource || !hasTarget) return;
-                    addEdge({
-                        ...edge,
+                    if (payload.kind === 'edge') {
+                        const edge = payload.data;
+                        // Only paste edge if nodes exist
+                        const { nodes } = useStore.getState();
+                        const hasSource = nodes.some((nn) => nn.id === edge.source);
+                        const hasTarget = nodes.some((nn) => nn.id === edge.target);
+                        if (!hasSource || !hasTarget) return;
+                        addEdge({
+                            ...edge,
+                            id: uuidv4(),
+                            createdAt: undefined,
+                            updatedAt: undefined,
+                        });
+                        return;
+                    }
+
+                    const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+                    const textBoxes = Array.isArray(payload.textBoxes) ? payload.textBoxes : [];
+                    const edges = Array.isArray(payload.edges) ? payload.edges : [];
+                    if (nodes.length === 0 && textBoxes.length === 0 && edges.length === 0) return;
+
+                    const points = [
+                        ...nodes.map((node) => ({ x: node.x, y: node.y })),
+                        ...textBoxes.map((tb) => ({ x: tb.x + tb.width / 2, y: tb.y + tb.height / 2 })),
+                    ];
+                    const centerX = points.length ? points.reduce((acc, p) => acc + p.x, 0) / points.length : pos.x;
+                    const centerY = points.length ? points.reduce((acc, p) => acc + p.y, 0) / points.length : pos.y;
+                    const dx = pos.x - centerX + offset;
+                    const dy = pos.y - centerY + offset;
+
+                    const idMap = new Map<string, string>();
+                    const nextNodes = nodes.map((node) => {
+                        const nextId = uuidv4();
+                        idMap.set(node.id, nextId);
+                        return {
+                            ...node,
+                            id: nextId,
+                            x: node.x + dx,
+                            y: node.y + dy,
+                            createdAt: undefined,
+                            updatedAt: undefined,
+                        };
+                    });
+                    const nextTextBoxes = textBoxes.map((tb) => ({
+                        ...tb,
                         id: uuidv4(),
+                        x: tb.x + dx,
+                        y: tb.y + dy,
                         createdAt: undefined,
                         updatedAt: undefined,
-                    });
+                    }));
+                    const existingIds = new Set(useStore.getState().nodes.map((nn) => nn.id));
+                    const nextEdges = edges
+                        .map((edge) => {
+                            const mappedSource = idMap.get(edge.source);
+                            const mappedTarget = idMap.get(edge.target);
+                            const source = mappedSource ?? edge.source;
+                            const target = mappedTarget ?? edge.target;
+                            const hasSource = !!mappedSource || existingIds.has(edge.source);
+                            const hasTarget = !!mappedTarget || existingIds.has(edge.target);
+                            if (!hasSource || !hasTarget) return null;
+                            return {
+                                ...edge,
+                                id: uuidv4(),
+                                source,
+                                target,
+                                createdAt: undefined,
+                                updatedAt: undefined,
+                            };
+                        })
+                        .filter(Boolean) as EdgeData[];
+
+                    nextNodes.forEach((node) => addNode(node));
+                    nextTextBoxes.forEach((tb) => addTextBox(tb));
+                    nextEdges.forEach((edge) => addEdge(edge));
                 };
 
                 const localPayload = clipboardRef.current;
@@ -871,7 +948,7 @@ export const Canvas: React.FC = () => {
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [addEdge, addNode, screenToWorld]);
+    }, [addEdge, addNode, addTextBox, screenToWorld]);
 
     // Physics Simulation Loop
     const physicsEnabled = useStore((state) => state.physicsEnabled);

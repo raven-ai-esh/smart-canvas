@@ -43,11 +43,23 @@ const NoteContentEditor: React.FC<{
     const [editing, setEditing] = useState(false);
     const rootRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const historyPushedRef = useRef(false);
+
+    const ensureHistory = useCallback(() => {
+        if (historyPushedRef.current) return;
+        useStore.getState().pushHistory();
+        historyPushedRef.current = true;
+    }, []);
+
+    React.useEffect(() => {
+        if (!editing) historyPushedRef.current = false;
+    }, [editing]);
 
     const apply = useCallback((fn: (text: string, sel: TextSel) => { nextText: string; nextSelection: TextSel }) => {
         const el = textareaRef.current;
         if (!el) return;
         const { nextText, nextSelection } = fn(el.value, { start: el.selectionStart, end: el.selectionEnd });
+        ensureHistory();
         updateNode(nodeId, { content: nextText });
         requestAnimationFrame(() => {
             const t = textareaRef.current;
@@ -207,7 +219,10 @@ const NoteContentEditor: React.FC<{
                     ref={textareaRef}
                     className={styles.noteContentInput}
                     value={value}
-                    onChange={(e) => updateNode(nodeId, { content: e.target.value })}
+                    onChange={(e) => {
+                        ensureHistory();
+                        updateNode(nodeId, { content: e.target.value });
+                    }}
                     onBlur={handleBlur}
                     onKeyDown={handleKeyDown}
                     onPointerDown={(e) => e.stopPropagation()}
@@ -227,6 +242,17 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
     // Missing state restored
     const [isEditing, setIsEditing] = React.useState(false);
     const titleTouchRef = React.useRef<{ id: number; x: number; y: number } | null>(null);
+    const titleHistoryRef = React.useRef(false);
+
+    React.useEffect(() => {
+        if (!isEditing) titleHistoryRef.current = false;
+    }, [isEditing]);
+
+    const ensureTitleHistory = () => {
+        if (titleHistoryRef.current) return;
+        useStore.getState().pushHistory();
+        titleHistoryRef.current = true;
+    };
 
     const effectiveEnergy = useStore((state) => state.effectiveEnergy[data.id] ?? data.energy);
     const baseEnergy = clampEnergy(Number.isFinite(data.energy) ? data.energy : 50);
@@ -286,7 +312,10 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
                         <input
                             className={styles.cardHeaderInput}
                             value={data.title}
-                            onChange={(e) => updateNode(data.id, { title: e.target.value })}
+                            onChange={(e) => {
+                                ensureTitleHistory();
+                                updateNode(data.id, { title: e.target.value });
+                            }}
                             onBlur={() => setIsEditing(false)}
                             onKeyDown={handleKeyDown}
                             autoFocus
@@ -353,6 +382,7 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
                                     className={styles.energyLiquidGauge}
                                     onPointerDown={(e) => {
                                         e.preventDefault();
+                                        useStore.getState().pushHistory();
                                         const el = e.currentTarget;
                                         const rect = el.getBoundingClientRect();
                                         const t = (rect.bottom - e.clientY) / rect.height;
@@ -427,6 +457,17 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
     const titleTouchRef = useRef<{ id: number; x: number; y: number } | null>(null);
     const [isDraggingProgress, setIsDraggingProgress] = React.useState(false);
     const [showEnergyPanel, setShowEnergyPanel] = React.useState(false);
+    const titleHistoryRef = React.useRef(false);
+
+    React.useEffect(() => {
+        if (!isEditingTitle) titleHistoryRef.current = false;
+    }, [isEditingTitle]);
+
+    const ensureTitleHistory = () => {
+        if (titleHistoryRef.current) return;
+        useStore.getState().pushHistory();
+        titleHistoryRef.current = true;
+    };
     const effectiveEnergy = useStore((state) => state.effectiveEnergy[data.id] ?? data.energy);
     const baseEnergy = clampEnergy(Number.isFinite(data.energy) ? data.energy : 50);
     const energyColor = energyToColor(effectiveEnergy);
@@ -462,6 +503,7 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
 
     const handleEnergyScalePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
         e.preventDefault();
+        useStore.getState().pushHistory();
         const el = e.currentTarget;
         setBaseEnergyFromClientY(e.clientY, el);
         const onMove = (ev: PointerEvent) => setBaseEnergyFromClientY(ev.clientY, el);
@@ -501,6 +543,7 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
         e.preventDefault();
         e.stopPropagation();
         const el = e.currentTarget;
+        useStore.getState().pushHistory();
         startProgressDrag(e.clientX, el);
     };
 
@@ -514,7 +557,10 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
                             <input
                                 className={styles.noteTitleInput}
                                 value={data.title}
-                                onChange={(e) => updateNode(data.id, { title: e.target.value })}
+                                onChange={(e) => {
+                                    ensureTitleHistory();
+                                    updateNode(data.id, { title: e.target.value });
+                                }}
                                 onBlur={() => setIsEditingTitle(false)}
                                 onKeyDown={(e) => e.key === 'Enter' && setIsEditingTitle(false)}
                                 autoFocus
@@ -553,13 +599,19 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
                         <div className={`${styles.typeSwitcher} ${styles.noteTypeSwitcherCompact}`}>
                             <div
                                 className={`${styles.typeOption} ${data.type === 'idea' ? styles.activeIdea : ''}`}
-                                onClick={() => updateNode(data.id, { type: 'idea' })}
+                                onClick={() => {
+                                    useStore.getState().pushHistory();
+                                    updateNode(data.id, { type: 'idea' });
+                                }}
                             >
                                 Idea
                             </div>
                             <div
                                 className={`${styles.typeOption} ${data.type === 'task' ? styles.activeTask : ''}`}
-                                onClick={() => updateNode(data.id, { type: 'task' })}
+                                onClick={() => {
+                                    useStore.getState().pushHistory();
+                                    updateNode(data.id, { type: 'task' });
+                                }}
                             >
                                 Task
                             </div>
@@ -620,7 +672,10 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
                                 type="date"
                                 className={styles.customDateInput}
                                 value={data.startDate || ''}
-                                onChange={(e) => updateNode(data.id, { startDate: e.target.value })}
+                                onChange={(e) => {
+                                    useStore.getState().pushHistory();
+                                    updateNode(data.id, { startDate: e.target.value });
+                                }}
                                 onPointerDown={(e) => e.stopPropagation()}
                             />
                         </div>
@@ -630,7 +685,10 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
                                 type="date"
                                 className={styles.customDateInput}
                                 value={data.endDate || ''}
-                                onChange={(e) => updateNode(data.id, { endDate: e.target.value })}
+                                onChange={(e) => {
+                                    useStore.getState().pushHistory();
+                                    updateNode(data.id, { endDate: e.target.value });
+                                }}
                                 onPointerDown={(e) => e.stopPropagation()}
                             />
                         </div>

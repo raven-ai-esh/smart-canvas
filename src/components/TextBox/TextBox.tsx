@@ -49,8 +49,19 @@ export function TextBox({
   const isSelected = selectedId === box.id || selectedIds.includes(box.id);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const measureRef = React.useRef<HTMLDivElement | null>(null);
+  const editHistoryRef = React.useRef(false);
 
   const [fontSize, setFontSize] = React.useState(14);
+
+  React.useEffect(() => {
+    if (!isEditing) editHistoryRef.current = false;
+  }, [isEditing]);
+
+  const ensureEditHistory = () => {
+    if (editHistoryRef.current) return;
+    useStore.getState().pushHistory();
+    editHistoryRef.current = true;
+  };
 
   React.useEffect(() => {
     if (!isEditing) return;
@@ -512,7 +523,10 @@ export function TextBox({
           className={styles.editor}
           value={box.text}
           placeholder="Type…"
-          onChange={(e) => updateTextBox(box.id, { text: e.target.value })}
+          onChange={(e) => {
+            ensureEditHistory();
+            updateTextBox(box.id, { text: e.target.value });
+          }}
           onPointerDown={(e) => e.stopPropagation()}
           onBlur={() => setEditingId(null)}
           onKeyDown={onKeyDown}
