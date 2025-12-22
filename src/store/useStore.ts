@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { NodeData, EdgeData, CanvasState, Drawing, PenToolType, Tombstones, TextBox } from '../types';
+import type { Comment, NodeData, EdgeData, CanvasState, Drawing, PenToolType, Tombstones, TextBox } from '../types';
 import { clampEnergy, computeEffectiveEnergy, relu } from '../utils/energy';
 import { debugLog } from '../utils/debug';
 import { getGuestIdentity } from '../utils/guestIdentity';
@@ -50,6 +50,32 @@ const withAuthor = <T extends { authorId?: string | null; authorName?: string | 
     return { ...data, ...resolveAuthor(state) };
 };
 
+const resolveCommentAuthor = (state: AppState) => {
+    const me = state.me;
+    if (me?.id) {
+        const name = (me.name || me.email || 'User').trim();
+        return {
+            authorId: me.id,
+            authorName: name || 'User',
+            avatarUrl: me.avatarUrl ?? null,
+            avatarAnimal: Number.isFinite(me.avatarAnimal) ? me.avatarAnimal ?? null : null,
+            avatarColor: Number.isFinite(me.avatarColor) ? me.avatarColor ?? null : null,
+        };
+    }
+    const selfId = state.presence?.selfId ?? null;
+    const selfPeer = selfId ? state.presence.peers.find((p) => p.id === selfId) : null;
+    const seed = selfPeer?.avatarSeed ?? '';
+    const fallback = selfPeer?.name ?? 'Guest';
+    const guestName = getGuestIdentity(seed, fallback).name;
+    return {
+        authorId: null,
+        authorName: guestName,
+        avatarUrl: null,
+        avatarAnimal: Number.isFinite(selfPeer?.avatarAnimal) ? selfPeer?.avatarAnimal ?? null : null,
+        avatarColor: Number.isFinite(selfPeer?.avatarColor) ? selfPeer?.avatarColor ?? null : null,
+    };
+};
+
 interface AppState {
     nodes: NodeData[];
     edges: EdgeData[];
@@ -64,6 +90,7 @@ interface AppState {
     setSessionId: (id: string | null) => void;
     setSessionMeta: (meta: { name?: string | null; saved?: boolean; ownerId?: string | null; expiresAt?: string | null }) => void;
     textBoxes: TextBox[];
+    comments: Comment[];
     editingTextBoxId: string | null;
     setEditingTextBoxId: (id: string | null) => void;
     selectedTextBoxId: string | null;
@@ -86,6 +113,8 @@ interface AppState {
     toggleMonitoringMode: () => void;
     authorshipMode: boolean;
     toggleAuthorshipMode: () => void;
+    commentsMode: boolean;
+    toggleCommentsMode: () => void;
 
     me: {
         id: string;
@@ -153,6 +182,7 @@ interface AppState {
     addTextBox: (tb: TextBox) => void;
     updateTextBox: (id: string, data: Partial<TextBox>) => void;
     deleteTextBox: (id: string) => void;
+    addComment: (comment: Comment) => void;
 
     theme: 'dark' | 'light';
     toggleTheme: () => void;
@@ -242,6 +272,7 @@ export const useStore = create<AppState>()(
                 sessionExpiresAt: Object.prototype.hasOwnProperty.call(meta, 'expiresAt') ? meta.expiresAt ?? null : state.sessionExpiresAt,
             })),
             textBoxes: [],
+            comments: [],
             editingTextBoxId: null,
             setEditingTextBoxId: (id) => set({ editingTextBoxId: id }),
             selectedTextBoxId: null,
@@ -288,6 +319,8 @@ export const useStore = create<AppState>()(
                 }),
             authorshipMode: false,
             toggleAuthorshipMode: () => set((state) => ({ authorshipMode: !state.authorshipMode })),
+            commentsMode: false,
+            toggleCommentsMode: () => set((state) => ({ commentsMode: !state.commentsMode })),
 
             me: null,
             setMe: (me) => set({ me }),
@@ -799,6 +832,24 @@ export const useStore = create<AppState>()(
 	                    const selectedTextBoxes = state.selectedTextBoxes.filter((x) => x !== id);
 	                    return { ...pushHistoryReducer(state), textBoxes, tombstones, editingTextBoxId, selectedTextBoxId, selectedTextBoxes };
 	                }),
+
+            addComment: (comment) =>
+                set((state) => {
+                    const now = Date.now();
+                    const author = resolveCommentAuthor(state);
+                    const text = String(comment.text ?? '').trim();
+                    if (!text) return {};
+                    const normalized: Comment = {
+                        ...author,
+                        ...comment,
+                        targetId: comment.targetId ?? null,
+                        parentId: comment.parentId ?? null,
+                        text,
+                        createdAt: comment.createdAt ?? now,
+                        updatedAt: comment.updatedAt ?? now,
+                    };
+                    return { comments: [...state.comments, normalized] };
+                }),
 
 	            theme: 'dark',
 	            toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),

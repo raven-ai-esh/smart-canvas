@@ -4,12 +4,13 @@ import { Node } from '../Node/Node';
 import { Edge, ConnectionLine } from '../Edge/Edge';
 import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
-import { Link2, X, Zap, ZapOff } from 'lucide-react';
+import { Link2, MessageCircle, X, Zap, ZapOff } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
-import type { EdgeData, NodeData, TextBox as TextBoxType } from '../../types';
+import type { Comment, EdgeData, NodeData, TextBox as TextBoxType } from '../../types';
 import { debugLog } from '../../utils/debug';
 import { TextBox } from '../TextBox/TextBox';
 import { SnowOverlay } from '../Snow/SnowOverlay';
+import { hashString } from '../../utils/guestIdentity';
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
@@ -38,6 +39,23 @@ type ClipboardPayload =
     | { kind: 'edge'; data: EdgeData }
     | { kind: 'selection'; nodes: NodeData[]; edges: EdgeData[]; textBoxes: TextBoxType[] };
 
+type ContextMenuState = {
+    kind: 'node' | 'textBox' | 'edge' | 'selection' | 'canvas';
+    id?: string;
+    x: number;
+    y: number;
+    worldX?: number;
+    worldY?: number;
+    hidden?: boolean;
+};
+
+type CommentDraft = {
+    targetKind: Comment['targetKind'];
+    targetId?: string | null;
+    x?: number;
+    y?: number;
+};
+
 export const Canvas: React.FC = () => {
     const containerRef = useRef<HTMLDivElement>(null);
 
@@ -54,6 +72,9 @@ export const Canvas: React.FC = () => {
     const snapMode = useStore((state) => state.snapMode);
     const snowEnabled = useStore((state) => state.snowEnabled);
     const theme = useStore((state) => state.theme);
+    const comments = useStore((state) => state.comments);
+    const commentsMode = useStore((state) => state.commentsMode);
+    const me = useStore((state) => state.me);
 
 	    // Actions
 	    const setCanvasTransform = useStore((state) => state.setCanvasTransform);
@@ -67,6 +88,8 @@ export const Canvas: React.FC = () => {
 	    const setEditingTextBoxId = useStore((state) => state.setEditingTextBoxId);
 	    const toggleTextMode = useStore((state) => state.toggleTextMode);
 	    const updateEdge = useStore((state) => state.updateEdge);
+	    const addComment = useStore((state) => state.addComment);
+	    const toggleCommentsMode = useStore((state) => state.toggleCommentsMode);
 
     const canvasRef = useRef(canvas);
     useEffect(() => {
@@ -94,9 +117,15 @@ export const Canvas: React.FC = () => {
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
     const [connectionStart, setConnectionStart] = useState({ x: 0, y: 0 });
 	    const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 }); // World coordinates
-	    const [contextMenu, setContextMenu] = useState<{ kind: 'node' | 'textBox' | 'edge' | 'selection'; id: string; x: number; y: number; hidden?: boolean } | null>(null);
+	    const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 	    const [marqueeRect, setMarqueeRect] = useState<null | { left: number; top: number; width: number; height: number }>(null);
 	    const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuide[]>([]);
+	    const [openCommentId, setOpenCommentId] = useState<string | null>(null);
+	    const [hoverCommentId, setHoverCommentId] = useState<string | null>(null);
+	    const [draftComment, setDraftComment] = useState<CommentDraft | null>(null);
+	    const [draftText, setDraftText] = useState('');
+	    const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+	    const draftInputRef = useRef<HTMLTextAreaElement | null>(null);
 	    const marqueeStartRef = useRef<{ x: number; y: number; pointerId: number } | null>(null);
 	    const groupDragRef = useRef<null | {
         pointerId: number;
@@ -332,6 +361,45 @@ export const Canvas: React.FC = () => {
         return { width: rect.width / scale, height: rect.height / scale };
     }, []);
 
+    const resolveCommentAnchor = useCallback((target: CommentDraft | Comment) => {
+        if (target.targetKind === 'canvas') {
+            if (!Number.isFinite(target.x) || !Number.isFinite(target.y)) return null;
+            return { x: target.x as number, y: target.y as number };
+        }
+        if (target.targetKind === 'node') {
+            const nodeId = target.targetId ?? null;
+            const node = nodeId ? nodes.find((n) => n.id === nodeId) : null;
+            if (!node) return null;
+            const size = getNodeSize(node.id) ?? { width: 240, height: 120 };
+            return {
+                x: node.x + size.width / 2 + 12,
+                y: node.y - size.height / 2 + 8,
+            };
+        }
+        if (target.targetKind === 'textBox') {
+            const boxId = target.targetId ?? null;
+            const box = boxId ? textBoxes.find((t) => t.id === boxId) : null;
+            if (!box) return null;
+            return {
+                x: box.x + box.width + 10,
+                y: box.y + 6,
+            };
+        }
+        if (target.targetKind === 'edge') {
+            const edgeId = target.targetId ?? null;
+            const edge = edgeId ? edges.find((e) => e.id === edgeId) : null;
+            if (!edge) return null;
+            const source = nodes.find((n) => n.id === edge.source);
+            const targetNode = nodes.find((n) => n.id === edge.target);
+            if (!source || !targetNode) return null;
+            return {
+                x: (source.x + targetNode.x) / 2,
+                y: (source.y + targetNode.y) / 2,
+            };
+        }
+        return null;
+    }, [edges, nodes, textBoxes, getNodeSize]);
+
     const applyLiveStrokeStyle = (style: { stroke: string; width: number; opacity: number }) => {
         liveStrokeStyleRef.current = style;
         const el = livePathRef.current;
@@ -353,6 +421,87 @@ export const Canvas: React.FC = () => {
         const el = livePathRef.current;
         if (el) el.setAttribute('d', '');
     };
+
+    const requestAuthForComment = useCallback((message = 'Для комментария нужна авторизация') => {
+        window.dispatchEvent(
+            new CustomEvent('open-auth', {
+                detail: { reason: 'comment', message, mode: 'login' },
+            }),
+        );
+    }, []);
+
+    const startCommentDraft = useCallback((draft: CommentDraft) => {
+        if (!me) {
+            requestAuthForComment();
+            return;
+        }
+        if (!commentsMode) toggleCommentsMode();
+        setDraftComment(draft);
+        setDraftText('');
+        setOpenCommentId(null);
+        setHoverCommentId(null);
+    }, [commentsMode, me, requestAuthForComment, toggleCommentsMode]);
+
+    const submitDraftComment = useCallback(() => {
+        if (!draftComment) return;
+        const text = draftText.trim();
+        if (!text) return;
+        const id = uuidv4();
+        addComment({
+            id,
+            targetKind: draftComment.targetKind,
+            targetId: draftComment.targetId ?? null,
+            parentId: null,
+            x: draftComment.x,
+            y: draftComment.y,
+            text,
+        });
+        setDraftComment(null);
+        setDraftText('');
+        setOpenCommentId(id);
+    }, [addComment, draftComment, draftText]);
+
+    const submitReply = useCallback((parent: Comment) => {
+        if (!me) {
+            requestAuthForComment();
+            return;
+        }
+        const text = (replyDrafts[parent.id] ?? '').trim();
+        if (!text) return;
+        addComment({
+            id: uuidv4(),
+            targetKind: parent.targetKind,
+            targetId: parent.targetId ?? null,
+            parentId: parent.id,
+            x: parent.x,
+            y: parent.y,
+            text,
+        });
+        setReplyDrafts((prev) => ({ ...prev, [parent.id]: '' }));
+    }, [addComment, me, replyDrafts, requestAuthForComment]);
+
+    useEffect(() => {
+        if (!draftComment) return;
+        requestAnimationFrame(() => draftInputRef.current?.focus());
+    }, [draftComment]);
+
+    useEffect(() => {
+        if (!commentsMode) {
+            setOpenCommentId(null);
+            setHoverCommentId(null);
+        }
+    }, [commentsMode]);
+
+    useEffect(() => {
+        const onPointerDown = (e: PointerEvent) => {
+            const target = e.target as HTMLElement | null;
+            if (target?.closest?.('[data-comment-ui="true"]')) return;
+            setOpenCommentId(null);
+            setDraftComment(null);
+        };
+        window.addEventListener('pointerdown', onPointerDown, true);
+        return () => window.removeEventListener('pointerdown', onPointerDown, true);
+    }, []);
 
     const flushPendingStrokePoints = () => {
         if (pendingStrokePointsRef.current.length === 0) return;
@@ -1470,6 +1619,10 @@ export const Canvas: React.FC = () => {
 	        const target = e.target as HTMLElement;
 	        const isInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
 
+        if (e.pointerType === 'mouse' && e.button === 2) {
+            return;
+        }
+
 	        // Don't handle events on buttons - let them bubble normally
         const isButton = target.closest('button');
         if (isButton) {
@@ -2215,6 +2368,81 @@ export const Canvas: React.FC = () => {
 	        handlePointerUp(e);
 	    };
 
+    const handleContextMenu = useCallback((e: React.MouseEvent) => {
+        if (e.defaultPrevented) return;
+        const target = e.target as HTMLElement;
+        if (target.closest('[data-comment-ui="true"]')) return;
+        if (target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]')) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const nodeEl = target.closest('[data-node-id]');
+        const textEl = target.closest('[data-textbox-id]');
+        const edgeEl = target.closest('[data-edge-id]');
+
+        const st = useStore.getState();
+        const selectedNodes = st.selectedNodes?.length ? st.selectedNodes : (st.selectedNode ? [st.selectedNode] : []);
+        const selectedEdges = st.selectedEdges?.length ? st.selectedEdges : (st.selectedEdge ? [st.selectedEdge] : []);
+        const selectedTextBoxes = st.selectedTextBoxes?.length ? st.selectedTextBoxes : (st.selectedTextBoxId ? [st.selectedTextBoxId] : []);
+        const multiCount = selectedNodes.length + selectedEdges.length + selectedTextBoxes.length;
+
+        if (nodeEl) {
+            const id = nodeEl.getAttribute('data-node-id');
+            if (!id) return;
+            if (multiCount > 1 && selectedNodes.includes(id)) {
+                setContextMenu({ kind: 'selection', id: '__selection__', x: e.clientX, y: e.clientY });
+                return;
+            }
+            st.selectNode(id);
+            st.selectEdge(null);
+            st.selectTextBox(null);
+            st.setEditingTextBoxId(null);
+            setContextMenu({ kind: 'node', id, x: e.clientX, y: e.clientY });
+            return;
+        }
+
+        if (textEl) {
+            const id = textEl.getAttribute('data-textbox-id');
+            if (!id) return;
+            if (multiCount > 1 && selectedTextBoxes.includes(id)) {
+                setContextMenu({ kind: 'selection', id: '__selection__', x: e.clientX, y: e.clientY });
+                return;
+            }
+            st.selectTextBox(id);
+            st.selectNode(null);
+            st.selectEdge(null);
+            st.setEditingTextBoxId(null);
+            setContextMenu({ kind: 'textBox', id, x: e.clientX, y: e.clientY });
+            return;
+        }
+
+        if (edgeEl) {
+            const id = edgeEl.getAttribute('data-edge-id');
+            if (!id) return;
+            if (multiCount > 1 && selectedEdges.includes(id)) {
+                setContextMenu({ kind: 'selection', id: '__selection__', x: e.clientX, y: e.clientY });
+                return;
+            }
+            st.selectEdge(id);
+            st.selectNode(null);
+            st.selectTextBox(null);
+            st.setEditingTextBoxId(null);
+            setContextMenu({ kind: 'edge', id, x: e.clientX, y: e.clientY });
+            return;
+        }
+
+        const worldPos = screenToWorldLatest(e.clientX, e.clientY);
+        setContextMenu({
+            kind: 'canvas',
+            id: '__canvas__',
+            x: e.clientX,
+            y: e.clientY,
+            worldX: worldPos.x,
+            worldY: worldPos.y,
+        });
+    }, [screenToWorldLatest]);
+
     // Helper to generate SVG path from points
     const getSvgPath = (points: { x: number; y: number }[]) => {
         if (points.length === 0) return '';
@@ -2224,6 +2452,32 @@ export const Canvas: React.FC = () => {
 
     const noteScale = 1 / Math.max(0.0001, canvas.scale);
     const focusHintVisible = canvas.scale > 1.1;
+    const rootComments = React.useMemo(() => comments.filter((c) => !c.parentId), [comments]);
+    const repliesByParent = React.useMemo(() => {
+        const map = new Map<string, Comment[]>();
+        comments.forEach((comment) => {
+            if (!comment.parentId) return;
+            if (!map.has(comment.parentId)) map.set(comment.parentId, []);
+            map.get(comment.parentId)?.push(comment);
+        });
+        return map;
+    }, [comments]);
+    const showCommentLayer = commentsMode || !!draftComment || !!openCommentId;
+    const getCommentLabel = (comment: Comment) => {
+        const name = String(comment.authorName ?? 'Guest').trim();
+        return name || 'Guest';
+    };
+    const getCommentInitial = (name: string) => name.trim().charAt(0).toUpperCase() || '?';
+    const getCommentColor = (comment: Comment) => {
+        if (Number.isFinite(comment.avatarColor)) {
+            const idx = Number(comment.avatarColor);
+            const hue = (idx * 37) % 360;
+            return `hsl(${hue} 54% 45%)`;
+        }
+        const seed = String(comment.authorName ?? 'Guest');
+        const hue = hashString(seed) % 360;
+        return `hsl(${hue} 54% 45%)`;
+    };
     const contextEdge = contextMenu?.kind === 'edge'
         ? edges.find((edge) => edge.id === contextMenu.id) ?? null
         : null;
@@ -2234,13 +2488,14 @@ export const Canvas: React.FC = () => {
             ref={containerRef}
             className={`${styles.canvasContainer} ${mode === 'panning' ? styles.panning : ''}`}
 	            onPointerDown={handlePointerDown}
-	            onPointerMove={handlePointerMove}
-	            onPointerUp={handlePointerUp}
-	            onPointerLeave={handlePointerLeave}
-	            onPointerCancel={handlePointerCancel}
-	            onDoubleClick={handleDoubleClick}
-	            style={{ cursor: textMode ? 'text' : penMode ? (penTool === 'eraser' ? 'cell' : 'crosshair') : undefined }}
-	        >
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerLeave={handlePointerLeave}
+            onPointerCancel={handlePointerCancel}
+            onContextMenu={handleContextMenu}
+            onDoubleClick={handleDoubleClick}
+            style={{ cursor: textMode ? 'text' : penMode ? (penTool === 'eraser' ? 'cell' : 'crosshair') : undefined }}
+        >
 	            {contextMenu && (
 	                <div
 	                    className={styles.contextMenuOverlay}
@@ -2260,33 +2515,64 @@ export const Canvas: React.FC = () => {
 	                        onPointerDown={(e) => e.stopPropagation()}
 	                        onClick={(e) => e.stopPropagation()}
 	                    >
-	                        <button
-	                            type="button"
-	                            className={styles.contextButton}
-	                            title="Delete"
-	                            data-interactive="true"
-	                            onPointerDown={(e) => {
-	                                e.preventDefault();
-	                                e.stopPropagation();
-	                                const st = useStore.getState() as any;
-	                                if (contextMenu.kind === 'selection') {
-	                                    st.deleteSelection();
-	                                } else if (contextMenu.kind === 'node') {
-	                                    st.deleteNode(contextMenu.id);
-	                                    st.selectNode(null);
-	                                } else if (contextMenu.kind === 'edge') {
-	                                    st.deleteEdge(contextMenu.id);
-	                                    st.selectEdge(null);
-	                                } else {
-	                                    st.deleteTextBox(contextMenu.id);
-	                                    st.selectTextBox(null);
-	                                    st.setEditingTextBoxId(null);
-	                                }
-	                                setContextMenu(null);
-	                            }}
-	                        >
-	                            <X size={18} />
-	                        </button>
+	                        {contextMenu.kind !== 'selection' && (
+	                            <button
+	                                type="button"
+	                                className={styles.contextButton}
+	                                title="Add comment"
+	                                data-interactive="true"
+	                                onPointerDown={(e) => {
+	                                    e.preventDefault();
+	                                    e.stopPropagation();
+	                                    let draft: CommentDraft | null = null;
+	                                    if (contextMenu.kind === 'canvas') {
+	                                        const world = Number.isFinite(contextMenu.worldX) && Number.isFinite(contextMenu.worldY)
+	                                            ? { x: contextMenu.worldX as number, y: contextMenu.worldY as number }
+	                                            : screenToWorldLatest(contextMenu.x, contextMenu.y);
+	                                        draft = { targetKind: 'canvas', targetId: null, x: world.x, y: world.y };
+	                                    } else if (contextMenu.kind === 'node' && contextMenu.id) {
+	                                        draft = { targetKind: 'node', targetId: contextMenu.id };
+	                                    } else if (contextMenu.kind === 'edge' && contextMenu.id) {
+	                                        draft = { targetKind: 'edge', targetId: contextMenu.id };
+	                                    } else if (contextMenu.kind === 'textBox' && contextMenu.id) {
+	                                        draft = { targetKind: 'textBox', targetId: contextMenu.id };
+	                                    }
+	                                    if (draft) startCommentDraft(draft);
+	                                    setContextMenu(null);
+	                                }}
+	                            >
+	                                <MessageCircle size={18} />
+	                            </button>
+	                        )}
+	                        {contextMenu.kind !== 'canvas' && (
+	                            <button
+	                                type="button"
+	                                className={styles.contextButton}
+	                                title="Delete"
+	                                data-interactive="true"
+	                                onPointerDown={(e) => {
+	                                    e.preventDefault();
+	                                    e.stopPropagation();
+	                                    const st = useStore.getState() as any;
+	                                    if (contextMenu.kind === 'selection') {
+	                                        st.deleteSelection();
+	                                    } else if (contextMenu.kind === 'node' && contextMenu.id) {
+	                                        st.deleteNode(contextMenu.id);
+	                                        st.selectNode(null);
+	                                    } else if (contextMenu.kind === 'edge' && contextMenu.id) {
+	                                        st.deleteEdge(contextMenu.id);
+	                                        st.selectEdge(null);
+	                                    } else if (contextMenu.kind === 'textBox' && contextMenu.id) {
+	                                        st.deleteTextBox(contextMenu.id);
+	                                        st.selectTextBox(null);
+	                                        st.setEditingTextBoxId(null);
+	                                    }
+	                                    setContextMenu(null);
+	                                }}
+	                            >
+	                                <X size={18} />
+	                            </button>
+	                        )}
                             {contextMenu.kind === 'edge' && contextEdge && (
                                 <button
                                     type="button"
@@ -2297,7 +2583,9 @@ export const Canvas: React.FC = () => {
                                         e.preventDefault();
                                         e.stopPropagation();
                                         useStore.getState().pushHistory();
-                                        updateEdge(contextMenu.id, { energyEnabled: !contextEdgeEnergyEnabled });
+                                        if (contextMenu.id) {
+                                            updateEdge(contextMenu.id, { energyEnabled: !contextEdgeEnergyEnabled });
+                                        }
                                         setContextMenu(null);
                                     }}
                                 >
@@ -2310,7 +2598,7 @@ export const Canvas: React.FC = () => {
 	                                className={styles.contextButton}
 	                                title="Create connection"
 	                                data-interactive="true"
-	                                onPointerDown={(e) => startContextConnectionDrag(e, contextMenu.id)}
+	                                onPointerDown={(e) => contextMenu.id && startContextConnectionDrag(e, contextMenu.id)}
 	                            >
 	                                <Link2 size={18} />
 	                            </button>
@@ -2449,6 +2737,151 @@ export const Canvas: React.FC = () => {
                         <Node data={node} />
                     </div>
                 ))}
+                {showCommentLayer && (
+                    <div className={styles.commentLayer} data-comment-ui="true">
+                        {rootComments.map((comment) => {
+                            const anchor = resolveCommentAnchor(comment);
+                            if (!anchor) return null;
+                            const label = getCommentLabel(comment);
+                            const isOpen = openCommentId === comment.id;
+                            const isHover = hoverCommentId === comment.id;
+                            const replies = repliesByParent.get(comment.id) ?? [];
+                            const showBubble = isOpen || isHover;
+                            const avatarColor = getCommentColor(comment);
+                            return (
+                                <div
+                                    key={comment.id}
+                                    className={styles.commentItem}
+                                    style={{ left: anchor.x, top: anchor.y }}
+                                    data-comment-ui="true"
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <button
+                                        type="button"
+                                        className={`${styles.commentAvatarButton} ${isOpen ? styles.commentAvatarActive : ''}`}
+                                        title={label}
+                                        data-comment-ui="true"
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                        onMouseEnter={() => setHoverCommentId(comment.id)}
+                                        onMouseLeave={() => setHoverCommentId(null)}
+                                        onClick={() => setOpenCommentId((prev) => (prev === comment.id ? null : comment.id))}
+                                    >
+                                        {comment.avatarUrl ? (
+                                            <img className={styles.commentAvatarImg} src={comment.avatarUrl} alt={label} />
+                                        ) : (
+                                            <div className={styles.commentAvatarFallback} style={{ background: avatarColor }}>
+                                                {getCommentInitial(label)}
+                                            </div>
+                                        )}
+                                    </button>
+                                    <div
+                                        className={`${styles.commentBubble} ${showBubble ? styles.commentBubbleVisible : ''} ${isOpen ? styles.commentBubbleOpen : ''}`}
+                                        data-comment-ui="true"
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <div className={styles.commentAuthor}>{label}</div>
+                                        <div className={styles.commentText}>{comment.text}</div>
+                                        {isOpen && replies.length > 0 && (
+                                            <div className={styles.commentReplies}>
+                                                {replies.map((reply) => {
+                                                    const replyLabel = getCommentLabel(reply);
+                                                    return (
+                                                        <div key={reply.id} className={styles.commentReply}>
+                                                            <span className={styles.commentReplyAuthor}>{replyLabel}</span>
+                                                            <span className={styles.commentReplyText}>{reply.text}</span>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                        {isOpen && (
+                                            me ? (
+                                                <div className={styles.commentReplyRow}>
+                                                    <input
+                                                        className={styles.commentReplyInput}
+                                                        type="text"
+                                                        value={replyDrafts[comment.id] ?? ''}
+                                                        placeholder="Reply..."
+                                                        data-comment-ui="true"
+                                                        onPointerDown={(e) => e.stopPropagation()}
+                                                        onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [comment.id]: e.target.value }))}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter') {
+                                                                e.preventDefault();
+                                                                submitReply(comment);
+                                                            }
+                                                        }}
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        className={styles.commentReplyButton}
+                                                        data-comment-ui="true"
+                                                        onPointerDown={(e) => e.stopPropagation()}
+                                                        onClick={() => submitReply(comment)}
+                                                    >
+                                                        Reply
+                                                    </button>
+                                                </div>
+                                            ) : (
+                                                <div className={styles.commentReplyNotice}>Sign in to reply.</div>
+                                            )
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                        {draftComment && (() => {
+                            const anchor = resolveCommentAnchor(draftComment);
+                            if (!anchor) return null;
+                            return (
+                                <div
+                                    className={styles.commentItem}
+                                    style={{ left: anchor.x, top: anchor.y }}
+                                    data-comment-ui="true"
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <div className={styles.commentDraft} data-comment-ui="true">
+                                        <textarea
+                                            ref={draftInputRef}
+                                            className={styles.commentDraftInput}
+                                            value={draftText}
+                                            placeholder="Write a comment..."
+                                            data-comment-ui="true"
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                            onChange={(e) => setDraftText(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                                                    e.preventDefault();
+                                                    submitDraftComment();
+                                                }
+                                            }}
+                                        />
+                                        <div className={styles.commentDraftActions}>
+                                            <button
+                                                type="button"
+                                                className={styles.commentDraftButton}
+                                                data-comment-ui="true"
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                                onClick={submitDraftComment}
+                                            >
+                                                Send
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className={styles.commentDraftButton}
+                                                data-comment-ui="true"
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                                onClick={() => setDraftComment(null)}
+                                            >
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })()}
+                    </div>
+                )}
             </div>
         </div>
     );

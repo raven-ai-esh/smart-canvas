@@ -1,10 +1,11 @@
-import type { Drawing, EdgeData, NodeData, Tombstones, TextBox } from '../types';
+import type { Comment, Drawing, EdgeData, NodeData, Tombstones, TextBox } from '../types';
 
 export type SessionState = {
   nodes: NodeData[];
   edges: EdgeData[];
   drawings: Drawing[];
   textBoxes: TextBox[];
+  comments: Comment[];
   tombstones: Tombstones;
 };
 
@@ -28,6 +29,7 @@ export function normalizeSessionState(raw: any): SessionState {
     edges: Array.isArray(obj.edges) ? obj.edges : [],
     drawings: Array.isArray(obj.drawings) ? obj.drawings : [],
     textBoxes: Array.isArray(obj.textBoxes) ? obj.textBoxes : [],
+    comments: Array.isArray(obj.comments) ? obj.comments : [],
     tombstones: normalizeTombstones(obj.tombstones),
   };
 }
@@ -85,6 +87,7 @@ export function mergeSessionState(localRaw: unknown, remoteRaw: unknown): Sessio
   });
   const drawings = mergeById(local.drawings, remote.drawings, tombstones.drawings);
   const textBoxes = mergeById(local.textBoxes, remote.textBoxes, tombstones.textBoxes);
+  const comments = mergeById(local.comments, remote.comments, {});
 
-  return { nodes, edges, drawings, textBoxes, tombstones };
+  return { nodes, edges, drawings, textBoxes, comments, tombstones };
 }

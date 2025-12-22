@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Moon, Sun, Snowflake, User, ChevronDown, ChevronUp } from 'lucide-react';
+import { Moon, Sun, Snowflake, User, MessageCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { animalNames, getGuestIdentity, hashString } from '../../utils/guestIdentity';
 
@@ -488,9 +488,11 @@ export const Presence: React.FC = () => {
   const theme = useStore((s) => s.theme);
   const snowEnabled = useStore((s) => s.snowEnabled);
   const authorshipMode = useStore((s) => s.authorshipMode);
+  const commentsMode = useStore((s) => s.commentsMode);
   const toggleTheme = useStore((s) => s.toggleTheme);
   const toggleSnow = useStore((s) => s.toggleSnow);
   const toggleAuthorshipMode = useStore((s) => s.toggleAuthorshipMode);
+  const toggleCommentsMode = useStore((s) => s.toggleCommentsMode);
   const isCompactAuth = useIsCompactAuthModal();
 
   const [open, setOpen] = useState(false);
@@ -1121,6 +1123,24 @@ export const Presence: React.FC = () => {
                 }}
               >
                 <Snowflake size={18} />
+              </button>
+              <button
+                type="button"
+                onClick={toggleCommentsMode}
+                title={commentsMode ? 'Disable Comments' : 'Enable Comments'}
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: 999,
+                  border: '1px solid var(--border-strong)',
+                  background: commentsMode ? 'var(--accent-glow)' : 'transparent',
+                  color: 'var(--text-primary)',
+                  display: 'grid',
+                  placeItems: 'center',
+                  cursor: 'pointer',
+                }}
+              >
+                <MessageCircle size={18} />
               </button>
               <button
                 type="button"
