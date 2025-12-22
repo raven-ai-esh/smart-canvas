@@ -459,6 +459,25 @@
     text-align: center;
 }
 
+.noteEnergyValueEditable {
+    cursor: text;
+}
+
+.noteEnergyInput {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 11px;
+    line-height: 1.2;
+    padding: 2px 6px;
+    text-align: center;
+    outline: none;
+}
+
 .noteEnergyValue:hover {
     background: rgba(255, 255, 255, 0.06);
 }
@@ -495,6 +514,11 @@
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 10px rgba(255, 255, 255, 0.25);
     pointer-events: none;
     z-index: 5;
+}
+
+.noteEnergyToast {
+    top: -38px;
+    min-width: 190px;
 }
 
 /* Phone layout: detailed card is centered with margins and keeps space for UI. */
@@ -1034,6 +1058,25 @@
     text-align: center;
 }
 
+.energyMiniValueEditable {
+    cursor: text;
+}
+
+.energyMiniInput {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 9px;
+    line-height: 1.05;
+    padding: 1px 0;
+    text-align: center;
+    outline: none;
+}
+
 .energyMiniValue:hover {
     background: rgba(255, 255, 255, 0.06);
 }
@@ -1043,6 +1086,31 @@
     height: 1px;
     background: var(--border-subtle);
     border-radius: 999px;
+}
+
+.energyToast {
+    position: absolute;
+    top: -34px;
+    left: 50%;
+    transform: translateX(-50%) translateY(8px);
+    opacity: 0;
+    pointer-events: none;
+    padding: 6px 8px;
+    border-radius: 8px;
+    border: 1px solid rgba(235, 203, 139, 0.45);
+    background: rgba(12, 12, 14, 0.95);
+    color: #EBCB8B;
+    font-size: 10px;
+    line-height: 1.2;
+    min-width: 160px;
+    text-align: center;
+    z-index: 6;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.energyToastVisible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
 }
 
 .energyRow {

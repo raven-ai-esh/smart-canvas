@@ -243,6 +243,11 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
     const updateNode = useStore((state) => state.updateNode);
     const [showEnergySelector, setShowEnergySelector] = React.useState(false);
     const monitoringMode = useStore((state) => state.monitoringMode);
+    const [energyInputOpen, setEnergyInputOpen] = React.useState(false);
+    const [energyInputValue, setEnergyInputValue] = React.useState('');
+    const [energyToast, setEnergyToast] = React.useState<string | null>(null);
+    const [energyToastVisible, setEnergyToastVisible] = React.useState(false);
+    const energyInputRef = React.useRef<HTMLInputElement | null>(null);
 
     // Missing state restored
     const [isEditing, setIsEditing] = React.useState(false);
@@ -266,11 +271,13 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
         let incoming = 0;
         for (const e of state.edges) {
             if (e.target !== data.id) continue;
+            if (e.energyEnabled === false) continue;
             incoming += Math.max(0, state.effectiveEnergy[e.source] ?? 0);
         }
         return incoming;
     });
     const maxBaseEnergy = Math.max(0, 100 - incomingEnergy);
+    const maxAllowedBaseEnergy = Math.max(0, Math.min(100, Math.floor(maxBaseEnergy + 1e-6)));
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
@@ -286,6 +293,83 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
             return () => window.removeEventListener('click', handleClick);
         }
     }, [showEnergySelector]);
+
+    // Keep numeric input and toast state scoped to the energy popover.
+    React.useEffect(() => {
+        if (!showEnergySelector) {
+            setEnergyInputOpen(false);
+            setEnergyInputValue(String(Math.round(baseEnergy)));
+        }
+    }, [showEnergySelector, baseEnergy]);
+
+    // Mirror toast behavior used elsewhere: fade out, then clear.
+    React.useEffect(() => {
+        if (!energyToast) return;
+        setEnergyToastVisible(true);
+        const hide = window.setTimeout(() => setEnergyToastVisible(false), 1200);
+        const clear = window.setTimeout(() => setEnergyToast(null), 1700);
+        return () => {
+            window.clearTimeout(hide);
+            window.clearTimeout(clear);
+        };
+    }, [energyToast]);
+
+    // Sync input text with current energy and focus when opened.
+    React.useEffect(() => {
+        if (!energyInputOpen) {
+            setEnergyInputValue(String(Math.round(baseEnergy)));
+            return;
+        }
+        requestAnimationFrame(() => {
+            const el = energyInputRef.current;
+            if (!el) return;
+            el.focus();
+            el.select();
+        });
+    }, [energyInputOpen, baseEnergy]);
+
+    const showEnergyWarning = (message: string) => {
+        setEnergyToast(message);
+    };
+
+    const commitEnergyInput = (opts: { closeOnError: boolean }) => {
+        const raw = energyInputValue.trim();
+        if (!raw) {
+            showEnergyWarning('Введите целое число от 0 до 100');
+            if (opts.closeOnError) setEnergyInputOpen(false);
+            return;
+        }
+        if (!/^-?\d+$/.test(raw)) {
+            showEnergyWarning('Введите целое число от 0 до 100');
+            if (opts.closeOnError) setEnergyInputOpen(false);
+            return;
+        }
+        const next = Number(raw);
+        if (!Number.isFinite(next)) {
+            showEnergyWarning('Введите целое число от 0 до 100');
+            if (opts.closeOnError) setEnergyInputOpen(false);
+            return;
+        }
+        // If user kept the current displayed value, just close without mutating.
+        if (next === Math.round(baseEnergy)) {
+            setEnergyInputOpen(false);
+            return;
+        }
+        if (next < 0 || next > 100) {
+            showEnergyWarning('Допустимый диапазон: 0–100');
+            if (opts.closeOnError) setEnergyInputOpen(false);
+            return;
+        }
+        if (next > maxAllowedBaseEnergy) {
+            showEnergyWarning(`Максимум ${maxAllowedBaseEnergy}, иначе суммарная энергия > 100`);
+            if (opts.closeOnError) setEnergyInputOpen(false);
+            return;
+        }
+
+        useStore.getState().pushHistory();
+        updateNode(data.id, { energy: next });
+        setEnergyInputOpen(false);
+    };
 
     const isTask = data.type === 'task';
     const progress = clampProgress(typeof data.progress === 'number' && Number.isFinite(data.progress) ? data.progress : 0);
@@ -375,14 +459,54 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
                         {showEnergySelector && (
                             <div className={styles.energySelector} data-interactive="true" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
                                 <div className={styles.energyMiniValuesRow}>
-                                    <span className={styles.energyMiniValue} title="Собственная энергия" style={{ color: energyColor }}>
-                                        {Math.round(baseEnergy)}
-                                    </span>
+                                    {energyInputOpen ? (
+                                        <input
+                                            ref={energyInputRef}
+                                            className={`${styles.energyMiniValue} ${styles.energyMiniInput}`}
+                                            value={energyInputValue}
+                                            inputMode="numeric"
+                                            aria-label="Собственная энергия"
+                                            onChange={(e) => setEnergyInputValue(e.target.value)}
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                            onClick={(e) => e.stopPropagation()}
+                                            onBlur={() => commitEnergyInput({ closeOnError: true })}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') {
+                                                    e.preventDefault();
+                                                    commitEnergyInput({ closeOnError: false });
+                                                } else if (e.key === 'Escape') {
+                                                    e.preventDefault();
+                                                    setEnergyInputOpen(false);
+                                                }
+                                            }}
+                                        />
+                                    ) : (
+                                        <span
+                                            className={`${styles.energyMiniValue} ${styles.energyMiniValueEditable}`}
+                                            title="Собственная энергия"
+                                            style={{ color: energyColor }}
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setEnergyInputOpen(true);
+                                            }}
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                        >
+                                            {Math.round(baseEnergy)}
+                                        </span>
+                                    )}
                                     <span className={styles.energyMiniDividerLine} aria-hidden="true" />
                                     <span className={styles.energyMiniValue} title="Суммарная энергия">
                                         {Math.round(effectiveEnergy)}
                                     </span>
                                 </div>
+                                {energyToast && (
+                                    <div
+                                        className={`${styles.energyToast} ${energyToastVisible ? styles.energyToastVisible : ''}`}
+                                        aria-live="polite"
+                                    >
+                                        {energyToast}
+                                    </div>
+                                )}
                                 <div
                                     className={styles.energyLiquidGauge}
                                     onPointerDown={(e) => {
@@ -469,6 +593,11 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
     const titleTouchRef = useRef<{ id: number; x: number; y: number } | null>(null);
     const [isDraggingProgress, setIsDraggingProgress] = React.useState(false);
     const [showEnergyPanel, setShowEnergyPanel] = React.useState(false);
+    const [energyInputOpen, setEnergyInputOpen] = React.useState(false);
+    const [energyInputValue, setEnergyInputValue] = React.useState('');
+    const [energyToast, setEnergyToast] = React.useState<string | null>(null);
+    const [energyToastVisible, setEnergyToastVisible] = React.useState(false);
+    const energyInputRef = React.useRef<HTMLInputElement | null>(null);
     const titleHistoryRef = React.useRef(false);
 
     React.useEffect(() => {
@@ -487,11 +616,13 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
         let incoming = 0;
         for (const e of state.edges) {
             if (e.target !== data.id) continue;
+            if (e.energyEnabled === false) continue;
             incoming += Math.max(0, state.effectiveEnergy[e.source] ?? 0);
         }
         return incoming;
     });
     const maxBaseEnergy = Math.max(0, 100 - incomingEnergy);
+    const maxAllowedBaseEnergy = Math.max(0, Math.min(100, Math.floor(maxBaseEnergy + 1e-6)));
     const isTask = data.type === 'task';
     const progress = clampProgress(typeof data.progress === 'number' && Number.isFinite(data.progress) ? data.progress : 0);
     const status = statusFromProgress(progress);
@@ -505,6 +636,83 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
         window.addEventListener('click', onClick);
         return () => window.removeEventListener('click', onClick);
     }, [showEnergyPanel]);
+
+    // Keep numeric input scoped to the energy panel and sync to current value.
+    React.useEffect(() => {
+        if (!showEnergyPanel) {
+            setEnergyInputOpen(false);
+            setEnergyInputValue(String(Math.round(baseEnergy)));
+        }
+    }, [showEnergyPanel, baseEnergy]);
+
+    // Fade-out warning toast (same timing as other in-app toasts).
+    React.useEffect(() => {
+        if (!energyToast) return;
+        setEnergyToastVisible(true);
+        const hide = window.setTimeout(() => setEnergyToastVisible(false), 1200);
+        const clear = window.setTimeout(() => setEnergyToast(null), 1700);
+        return () => {
+            window.clearTimeout(hide);
+            window.clearTimeout(clear);
+        };
+    }, [energyToast]);
+
+    // Focus the numeric input on open so keyboard entry is immediate.
+    React.useEffect(() => {
+        if (!energyInputOpen) {
+            setEnergyInputValue(String(Math.round(baseEnergy)));
+            return;
+        }
+        requestAnimationFrame(() => {
+            const el = energyInputRef.current;
+            if (!el) return;
+            el.focus();
+            el.select();
+        });
+    }, [energyInputOpen, baseEnergy]);
+
+    const showEnergyWarning = (message: string) => {
+        setEnergyToast(message);
+    };
+
+    const commitEnergyInput = (opts: { closeOnError: boolean }) => {
+        const raw = energyInputValue.trim();
+        if (!raw) {
+            showEnergyWarning('Введите целое число от 0 до 100');
+            if (opts.closeOnError) setEnergyInputOpen(false);
+            return;
+        }
+        if (!/^-?\d+$/.test(raw)) {
+            showEnergyWarning('Введите целое число от 0 до 100');
+            if (opts.closeOnError) setEnergyInputOpen(false);
+            return;
+        }
+        const next = Number(raw);
+        if (!Number.isFinite(next)) {
+            showEnergyWarning('Введите целое число от 0 до 100');
+            if (opts.closeOnError) setEnergyInputOpen(false);
+            return;
+        }
+        // If the user re-entered the displayed value, close without changes.
+        if (next === Math.round(baseEnergy)) {
+            setEnergyInputOpen(false);
+            return;
+        }
+        if (next < 0 || next > 100) {
+            showEnergyWarning('Допустимый диапазон: 0–100');
+            if (opts.closeOnError) setEnergyInputOpen(false);
+            return;
+        }
+        if (next > maxAllowedBaseEnergy) {
+            showEnergyWarning(`Максимум ${maxAllowedBaseEnergy}, иначе суммарная энергия > 100`);
+            if (opts.closeOnError) setEnergyInputOpen(false);
+            return;
+        }
+
+        useStore.getState().pushHistory();
+        updateNode(data.id, { energy: next });
+        setEnergyInputOpen(false);
+    };
 
     const setBaseEnergyFromClientY = (clientY: number, el: HTMLElement) => {
         const rect = el.getBoundingClientRect();
@@ -744,14 +952,54 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className={styles.noteEnergyValuesRow}>
-                            <span className={styles.noteEnergyValue} title="Собственная энергия" style={{ color: energyColor }}>
-                                {Math.round(baseEnergy)}
-                            </span>
+                            {energyInputOpen ? (
+                                <input
+                                    ref={energyInputRef}
+                                    className={`${styles.noteEnergyValue} ${styles.noteEnergyInput}`}
+                                    value={energyInputValue}
+                                    inputMode="numeric"
+                                    aria-label="Собственная энергия"
+                                    onChange={(e) => setEnergyInputValue(e.target.value)}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onBlur={() => commitEnergyInput({ closeOnError: true })}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                            e.preventDefault();
+                                            commitEnergyInput({ closeOnError: false });
+                                        } else if (e.key === 'Escape') {
+                                            e.preventDefault();
+                                            setEnergyInputOpen(false);
+                                        }
+                                    }}
+                                />
+                            ) : (
+                                <span
+                                    className={`${styles.noteEnergyValue} ${styles.noteEnergyValueEditable}`}
+                                    title="Собственная энергия"
+                                    style={{ color: energyColor }}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setEnergyInputOpen(true);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    {Math.round(baseEnergy)}
+                                </span>
+                            )}
                             <span className={styles.noteEnergyDividerLine} aria-hidden="true" />
                             <span className={styles.noteEnergyValue} title="Суммарная энергия">
                                 {Math.round(effectiveEnergy)}
                             </span>
                         </div>
+                        {energyToast && (
+                            <div
+                                className={`${styles.energyToast} ${styles.noteEnergyToast} ${energyToastVisible ? styles.energyToastVisible : ''}`}
+                                aria-live="polite"
+                            >
+                                {energyToast}
+                            </div>
+                        )}
 
                         <div
                             className={styles.noteEnergyScale}

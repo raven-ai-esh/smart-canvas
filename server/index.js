@@ -25,6 +25,10 @@ const YANDEX_CLIENT_ID = process.env.YANDEX_CLIENT_ID;
 const YANDEX_CLIENT_SECRET = process.env.YANDEX_CLIENT_SECRET;
 const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TEST_USER_ENABLED = process.env.TEST_USER_ENABLED ?? (process.env.NODE_ENV === 'production' ? 'false' : 'true');
+const TEST_USER_EMAIL = process.env.TEST_USER_EMAIL ?? '';
+const TEST_USER_PASSWORD = process.env.TEST_USER_PASSWORD ?? '';
+const TEST_USER_NAME = process.env.TEST_USER_NAME ?? 'Test User';
 const TEMP_SESSION_TTL_DAYS = Number(process.env.TEMP_SESSION_TTL_DAYS ?? 7);
 const TEMP_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * (Number.isFinite(TEMP_SESSION_TTL_DAYS) && TEMP_SESSION_TTL_DAYS > 0 ? TEMP_SESSION_TTL_DAYS : 7);
 const parseCorsOrigin = (v) => {
@@ -117,6 +121,17 @@ async function initDb() {
   } catch {
     // ignore
   }
+  // Migration: allow custom animal/color avatars.
+  try {
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_animal INTEGER');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_color INTEGER');
+  } catch {
+    // ignore
+  }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS oauth_accounts (
@@ -172,26 +187,66 @@ async function getSession(id) {
 }
 
 async function getUserById(id) {
-  const res = await pool.query('SELECT id, email, name, avatar_seed, avatar_url, verified FROM users WHERE id = $1', [id]);
+  const res = await pool.query('SELECT id, email, name, avatar_seed, avatar_url, avatar_animal, avatar_color, verified FROM users WHERE id = $1', [id]);
   return res.rows[0] ?? null;
 }
 
 async function getUserByEmail(email) {
-  const res = await pool.query('SELECT id, email, password_hash, name, avatar_seed, avatar_url, verified FROM users WHERE email = $1', [email]);
+  const res = await pool.query('SELECT id, email, password_hash, name, avatar_seed, avatar_url, avatar_animal, avatar_color, verified FROM users WHERE email = $1', [email]);
   return res.rows[0] ?? null;
 }
 
-async function createUser({ id, email, passwordHash, name, avatarSeed, verified, avatarUrl }) {
+function parseBoolLike(value) {
+  if (value == null) return false;
+  const v = String(value).trim().toLowerCase();
+  if (!v) return false;
+  return v !== 'false' && v !== '0' && v !== 'off' && v !== 'no';
+}
+
+async function ensureTestUser() {
+  if (!parseBoolLike(TEST_USER_ENABLED)) return;
+  const email = String(TEST_USER_EMAIL ?? '').trim().toLowerCase();
+  const password = String(TEST_USER_PASSWORD ?? '').trim();
+  if (!email || !password) return;
+
+  const existing = await getUserByEmail(email);
+  const passwordHash = await bcrypt.hash(password, 10);
+  if (!existing) {
+    const id = randomUUID();
+    const avatarSeed = id;
+    await createUser({
+      id,
+      email,
+      passwordHash,
+      name: TEST_USER_NAME || 'Test User',
+      avatarSeed,
+      verified: true,
+    });
+    return;
+  }
+
+  const nextName = TEST_USER_NAME?.trim();
+  const updates = { userId: existing.id, passwordHash };
+  if (nextName && nextName !== existing.name) {
+    updates.name = nextName;
+  }
+  await updateUserProfile(updates);
+  if (!existing.verified) {
+    await setUserVerified(existing.id);
+  }
+}
+
+async function createUser({ id, email, passwordHash, name, avatarSeed, verified, avatarUrl, avatarAnimal, avatarColor }) {
   const res = await pool.query(
-    `INSERT INTO users (id, email, password_hash, name, avatar_seed, avatar_url, verified)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING id, email, name, avatar_seed, avatar_url, verified`,
-    [id, email, passwordHash, name, avatarSeed, avatarUrl ?? null, verified],
+    `INSERT INTO users (id, email, password_hash, name, avatar_seed, avatar_url, avatar_animal, avatar_color, verified)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id, email, name, avatar_seed, avatar_url, avatar_animal, avatar_color, verified`,
+    [id, email, passwordHash, name, avatarSeed, avatarUrl ?? null, avatarAnimal ?? null, avatarColor ?? null, verified],
   );
   return res.rows[0];
 }
 
-async function updateUserProfile({ userId, name, email, passwordHash, avatarUrl }) {
+async function updateUserProfile({ userId, name, email, passwordHash, avatarUrl, avatarAnimal, avatarColor }) {
   // Build a partial update so callers can change name/email/password independently.
   const fields = [];
   const values = [];
@@ -217,6 +272,16 @@ async function updateUserProfile({ userId, name, email, passwordHash, avatarUrl 
     values.push(avatarUrl);
     idx += 1;
   }
+  if (avatarAnimal !== undefined) {
+    fields.push(`avatar_animal = $${idx}`);
+    values.push(avatarAnimal);
+    idx += 1;
+  }
+  if (avatarColor !== undefined) {
+    fields.push(`avatar_color = $${idx}`);
+    values.push(avatarColor);
+    idx += 1;
+  }
 
   if (!fields.length) return null;
 
@@ -226,7 +291,7 @@ async function updateUserProfile({ userId, name, email, passwordHash, avatarUrl 
     `UPDATE users
         SET ${fields.join(', ')}
       WHERE id = $${idx}
-      RETURNING id, email, name, avatar_seed, avatar_url, verified`,
+      RETURNING id, email, name, avatar_seed, avatar_url, avatar_animal, avatar_color, verified`,
     values,
   );
   return res.rows[0] ?? null;
@@ -573,7 +638,18 @@ app.get('/api/auth/me', async (req, res) => {
   if (!auth) return res.json({ user: null });
   const user = await getUserById(auth.userId);
   if (!user) return res.json({ user: null });
-  res.json({ user: { id: user.id, email: user.email, name: user.name, avatarSeed: user.avatar_seed, avatarUrl: user.avatar_url, verified: user.verified } });
+  res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      avatarSeed: user.avatar_seed,
+      avatarUrl: user.avatar_url,
+      avatarAnimal: user.avatar_animal,
+      avatarColor: user.avatar_color,
+      verified: user.verified,
+    },
+  });
 });
 
 // Allow authenticated users to update profile fields from the settings modal.
@@ -589,6 +665,8 @@ app.patch('/api/auth/me', async (req, res) => {
   const rawPassword = req.body?.password;
   const rawAvatarData = req.body?.avatarData;
   const rawAvatarRemove = req.body?.avatarRemove;
+  const rawAvatarAnimal = req.body?.avatarAnimal;
+  const rawAvatarColor = req.body?.avatarColor;
   let pendingEmail = null;
   let emailChangeSent = false;
   let devEmailChangeUrl = null;
@@ -624,6 +702,26 @@ app.patch('/api/auth/me', async (req, res) => {
     updates.avatarUrl = rawAvatarData;
   }
 
+  const validateAvatarIndex = (value) => {
+    if (value === null) return null;
+    if (!Number.isFinite(value)) return undefined;
+    const idx = Number(value);
+    if (!Number.isInteger(idx)) return undefined;
+    if (idx < 0 || idx >= 100) return undefined;
+    return idx;
+  };
+
+  if (rawAvatarAnimal !== undefined) {
+    const nextAnimal = validateAvatarIndex(rawAvatarAnimal);
+    if (nextAnimal === undefined) return res.status(400).json({ error: 'bad_avatar_animal' });
+    if (nextAnimal !== current.avatar_animal) updates.avatarAnimal = nextAnimal;
+  }
+  if (rawAvatarColor !== undefined) {
+    const nextColor = validateAvatarIndex(rawAvatarColor);
+    if (nextColor === undefined) return res.status(400).json({ error: 'bad_avatar_color' });
+    if (nextColor !== current.avatar_color) updates.avatarColor = nextColor;
+  }
+
   if (!Object.keys(updates).length && !pendingEmail) {
     return res.status(400).json({ error: 'no_changes' });
   }
@@ -635,6 +733,8 @@ app.patch('/api/auth/me', async (req, res) => {
       name: updates.name,
       passwordHash: updates.passwordHash,
       avatarUrl: updates.avatarUrl,
+      avatarAnimal: updates.avatarAnimal,
+      avatarColor: updates.avatarColor,
     });
     if (!updated) return res.status(500).json({ error: 'update_failed' });
   }
@@ -682,6 +782,8 @@ app.patch('/api/auth/me', async (req, res) => {
       name: updated.name,
       avatarSeed: updated.avatar_seed,
       avatarUrl: updated.avatar_url,
+      avatarAnimal: updated.avatar_animal,
+      avatarColor: updated.avatar_color,
       verified: updated.verified,
     },
     emailChangePending: !!pendingEmail,
@@ -801,7 +903,19 @@ app.post('/api/auth/login', async (req, res) => {
   if (!user.verified) return res.status(403).json({ error: 'email_not_verified' });
 
   setAuthCookie(res, signAuthToken({ userId: user.id }));
-  res.json({ ok: true, user: { id: user.id, email: user.email, name: user.name, avatarSeed: user.avatar_seed, avatarUrl: user.avatar_url, verified: user.verified } });
+  res.json({
+    ok: true,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      avatarSeed: user.avatar_seed,
+      avatarUrl: user.avatar_url,
+      avatarAnimal: user.avatar_animal,
+      avatarColor: user.avatar_color,
+      verified: user.verified,
+    },
+  });
 });
 
 app.get('/api/auth/google/start', async (req, res) => {
@@ -1294,6 +1408,8 @@ function sendPresence(sessionId) {
       name: meta.name,
       avatarSeed: meta.avatarSeed,
       avatarUrl: meta.avatarUrl,
+      avatarAnimal: meta.avatarAnimal,
+      avatarColor: meta.avatarColor,
       registered: !!meta.userId,
     });
   }
@@ -1340,7 +1456,9 @@ wss.on('connection', async (ws, req) => {
   const name = user?.name ?? guestNameFromClientId(clientId);
   const avatarSeed = user?.avatar_seed ?? (clientId || connId);
   const avatarUrl = user?.avatar_url ?? null;
-  ws._meta = { sessionId, connId, clientId, userId: user?.id ?? null, name, avatarSeed, avatarUrl };
+  const avatarAnimal = user?.avatar_animal ?? null;
+  const avatarColor = user?.avatar_color ?? null;
+  ws._meta = { sessionId, connId, clientId, userId: user?.id ?? null, name, avatarSeed, avatarUrl, avatarAnimal, avatarColor };
 
   roomFor(sessionId).add(ws);
   const payload = serializeSession(session);
@@ -1390,6 +1508,11 @@ const pingInterval = setInterval(() => {
 wss.on('close', () => clearInterval(pingInterval));
 
 await initDbWithRetry();
+try {
+  await ensureTestUser();
+} catch {
+  // ignore startup test user initialization errors
+}
 try {
   await cleanupExpiredSessions();
 } catch {

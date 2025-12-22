@@ -64,6 +64,7 @@ export function computeEffectiveEnergy(
       let incoming = 0;
       for (const edge of edges) {
         if (edge.target !== node.id) continue;
+        if (edge.energyEnabled === false) continue;
         if (blockDoneTasks) {
           const srcNode = byId[edge.source];
           if (srcNode?.type === 'task') {

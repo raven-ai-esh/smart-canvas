@@ -63,10 +63,30 @@ interface AppState {
     monitoringMode: boolean;
     toggleMonitoringMode: () => void;
 
-    me: { id: string; email: string; name: string; avatarSeed: string; avatarUrl?: string | null; verified: boolean } | null;
+    me: {
+        id: string;
+        email: string;
+        name: string;
+        avatarSeed: string;
+        avatarUrl?: string | null;
+        avatarAnimal?: number | null;
+        avatarColor?: number | null;
+        verified: boolean;
+    } | null;
     setMe: (me: AppState['me']) => void;
 
-    presence: { selfId: string | null; peers: { id: string; name: string; avatarSeed: string; avatarUrl?: string | null; registered: boolean }[] };
+    presence: {
+        selfId: string | null;
+        peers: {
+            id: string;
+            name: string;
+            avatarSeed: string;
+            avatarUrl?: string | null;
+            avatarAnimal?: number | null;
+            avatarColor?: number | null;
+            registered: boolean;
+        }[];
+    };
     setPresence: (presence: AppState['presence']) => void;
 
     history: UndoSnapshot[];
@@ -80,6 +100,7 @@ interface AppState {
     updateNode: (id: string, data: Partial<NodeData>) => void;
     deleteNode: (id: string) => void;
     addEdge: (edge: EdgeData) => void;
+    updateEdge: (id: string, data: Partial<EdgeData>) => void;
     deleteEdge: (id: string) => void;
     setCanvasTransform: (x: number, y: number, scale: number) => void;
 
@@ -148,6 +169,7 @@ const normalizeEnergies = (nodes: NodeData[], edges: EdgeData[], opts?: { maxIte
 
         const incomingById: Record<string, number> = {};
         for (const edge of edges) {
+            if (edge.energyEnabled === false) continue;
             const src = edge.source;
             const tgt = edge.target;
             const srcEff = relu(effective[src] ?? 0);
@@ -408,6 +430,7 @@ export const useStore = create<AppState>()(
                 const now = Date.now();
                 const normalized: EdgeData = {
                     ...edge,
+                    energyEnabled: edge.energyEnabled !== false,
                     createdAt: edge.createdAt ?? now,
                     updatedAt: edge.updatedAt ?? now,
                 };
@@ -427,6 +450,19 @@ export const useStore = create<AppState>()(
                     effectiveEnergy,
                 };
             }),
+
+            updateEdge: (id, data) =>
+                set((state) => {
+                    const now = Date.now();
+                    const edges = state.edges.map((e) => (e.id === id ? { ...e, ...data, updatedAt: now } : e));
+                    const normalizedEnergy = normalizeEnergies(state.nodes, edges);
+                    const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
+                    return {
+                        edges,
+                        nodes: normalizedEnergy.nodes,
+                        effectiveEnergy,
+                    };
+                }),
 
             deleteEdge: (id) => set((state) => {
                 const now = Date.now();

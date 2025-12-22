@@ -29,6 +29,10 @@ services:
       YANDEX_CLIENT_SECRET: "${YANDEX_CLIENT_SECRET:-}"
       TELEGRAM_BOT_USERNAME: "${TELEGRAM_BOT_USERNAME:-}"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TEST_USER_ENABLED: "${TEST_USER_ENABLED:-true}"
+      TEST_USER_EMAIL: "${TEST_USER_EMAIL:-test@raven-ai.local}"
+      TEST_USER_PASSWORD: "${TEST_USER_PASSWORD:-test1234}"
+      TEST_USER_NAME: "${TEST_USER_NAME:-Test User}"
     depends_on:
       - db
     restart: always
