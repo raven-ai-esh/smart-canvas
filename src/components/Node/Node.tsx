@@ -1029,6 +1029,7 @@ interface NodeProps {
 export const Node: React.FC<NodeProps> = ({ data }) => {
     const { canvas } = useStore();
     const scale = canvas.scale;
+    const [isHovered, setIsHovered] = useState(false);
 
     // Localized Semantic Zoom Logic
     // Only "Open" (NoteView) if:
@@ -1095,8 +1096,11 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
     const selectedNode = useStore((state) => state.selectedNode);
     const selectedNodes = useStore((state) => state.selectedNodes);
     const connectionTargetId = useStore((state) => state.connectionTargetId);
+    const authorshipMode = useStore((state) => state.authorshipMode);
 
     const isSelected = selectedNode === data.id || selectedNodes.includes(data.id);
+    const authorLabel = typeof data.authorName === 'string' ? data.authorName.trim() : '';
+    const showAuthor = authorshipMode && !!authorLabel && (isHovered || isSelected);
     const neighborDist = neighbors[data.id];
     const isTarget = connectionTargetId === data.id;
 
@@ -1114,6 +1118,12 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
         wrapperClass += ` ${styles.backgroundNoise}`;
     }
 
+    const renderAuthorBadge = () => (
+        authorLabel ? (
+            <div className={`${styles.authorBadge} ${showAuthor ? styles.authorVisible : ''}`}>{authorLabel}</div>
+        ) : null
+    );
+
     return (
         <div
             className={wrapperClass}
@@ -1124,6 +1134,8 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
             }}
             data-node-bounds="true"
             data-node-id={data.id}
+            onPointerEnter={() => setIsHovered(true)}
+            onPointerLeave={() => setIsHovered(false)}
         >
             {/* Graph View */}
             <div
@@ -1131,6 +1143,7 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
                 data-node-rect={isGraph ? 'true' : undefined}
                 data-node-rect-id={data.id}
             >
+                {renderAuthorBadge()}
                 <GraphView data={data} />
             </div>
 
@@ -1140,6 +1153,7 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
                 data-node-rect={isCard ? 'true' : undefined}
                 data-node-rect-id={data.id}
             >
+                {renderAuthorBadge()}
                 <CardView data={data} />
             </div>
 
@@ -1150,6 +1164,7 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
                 data-node-rect-id={data.id}
                 style={noteViewStyle}
             >
+                {renderAuthorBadge()}
                 <NoteView data={data} />
             </div>
         </div>

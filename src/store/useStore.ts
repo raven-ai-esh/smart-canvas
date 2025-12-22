@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 import type { NodeData, EdgeData, CanvasState, Drawing, PenToolType, Tombstones, TextBox } from '../types';
 import { clampEnergy, computeEffectiveEnergy, relu } from '../utils/energy';
 import { debugLog } from '../utils/debug';
+import { getGuestIdentity } from '../utils/guestIdentity';
 
 type UndoSnapshot = {
     nodes: NodeData[];
@@ -27,6 +28,27 @@ const progressFromStatus = (status?: NodeData['status'], legacyInWork?: boolean)
     return 0;
 };
 const tombstoneFor = (now: number, updatedAt?: number) => Math.max(now, ts(updatedAt) + 1);
+
+const resolveAuthor = (state: AppState) => {
+    const me = state.me;
+    if (me?.id) {
+        const name = (me.name || me.email || 'User').trim();
+        return { authorId: me.id, authorName: name || 'User' };
+    }
+    const selfId = state.presence?.selfId ?? null;
+    const selfPeer = selfId ? state.presence.peers.find((p) => p.id === selfId) : null;
+    const seed = selfPeer?.avatarSeed ?? '';
+    const fallback = selfPeer?.name ?? 'Guest';
+    const guestName = getGuestIdentity(seed, fallback).name;
+    return { authorId: null, authorName: guestName };
+};
+
+const withAuthor = <T extends { authorId?: string | null; authorName?: string | null }>(state: AppState, data: T) => {
+    const hasName = typeof data.authorName === 'string' && data.authorName.trim().length > 0;
+    const hasId = typeof data.authorId === 'string' && data.authorId.trim().length > 0;
+    if (hasName || hasId) return data;
+    return { ...data, ...resolveAuthor(state) };
+};
 
 interface AppState {
     nodes: NodeData[];
@@ -62,6 +84,8 @@ interface AppState {
     toggleFocusMode: () => void;
     monitoringMode: boolean;
     toggleMonitoringMode: () => void;
+    authorshipMode: boolean;
+    toggleAuthorshipMode: () => void;
 
     me: {
         id: string;
@@ -262,6 +286,8 @@ export const useStore = create<AppState>()(
                         effectiveEnergy: effectiveForMode(state.nodes, state.edges, next, state.effectiveEnergy),
                     };
                 }),
+            authorshipMode: false,
+            toggleAuthorshipMode: () => set((state) => ({ authorshipMode: !state.authorshipMode })),
 
             me: null,
             setMe: (me) => set({ me }),
@@ -325,17 +351,18 @@ export const useStore = create<AppState>()(
 
             addNode: (node) => set((state) => {
                 const now = Date.now();
-                const legacyInWork = (node as { inWork?: boolean }).inWork;
-                const progress = node.type === 'task'
-                    ? clampProgress(node.progress ?? progressFromStatus(node.status, legacyInWork))
+                const base = withAuthor(state, node);
+                const legacyInWork = (base as { inWork?: boolean }).inWork;
+                const progress = base.type === 'task'
+                    ? clampProgress(base.progress ?? progressFromStatus(base.status, legacyInWork))
                     : undefined;
-                const status = node.type === 'task' ? statusFromProgress(progress ?? 0) : node.status;
+                const status = base.type === 'task' ? statusFromProgress(progress ?? 0) : base.status;
                 const normalized: NodeData = {
-                    ...node,
+                    ...base,
                     status,
                     progress,
-                    createdAt: node.createdAt ?? now,
-                    updatedAt: node.updatedAt ?? now,
+                    createdAt: base.createdAt ?? now,
+                    updatedAt: base.updatedAt ?? now,
                 };
                 const nodes = [...state.nodes, normalized];
                 const tombstones: Tombstones = {
@@ -428,11 +455,12 @@ export const useStore = create<AppState>()(
 
             addEdge: (edge) => set((state) => {
                 const now = Date.now();
+                const base = withAuthor(state, edge);
                 const normalized: EdgeData = {
-                    ...edge,
-                    energyEnabled: edge.energyEnabled !== false,
-                    createdAt: edge.createdAt ?? now,
-                    updatedAt: edge.updatedAt ?? now,
+                    ...base,
+                    energyEnabled: base.energyEnabled !== false,
+                    createdAt: base.createdAt ?? now,
+                    updatedAt: base.updatedAt ?? now,
                 };
                 const edges = [...state.edges, normalized];
                 const tombstones: Tombstones = {
@@ -683,10 +711,11 @@ export const useStore = create<AppState>()(
             drawings: [],
             addDrawing: (drawing) => set((state) => {
                 const now = Date.now();
+                const base = withAuthor(state, drawing);
                 const normalized: Drawing = {
-                    ...drawing,
-                    createdAt: drawing.createdAt ?? now,
-                    updatedAt: drawing.updatedAt ?? now,
+                    ...base,
+                    createdAt: base.createdAt ?? now,
+                    updatedAt: base.updatedAt ?? now,
                 };
                 const drawings = [...state.drawings, normalized];
                 const tombstones: Tombstones = {
@@ -720,12 +749,13 @@ export const useStore = create<AppState>()(
             addTextBox: (tb) =>
                 set((state) => {
                     const now = Date.now();
+                    const base = withAuthor(state, tb);
                     const normalized: TextBox = {
-                        ...tb,
-                        createdAt: tb.createdAt ?? now,
-                        updatedAt: tb.updatedAt ?? now,
-                        kind: tb.kind ?? 'text',
-                        text: String(tb.text ?? ''),
+                        ...base,
+                        createdAt: base.createdAt ?? now,
+                        updatedAt: base.updatedAt ?? now,
+                        kind: base.kind ?? 'text',
+                        text: String(base.text ?? ''),
                     };
                     const textBoxes = [...state.textBoxes, normalized];
                     const tombstones: Tombstones = {

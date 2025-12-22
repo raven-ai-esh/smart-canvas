@@ -44,10 +44,14 @@ export function TextBox({
   const selectedId = useStore((s) => s.selectedTextBoxId);
   const selectedIds = useStore((s) => s.selectedTextBoxes);
   const selectTextBox = useStore((s) => s.selectTextBox);
+  const authorshipMode = useStore((s) => s.authorshipMode);
 
   const isEditing = editingId === box.id;
   const isImage = box.kind === 'image' && typeof box.src === 'string' && box.src.length > 0;
   const isSelected = selectedId === box.id || selectedIds.includes(box.id);
+  const authorLabel = typeof box.authorName === 'string' ? box.authorName.trim() : '';
+  const [isHovered, setIsHovered] = React.useState(false);
+  const showAuthor = authorshipMode && !!authorLabel && (isHovered || isSelected);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const measureRef = React.useRef<HTMLDivElement | null>(null);
   const editHistoryRef = React.useRef(false);
@@ -477,6 +481,8 @@ export function TextBox({
       }}
       data-textbox-id={box.id}
       data-interactive="true"
+      onPointerEnter={() => setIsHovered(true)}
+      onPointerLeave={() => setIsHovered(false)}
       onPointerDown={(e) => {
         e.stopPropagation();
         if (e.pointerType === 'touch' && !isEditing) {
@@ -547,6 +553,10 @@ export function TextBox({
           margin: 0,
         }}
       />
+
+      {authorLabel && (
+        <div className={`${styles.authorBadge} ${showAuthor ? styles.authorVisible : ''}`}>{authorLabel}</div>
+      )}
 
       {isEditing ? (
         <textarea

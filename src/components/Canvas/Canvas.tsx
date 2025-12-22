@@ -2423,19 +2423,6 @@ export const Canvas: React.FC = () => {
                     <div
                         key={node.id}
                         data-node-id={node.id}
-                        onPointerDownCapture={(e) => {
-                            const t = e.target as any;
-                            if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
-                            if (t instanceof HTMLElement && t.isContentEditable) return;
-                            const st = useStore.getState();
-                            const selectedNodes = st.selectedNodes?.length ? st.selectedNodes : (st.selectedNode ? [st.selectedNode] : []);
-                            const selectedTextBoxes = st.selectedTextBoxes?.length ? st.selectedTextBoxes : (st.selectedTextBoxId ? [st.selectedTextBoxId] : []);
-                            const isMulti = (selectedNodes.length + selectedTextBoxes.length) > 1;
-                            if (isMulti && selectedNodes.includes(node.id)) return;
-                            const { selectNode, selectTextBox } = st;
-                            selectTextBox(null);
-                            selectNode(node.id);
-                        }}
                     >
                         <Node data={node} />
                     </div>
