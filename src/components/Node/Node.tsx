@@ -790,6 +790,16 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
         startProgressDrag(e.clientX, el, e.pointerId);
     };
 
+    const applyQuickProgress = (value: number, e?: React.SyntheticEvent) => {
+        e?.preventDefault?.();
+        e?.stopPropagation?.();
+        const next = clampProgress(value);
+        if (Math.round(progress) === next) return;
+        useStore.getState().pushHistory();
+        updateNode(data.id, { progress: next });
+    };
+    const quickProgressOptions = [25, 50, 75, 100];
+
 
     return (
         <div className={styles.noteDetailWrap} data-interactive="true" onPointerDown={(e) => e.stopPropagation()}>
@@ -884,28 +894,50 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
 
                 <div className={styles.noteStack}>
                     {isTask && (
-                        <div className={styles.noteProgressRow}>
-                            <div
-                                className={styles.noteProgressTrack}
-                                style={{ '--progress-color': energyColor } as React.CSSProperties}
-                                onPointerDown={handleProgressPointerDown}
-                                role="slider"
-                                aria-label="Progress"
-                                aria-valuemin={0}
-                                aria-valuemax={100}
-                                aria-valuenow={Math.round(progress)}
-                                data-interactive="true"
-                            >
+                        <>
+                            <div className={styles.noteProgressRow}>
                                 <div
-                                    className={styles.noteProgressFill}
-                                    style={{
-                                        width: `${progress}%`,
-                                        transition: isDraggingProgress ? 'none' : undefined,
-                                    }}
-                                />
+                                    className={styles.noteProgressTrack}
+                                    style={{ '--progress-color': energyColor } as React.CSSProperties}
+                                    onPointerDown={handleProgressPointerDown}
+                                    role="slider"
+                                    aria-label="Progress"
+                                    aria-valuemin={0}
+                                    aria-valuemax={100}
+                                    aria-valuenow={Math.round(progress)}
+                                    data-interactive="true"
+                                >
+                                    <div
+                                        className={styles.noteProgressFill}
+                                        style={{
+                                            width: `${progress}%`,
+                                            transition: isDraggingProgress ? 'none' : undefined,
+                                        }}
+                                    />
+                                </div>
+                                <div className={styles.noteProgressValue}>{Math.round(progress)}%</div>
                             </div>
-                            <div className={styles.noteProgressValue}>{Math.round(progress)}%</div>
-                        </div>
+                            <div
+                                className={styles.noteProgressQuickRow}
+                                style={{ '--progress-color': energyColor } as React.CSSProperties}
+                            >
+                                {quickProgressOptions.map((value) => {
+                                    const isActive = Math.round(progress) === value;
+                                    return (
+                                        <button
+                                            key={value}
+                                            type="button"
+                                            className={`${styles.noteProgressQuickButton}${isActive ? ` ${styles.noteProgressQuickActive}` : ''}`}
+                                            onClick={(e) => applyQuickProgress(value, e)}
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                            data-interactive="true"
+                                        >
+                                            {value}%
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </>
                     )}
 
                     {/* Date Pickers + Status (Only for Task) */}
