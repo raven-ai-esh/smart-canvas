@@ -245,7 +245,7 @@ const NoteContentEditor: React.FC<{
     );
 };
 
-const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
+const CardView = React.memo(({ data }: { data: NodeData }) => {
     const updateNode = useStore((state) => state.updateNode);
     const [showEnergySelector, setShowEnergySelector] = React.useState(false);
     const monitoringMode = useStore((state) => state.monitoringMode);
@@ -583,9 +583,9 @@ const CardView: React.FC<{ data: NodeData }> = ({ data }) => {
             </div>
         </div>
     );
-};
+});
 
-const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
+const NoteView = React.memo(({ data }: { data: NodeData }) => {
     const updateNode = useStore((state) => state.updateNode);
     const monitoringMode = useStore((state) => state.monitoringMode);
     // NoteView is explicitly for "Dive in", so maybe we allow direct editing?
@@ -1058,7 +1058,7 @@ const NoteView: React.FC<{ data: NodeData }> = ({ data }) => {
             </div>
         </div>
     );
-};
+});
 
 interface NodeProps {
     data: NodeData;

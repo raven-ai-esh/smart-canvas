@@ -168,6 +168,8 @@ export const Canvas: React.FC = () => {
     const lastPointerPos = useRef({ x: 0, y: 0 }); // Screen coordinates
     const lastPointerKnownRef = useRef(false);
     const pointerDownPos = useRef({ x: 0, y: 0 }); // To detect clicks vs drags
+    const wheelRafRef = useRef<number | null>(null);
+    const wheelPendingRef = useRef<{ x: number; y: number; scale: number } | null>(null);
 
     // Touch gesture state (for double-tap and pinch-to-zoom)
     const lastTapTime = useRef(0);
@@ -557,23 +559,32 @@ export const Canvas: React.FC = () => {
 
     const handleWheel = useCallback((e: WheelEvent) => {
         e.preventDefault();
-        const c = canvasRef.current;
+        const base = wheelPendingRef.current ?? canvasRef.current;
         if (e.ctrlKey || e.metaKey) {
             const zoomSensitivity = 0.001;
             const delta = -e.deltaY * zoomSensitivity;
-            const newScale = Math.min(Math.max(c.scale * (1 + delta), MIN_SCALE), MAX_SCALE);
+            const newScale = Math.min(Math.max(base.scale * (1 + delta), MIN_SCALE), MAX_SCALE);
 
-            if (containerRef.current) {
-                const rect = containerRef.current.getBoundingClientRect();
-                const cursorX = e.clientX - rect.left;
-                const cursorY = e.clientY - rect.top;
-                const scaleRatio = newScale / c.scale;
-                const newX = cursorX - (cursorX - c.x) * scaleRatio;
-                const newY = cursorY - (cursorY - c.y) * scaleRatio;
-                setCanvasTransform(newX, newY, newScale);
-            }
+            const rect = containerRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            const cursorX = e.clientX - rect.left;
+            const cursorY = e.clientY - rect.top;
+            const scaleRatio = newScale / base.scale;
+            const newX = cursorX - (cursorX - base.x) * scaleRatio;
+            const newY = cursorY - (cursorY - base.y) * scaleRatio;
+            wheelPendingRef.current = { x: newX, y: newY, scale: newScale };
         } else {
-            setCanvasTransform(c.x - e.deltaX, c.y - e.deltaY, c.scale);
+            wheelPendingRef.current = { x: base.x - e.deltaX, y: base.y - e.deltaY, scale: base.scale };
+        }
+
+        if (wheelRafRef.current == null) {
+            wheelRafRef.current = window.requestAnimationFrame(() => {
+                wheelRafRef.current = null;
+                const next = wheelPendingRef.current;
+                if (!next) return;
+                wheelPendingRef.current = null;
+                setCanvasTransform(next.x, next.y, next.scale);
+            });
         }
     }, [setCanvasTransform]);
 
