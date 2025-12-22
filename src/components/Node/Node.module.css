@@ -68,60 +68,55 @@
     width: 32px;
     height: 32px;
     border-radius: 50%;
-    background-color: var(--bg-node);
-    border: 2px solid var(--text-dim);
+    border: 2px solid var(--graph-energy-color, var(--text-dim));
+    --graph-fill-base: rgba(255, 255, 255, 0.08);
+    background:
+        conic-gradient(
+            var(--graph-energy-color, var(--accent-primary)) 0turn,
+            var(--graph-energy-color, var(--accent-primary)) calc(var(--graph-fill, 0) * 1turn),
+            var(--graph-fill-base) calc(var(--graph-fill, 0) * 1turn),
+            var(--graph-fill-base) 1turn
+        );
     /* Thicker border for visibility */
-    transition: transform 0.2s ease, border-color 0.2s ease;
+    transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
 }
 
 .graphNode:hover {
     transform: scale(1.2);
     /* Slightly less aggressive zoom */
-    border-color: #FF9F1C;
-    background-color: #FF9F1C;
-    box-shadow: 0 0 16px rgba(255, 159, 28, 0.6);
+    box-shadow: 0 0 16px color-mix(in srgb, var(--graph-energy-color, var(--accent-primary)) 65%, transparent);
 }
 
 /* Marquee hover should feel like hover */
 .nodeWrapper[data-marquee-hover="true"] .graphNode {
     transform: scale(1.2);
-    border-color: #FF9F1C;
-    background-color: #FF9F1C;
-    box-shadow: 0 0 16px rgba(255, 159, 28, 0.6);
+    box-shadow: 0 0 16px color-mix(in srgb, var(--graph-energy-color, var(--accent-primary)) 65%, transparent);
 }
 
 :global(body.light-theme) .nodeWrapper[data-marquee-hover="true"] .graphNode,
 :global(body.light-theme) .nodeWrapper[data-marquee-hover="true"] .graphNode.task {
-    background-color: #FF9F1C;
-    border-color: #FF9F1C;
-    box-shadow: 0 0 16px rgba(255, 159, 28, 0.6);
+    box-shadow: 0 0 16px color-mix(in srgb, var(--graph-energy-color, var(--accent-primary)) 65%, transparent);
 }
 
 /* Task variant for Graph View */
 .graphNode.task {
-    border-color: var(--accent-task);
-    background-color: var(--bg-node);
+    /* Task keeps the same energy-driven styling as other nodes. */
 }
 
 /* Light Mode Graph View Fills */
 :global(body.light-theme) .graphNode {
-    background-color: var(--accent-primary);
-    border-color: var(--accent-primary);
-    box-shadow: 0 2px 8px rgba(94, 129, 172, 0.4);
+    --graph-fill-base: rgba(0, 0, 0, 0.08);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
 :global(body.light-theme) .graphNode.task {
-    background-color: var(--accent-task);
-    border-color: var(--accent-task);
-    box-shadow: 0 2px 8px rgba(163, 190, 140, 0.4);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
 /* Hover effects for Light Mode */
 :global(body.light-theme) .graphNode:hover,
 :global(body.light-theme) .graphNode.task:hover {
-    background-color: #FF9F1C;
-    border-color: #FF9F1C;
-    box-shadow: 0 0 16px rgba(255, 159, 28, 0.6);
+    box-shadow: 0 0 16px color-mix(in srgb, var(--graph-energy-color, var(--accent-primary)) 65%, transparent);
 }
 
 /* --- Card View --- */

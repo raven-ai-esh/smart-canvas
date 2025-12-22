@@ -10,8 +10,14 @@ import { clampEnergy, energyToColor } from '../../utils/energy';
 import { EnergySvgLiquidGauge } from './EnergySvgLiquidGauge';
 
 // View Components
-const GraphView: React.FC<{ data: NodeData }> = ({ data }) => (
-    <div className={`${styles.graphNode} ${data.type === 'task' ? styles.task : ''}`} />
+const GraphView: React.FC<{ data: NodeData; energyColor: string; fillRatio: number }> = ({ data, energyColor, fillRatio }) => (
+    <div
+        className={`${styles.graphNode} ${data.type === 'task' ? styles.task : ''}`}
+        style={{
+            '--graph-energy-color': energyColor,
+            '--graph-fill': String(Math.max(0, Math.min(1, fillRatio))),
+        } as React.CSSProperties}
+    />
 );
 
 // Helper to get delta to center
@@ -1097,12 +1103,19 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
     const selectedNodes = useStore((state) => state.selectedNodes);
     const connectionTargetId = useStore((state) => state.connectionTargetId);
     const authorshipMode = useStore((state) => state.authorshipMode);
+    const effectiveEnergy = useStore((state) => state.effectiveEnergy[data.id] ?? data.energy);
 
     const isSelected = selectedNode === data.id || selectedNodes.includes(data.id);
     const authorLabel = typeof data.authorName === 'string' ? data.authorName.trim() : '';
     const showAuthor = authorshipMode && !!authorLabel && (isHovered || isSelected);
     const neighborDist = neighbors[data.id];
     const isTarget = connectionTargetId === data.id;
+    const energyColor = energyToColor(effectiveEnergy);
+    const progressValue = data.type === 'task'
+        ? clampProgress(Number.isFinite(data.progress as number) ? (data.progress as number) : 0)
+        : 0;
+    const clarityValue = Number.isFinite(data.clarity) ? Math.max(0, Math.min(1, data.clarity)) : 0;
+    const fillRatio = data.type === 'task' ? progressValue / 100 : clarityValue;
 
     let wrapperClass = `${styles.nodeWrapper} ${isTarget ? styles.targetGlow : ''}`;
     if (isNote) wrapperClass += ` ${styles.noteFocus}`;
@@ -1144,7 +1157,7 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
                 data-node-rect-id={data.id}
             >
                 {renderAuthorBadge()}
-                <GraphView data={data} />
+                <GraphView data={data} energyColor={energyColor} fillRatio={fillRatio} />
             </div>
 
             {/* Card View */}
