@@ -6,11 +6,12 @@ import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
 import { Link2, MessageCircle, X, Zap, ZapOff } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
-import type { Comment, EdgeData, NodeData, TextBox as TextBoxType } from '../../types';
+import type { Attachment, Comment, EdgeData, NodeData, TextBox as TextBoxType } from '../../types';
 import { debugLog } from '../../utils/debug';
 import { TextBox } from '../TextBox/TextBox';
 import { SnowOverlay } from '../Snow/SnowOverlay';
 import { hashString } from '../../utils/guestIdentity';
+import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES } from '../../utils/attachments';
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
@@ -124,8 +125,11 @@ export const Canvas: React.FC = () => {
 	    const [hoverCommentId, setHoverCommentId] = useState<string | null>(null);
 	    const [draftComment, setDraftComment] = useState<CommentDraft | null>(null);
 	    const [draftText, setDraftText] = useState('');
+	    const [draftAttachments, setDraftAttachments] = useState<Attachment[]>([]);
+	    const [draftNotice, setDraftNotice] = useState<string | null>(null);
 	    const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
 	    const draftInputRef = useRef<HTMLTextAreaElement | null>(null);
+	    const draftAttachInputRef = useRef<HTMLInputElement | null>(null);
 	    const marqueeStartRef = useRef<{ x: number; y: number; pointerId: number } | null>(null);
 	    const groupDragRef = useRef<null | {
         pointerId: number;
@@ -179,6 +183,14 @@ export const Canvas: React.FC = () => {
         downClientX: number;
         downClientY: number;
         pointerType: string;
+    } | null>(null);
+    const canvasLongPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const canvasTouchCandidate = useRef<{
+        pointerId: number;
+        downClientX: number;
+        downClientY: number;
+        downWorldX: number;
+        downWorldY: number;
     } | null>(null);
 
     // Drawing State
@@ -438,6 +450,8 @@ export const Canvas: React.FC = () => {
         if (!commentsMode) toggleCommentsMode();
         setDraftComment(draft);
         setDraftText('');
+        setDraftAttachments([]);
+        setDraftNotice(null);
         setOpenCommentId(null);
         setHoverCommentId(null);
     }, [commentsMode, me, requestAuthForComment, toggleCommentsMode]);
@@ -445,7 +459,7 @@ export const Canvas: React.FC = () => {
     const submitDraftComment = useCallback(() => {
         if (!draftComment) return;
         const text = draftText.trim();
-        if (!text) return;
+        if (!text && draftAttachments.length === 0) return;
         const id = uuidv4();
         addComment({
             id,
@@ -455,11 +469,26 @@ export const Canvas: React.FC = () => {
             x: draftComment.x,
             y: draftComment.y,
             text,
+            attachments: draftAttachments,
         });
         setDraftComment(null);
         setDraftText('');
+        setDraftAttachments([]);
+        setDraftNotice(null);
         setOpenCommentId(id);
-    }, [addComment, draftComment, draftText]);
+    }, [addComment, draftAttachments, draftComment, draftText]);
+
+    const handleDraftAttachmentInput = useCallback(async (files: FileList | null) => {
+        if (!files || files.length === 0) return;
+        // Convert selected files to data URLs so they can travel with the session state.
+        const { attachments, rejected } = await filesToAttachments(Array.from(files));
+        if (attachments.length) {
+            setDraftAttachments((prev) => [...prev, ...attachments]);
+        }
+        if (rejected.length) {
+            setDraftNotice(`Max file size is ${formatBytes(MAX_ATTACHMENT_BYTES)}`);
+        }
+    }, []);
 
     const submitReply = useCallback((parent: Comment) => {
         if (!me) {
@@ -486,6 +515,12 @@ export const Canvas: React.FC = () => {
     }, [draftComment]);
 
     useEffect(() => {
+        if (!draftNotice) return;
+        const t = window.setTimeout(() => setDraftNotice(null), 2000);
+        return () => window.clearTimeout(t);
+    }, [draftNotice]);
+
+    useEffect(() => {
         if (!commentsMode) {
             setOpenCommentId(null);
             setHoverCommentId(null);
@@ -498,6 +533,8 @@ export const Canvas: React.FC = () => {
             if (target?.closest?.('[data-comment-ui="true"]')) return;
             setOpenCommentId(null);
             setDraftComment(null);
+            setDraftAttachments([]);
+            setDraftNotice(null);
         };
         window.addEventListener('pointerdown', onPointerDown, true);
         return () => window.removeEventListener('pointerdown', onPointerDown, true);
@@ -546,6 +583,14 @@ export const Canvas: React.FC = () => {
             longPressTimer.current = null;
         }
         touchPressCandidate.current = null;
+    };
+
+    const clearCanvasLongPress = () => {
+        if (canvasLongPressTimer.current) {
+            clearTimeout(canvasLongPressTimer.current);
+            canvasLongPressTimer.current = null;
+        }
+        canvasTouchCandidate.current = null;
     };
 
     const updateConnectionTargetFromClientPoint = (clientX: number, clientY: number, sourceId: string) => {
@@ -1616,8 +1661,9 @@ export const Canvas: React.FC = () => {
 	            return;
 	        }
 
-	        const target = e.target as HTMLElement;
-	        const isInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+        const target = e.target as HTMLElement;
+        const isInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+        clearCanvasLongPress();
 
         if (e.pointerType === 'mouse' && e.button === 2) {
             return;
@@ -1669,10 +1715,10 @@ export const Canvas: React.FC = () => {
             containerRef.current?.setPointerCapture(e.pointerId);
         }
 
-	        if (nodeElement) {
-	            const nodeId = nodeElement.getAttribute('data-node-id')!;
-	            const worldPos = screenToWorld(e.clientX, e.clientY);
-	            const node = nodes.find(n => n.id === nodeId)!;
+        if (nodeElement) {
+            const nodeId = nodeElement.getAttribute('data-node-id')!;
+            const worldPos = screenToWorld(e.clientX, e.clientY);
+            const node = nodes.find(n => n.id === nodeId)!;
 
             // Touch: allow long-press to open context menu and drag to move node
 	            if (e.pointerType === 'touch' && !penMode) {
@@ -1776,9 +1822,40 @@ export const Canvas: React.FC = () => {
 	                };
 	                dragUndoCommittedRef.current = false;
 	                setDragOffset({ x: worldPos.x - node.x, y: worldPos.y - node.y });
-	            }
-	            e.stopPropagation();
-	        } else {
+            }
+            e.stopPropagation();
+        } else {
+            if (e.pointerType === 'touch' && !penMode && !textMode) {
+                clearCanvasLongPress();
+                const worldPos = screenToWorld(e.clientX, e.clientY);
+                canvasTouchCandidate.current = {
+                    pointerId: e.pointerId,
+                    downClientX: e.clientX,
+                    downClientY: e.clientY,
+                    downWorldX: worldPos.x,
+                    downWorldY: worldPos.y,
+                };
+                canvasLongPressTimer.current = setTimeout(() => {
+                    const candidate = canvasTouchCandidate.current;
+                    if (!candidate || candidate.pointerId !== e.pointerId) return;
+                    setContextMenu({
+                        kind: 'canvas',
+                        id: '__canvas__',
+                        x: candidate.downClientX,
+                        y: candidate.downClientY,
+                        worldX: candidate.downWorldX,
+                        worldY: candidate.downWorldY,
+                    });
+                    setMode('idle');
+                    setActiveId(null);
+                    setMarqueeRect(null);
+                    marqueeStartRef.current = null;
+                    clearMarqueeHover();
+                    clearCanvasLongPress();
+                }, LONG_PRESS_MS);
+                e.stopPropagation();
+                return;
+            }
             if (textMode) {
                 setMode('textPlacing');
                 setActiveId(null);
@@ -1942,6 +2019,34 @@ export const Canvas: React.FC = () => {
             }
         }
 
+        const canvasCandidate = canvasTouchCandidate.current;
+        if (canvasCandidate && e.pointerType === 'touch') {
+            const dist = Math.hypot(e.clientX - canvasCandidate.downClientX, e.clientY - canvasCandidate.downClientY);
+            if (dist > TOUCH_DRAG_THRESHOLD) {
+                clearCanvasLongPress();
+                const { selectNode, selectEdge, selectTextBox } = useStore.getState();
+                selectNode(null);
+                selectEdge(null);
+                selectTextBox(null);
+                setEditingTextBoxId(null);
+                if (moveMode) {
+                    setMode('panning');
+                    setCanvasTransform(canvas.x + screenDeltaX, canvas.y + screenDeltaY, canvas.scale);
+                } else {
+                    setMode('selecting');
+                    marqueeStartRef.current = { x: canvasCandidate.downClientX, y: canvasCandidate.downClientY, pointerId: e.pointerId };
+                    const left = Math.min(canvasCandidate.downClientX, e.clientX);
+                    const top = Math.min(canvasCandidate.downClientY, e.clientY);
+                    const width = Math.abs(e.clientX - canvasCandidate.downClientX);
+                    const height = Math.abs(e.clientY - canvasCandidate.downClientY);
+                    setMarqueeRect({ left, top, width, height });
+                    clearMarqueeHover();
+                }
+                setContextMenu(null);
+            }
+            return;
+        }
+
         if (mode === 'textPlacing') {
             const dx = e.clientX - pointerDownPos.current.x;
             const dy = e.clientY - pointerDownPos.current.y;
@@ -2089,6 +2194,7 @@ export const Canvas: React.FC = () => {
 		    const handlePointerUp = (e: React.PointerEvent) => {
         // Palm rejection: ignore touch pointers while a pencil stroke is active.
         if (penStrokeActiveRef.current && e.pointerType === 'touch') return;
+        clearCanvasLongPress();
 
 	        if (mode === 'selecting') {
 	            const rect = marqueeRect;
@@ -2335,6 +2441,7 @@ export const Canvas: React.FC = () => {
 		        isDrawing.current = false;
 		        setMode('idle');
 		        setActiveId(null);
+            clearCanvasLongPress();
 	        setMarqueeRect(null);
 	        marqueeStartRef.current = null;
 	        clearMarqueeHover();
@@ -2780,7 +2887,22 @@ export const Canvas: React.FC = () => {
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
                                         <div className={styles.commentAuthor}>{label}</div>
-                                        <div className={styles.commentText}>{comment.text}</div>
+                                        {comment.text ? <div className={styles.commentText}>{comment.text}</div> : null}
+                                        {comment.attachments && comment.attachments.length > 0 && (
+                                            <div className={styles.commentAttachmentList}>
+                                                {comment.attachments.map((attachment) => (
+                                                    <a
+                                                        key={attachment.id}
+                                                        href={attachment.dataUrl}
+                                                        download={attachment.name}
+                                                        className={styles.commentAttachmentFile}
+                                                    >
+                                                        <span className={styles.commentAttachmentName}>{attachment.name}</span>
+                                                        <span className={styles.commentAttachmentMeta}>{formatBytes(attachment.size)}</span>
+                                                    </a>
+                                                ))}
+                                            </div>
+                                        )}
                                         {isOpen && replies.length > 0 && (
                                             <div className={styles.commentReplies}>
                                                 {replies.map((reply) => {
@@ -2856,7 +2978,40 @@ export const Canvas: React.FC = () => {
                                                 }
                                             }}
                                         />
+                                        {draftAttachments.length > 0 && (
+                                            <div className={styles.commentAttachmentList}>
+                                                {draftAttachments.map((attachment) => (
+                                                    <div key={attachment.id} className={styles.commentAttachmentDraft}>
+                                                        <div className={styles.commentAttachmentFile}>
+                                                            <span className={styles.commentAttachmentName}>{attachment.name}</span>
+                                                            <span className={styles.commentAttachmentMeta}>{formatBytes(attachment.size)}</span>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            className={styles.commentAttachmentRemove}
+                                                            data-comment-ui="true"
+                                                            onPointerDown={(e) => e.stopPropagation()}
+                                                            onClick={() => setDraftAttachments((prev) => prev.filter((a) => a.id !== attachment.id))}
+                                                        >
+                                                            Remove
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {draftNotice && (
+                                            <div className={styles.commentDraftNotice}>{draftNotice}</div>
+                                        )}
                                         <div className={styles.commentDraftActions}>
+                                            <button
+                                                type="button"
+                                                className={styles.commentDraftButton}
+                                                data-comment-ui="true"
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                                onClick={() => draftAttachInputRef.current?.click()}
+                                            >
+                                                Attach
+                                            </button>
                                             <button
                                                 type="button"
                                                 className={styles.commentDraftButton}
@@ -2871,11 +3026,26 @@ export const Canvas: React.FC = () => {
                                                 className={styles.commentDraftButton}
                                                 data-comment-ui="true"
                                                 onPointerDown={(e) => e.stopPropagation()}
-                                                onClick={() => setDraftComment(null)}
+                                                onClick={() => {
+                                                    setDraftComment(null);
+                                                    setDraftAttachments([]);
+                                                    setDraftNotice(null);
+                                                }}
                                             >
                                                 Cancel
                                             </button>
                                         </div>
+                                        <input
+                                            ref={draftAttachInputRef}
+                                            type="file"
+                                            multiple
+                                            className={styles.commentAttachmentInput}
+                                            onChange={(e) => {
+                                                handleDraftAttachmentInput(e.target.files);
+                                                e.currentTarget.value = '';
+                                            }}
+                                            data-comment-ui="true"
+                                        />
                                     </div>
                                 </div>
                             );

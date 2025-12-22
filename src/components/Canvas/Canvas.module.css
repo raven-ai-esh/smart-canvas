@@ -279,6 +279,65 @@
     gap: 6px;
 }
 
+.commentAttachmentList {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.commentAttachmentFile {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    padding: 6px 8px;
+    border-radius: 10px;
+    border: 1px solid var(--border-strong);
+    color: var(--text-primary);
+    font-size: 12px;
+    text-decoration: none;
+}
+
+.commentAttachmentName {
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.commentAttachmentMeta {
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+
+.commentAttachmentDraft {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.commentAttachmentRemove {
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.commentDraftNotice {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.commentAttachmentInput {
+    display: none;
+}
+
 .commentReply {
     display: flex;
     gap: 6px;

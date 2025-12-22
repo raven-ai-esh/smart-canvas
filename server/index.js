@@ -421,6 +421,7 @@ function normalizeState(raw) {
     edges: Array.isArray(obj.edges) ? obj.edges : [],
     drawings: Array.isArray(obj.drawings) ? obj.drawings : [],
     textBoxes: Array.isArray(obj.textBoxes) ? obj.textBoxes : [],
+    comments: Array.isArray(obj.comments) ? obj.comments : [],
     theme: obj.theme === 'light' ? 'light' : 'dark',
     tombstones: normalizeTombstones(obj.tombstones),
   };
@@ -478,12 +479,14 @@ function mergeState(currentRaw, incomingRaw) {
   });
   const drawings = mergeById(current.drawings, incoming.drawings, tombstones.drawings);
   const textBoxes = mergeById(current.textBoxes, incoming.textBoxes, tombstones.textBoxes);
+  const comments = mergeById(current.comments, incoming.comments, {});
 
   return {
     nodes,
     edges,
     drawings,
     textBoxes,
+    comments,
     theme: current.theme,
     tombstones,
   };
@@ -1400,9 +1403,24 @@ function guestNameFromClientId(clientId) {
 function sendPresence(sessionId) {
   const clients = roomFor(sessionId);
   const peers = [];
+  const registeredMap = new Map();
   for (const ws of clients) {
     const meta = ws._meta;
     if (!meta) continue;
+    if (meta.userId) {
+      if (!registeredMap.has(meta.userId)) {
+        registeredMap.set(meta.userId, {
+          id: meta.userId,
+          name: meta.name,
+          avatarSeed: meta.avatarSeed,
+          avatarUrl: meta.avatarUrl,
+          avatarAnimal: meta.avatarAnimal,
+          avatarColor: meta.avatarColor,
+          registered: true,
+        });
+      }
+      continue;
+    }
     peers.push({
       id: meta.connId,
       name: meta.name,
@@ -1410,15 +1428,18 @@ function sendPresence(sessionId) {
       avatarUrl: meta.avatarUrl,
       avatarAnimal: meta.avatarAnimal,
       avatarColor: meta.avatarColor,
-      registered: !!meta.userId,
+      registered: false,
     });
   }
+  const registeredPeers = Array.from(registeredMap.values());
+  const peerList = registeredPeers.concat(peers);
 
   for (const ws of clients) {
     const meta = ws._meta;
     if (!meta) continue;
     if (ws.readyState !== ws.OPEN) continue;
-    ws.send(JSON.stringify({ type: 'presence', selfId: meta.connId, peers }));
+    const selfId = meta.userId || meta.connId;
+    ws.send(JSON.stringify({ type: 'presence', selfId, peers: peerList }));
   }
 }
 

@@ -257,7 +257,9 @@
 /* --- Note View --- */
 .noteNode {
     width: 500px;
-    min-height: 400px;
+    min-height: min(320px, 56vh);
+    max-height: 56vh;
+    height: min(56vh, 520px);
     background-color: var(--bg-node);
     border-radius: 12px;
     padding: 24px;
@@ -267,6 +269,7 @@
     font-size: 14px;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
 }
 
 .noteShell {
@@ -319,6 +322,11 @@
     gap: 12px;
     flex: 1;
     min-height: 0;
+    overflow: auto;
+    padding-right: 4px;
+    scrollbar-gutter: stable;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
 }
 
 .taskMetaRow {
@@ -822,6 +830,130 @@
 .noteContentInput:focus {
     border-color: var(--border-strong);
     box-shadow: 0 0 0 2px rgba(94, 129, 172, 0.12);
+}
+
+.editorNotice {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.editorSubmitRow {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 6px;
+}
+
+.editorSubmitButton {
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--text-primary);
+    border-radius: 999px;
+    padding: 6px 14px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.editorAttachmentInput {
+    display: none;
+}
+
+.attachmentList {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.attachmentListCompact {
+    margin-top: 8px;
+}
+
+.attachmentItem {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    position: relative;
+}
+
+.attachmentFile {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    padding: 8px 10px;
+    padding-right: 38px;
+    border-radius: 10px;
+    border: 1px solid var(--border-strong);
+    color: var(--text-primary);
+    text-decoration: none;
+    font-size: 12px;
+}
+
+.attachmentPreview {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255, 255, 255, 0.04);
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    flex: 0 0 auto;
+}
+
+.attachmentPreviewImg {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.attachmentPreviewText {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+}
+
+.attachmentInfo {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.attachmentName {
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.attachmentMeta {
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+
+.attachmentRemove {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 1;
+    border: none;
+    background: transparent;
+    color: #d64545;
+    width: 18px;
+    height: 18px;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.attachmentRemove:hover {
+    opacity: 1;
+    color: #f06464;
 }
 
 /* Focus Mode Dimming */

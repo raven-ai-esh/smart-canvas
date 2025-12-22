@@ -838,13 +838,15 @@ export const useStore = create<AppState>()(
                     const now = Date.now();
                     const author = resolveCommentAuthor(state);
                     const text = String(comment.text ?? '').trim();
-                    if (!text) return {};
+                    const attachments = Array.isArray(comment.attachments) ? comment.attachments : [];
+                    if (!text && attachments.length === 0) return {};
                     const normalized: Comment = {
                         ...author,
                         ...comment,
                         targetId: comment.targetId ?? null,
                         parentId: comment.parentId ?? null,
                         text,
+                        attachments,
                         createdAt: comment.createdAt ?? now,
                         updatedAt: comment.updatedAt ?? now,
                     };
