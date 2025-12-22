@@ -247,6 +247,25 @@ function YandexLogo() {
   );
 }
 
+function LoadingSpinner({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" style={{ display: 'block' }}>
+      <circle
+        cx="12"
+        cy="12"
+        r="9"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeDasharray="42 14"
+        fill="none"
+      >
+        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite" />
+      </circle>
+    </svg>
+  );
+}
+
 function TelegramLogo() {
   return (
     <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
@@ -1544,9 +1563,14 @@ export const Presence: React.FC = () => {
                     color: '#fff',
                     padding: '10px 12px',
                     cursor: settingsBusy ? 'not-allowed' : 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8,
                   }}
                 >
-                  Save changes
+                  <span>Save changes</span>
+                  {settingsBusy && <LoadingSpinner />}
                 </button>
                 <button
                   type="button"
@@ -1771,9 +1795,14 @@ export const Presence: React.FC = () => {
                   color: '#fff',
                   padding: '10px 12px',
                   cursor: busy ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
                 }}
               >
-                {mode === 'signup' ? 'Sign up' : 'Sign in'}
+                <span>{mode === 'signup' ? 'Sign up' : 'Sign in'}</span>
+                {busy && <LoadingSpinner />}
               </button>
             </div>
 

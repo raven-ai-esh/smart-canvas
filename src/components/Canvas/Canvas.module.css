@@ -115,3 +115,55 @@
     /* “Glass lens” effect without blur */
     backdrop-filter: saturate(140%) brightness(1.06) contrast(1.02);
 }
+
+.focusIndicator {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: var(--focus-w, 360px);
+    height: var(--focus-h, 252px);
+    transform: translate(-50%, -50%) scale(0.98);
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    background: radial-gradient(
+      ellipse at center,
+      rgba(255, 255, 255, 0.06) 0%,
+      rgba(255, 255, 255, 0.025) 52%,
+      rgba(255, 255, 255, 0) 72%
+    );
+    box-shadow: 0 0 34px rgba(94, 129, 172, 0.14);
+    opacity: 0;
+    pointer-events: none;
+    z-index: 0;
+    filter: blur(2px);
+    transition: opacity 220ms ease, transform 260ms ease;
+}
+
+:global(body.light-theme) .focusIndicator {
+    border-color: rgba(0, 0, 0, 0.08);
+    background: radial-gradient(
+      ellipse at center,
+      rgba(0, 0, 0, 0.06) 0%,
+      rgba(0, 0, 0, 0.025) 52%,
+      rgba(0, 0, 0, 0) 72%
+    );
+    box-shadow: 0 0 28px rgba(0, 0, 0, 0.12);
+}
+
+.focusVisible {
+    opacity: 0.45;
+    transform: translate(-50%, -50%) scale(1);
+    animation: focusPulse 2.8s ease-in-out infinite;
+}
+
+@keyframes focusPulse {
+    0% {
+        opacity: 0.35;
+    }
+    50% {
+        opacity: 0.6;
+    }
+    100% {
+        opacity: 0.35;
+    }
+}

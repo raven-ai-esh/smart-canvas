@@ -18,6 +18,8 @@ const LONG_PRESS_MS = 500;
 const TOUCH_DRAG_THRESHOLD = 8;
 const GRID_SIZE = 50;
 const ALIGN_SNAP_PX = 8;
+const FOCUS_RADIUS_X = 180;
+const FOCUS_RADIUS_Y = Math.round(FOCUS_RADIUS_X * 0.7);
 
     type InteractionMode = 'idle' | 'panning' | 'draggingNode' | 'connecting' | 'textPlacing' | 'selecting';
 type AlignmentGuide = { axis: 'x' | 'y'; pos: number; length: number };
@@ -2210,6 +2212,7 @@ export const Canvas: React.FC = () => {
     };
 
     const noteScale = 1 / Math.max(0.0001, canvas.scale);
+    const focusHintVisible = canvas.scale > 1.1;
     const contextEdge = contextMenu?.kind === 'edge'
         ? edges.find((edge) => edge.id === contextMenu.id) ?? null
         : null;
@@ -2337,6 +2340,14 @@ export const Canvas: React.FC = () => {
                     }}
                 />
             )}
+
+            <div
+                className={`${styles.focusIndicator} ${focusHintVisible ? styles.focusVisible : ''}`}
+                style={{
+                    '--focus-w': `${FOCUS_RADIUS_X * 2}px`,
+                    '--focus-h': `${FOCUS_RADIUS_Y * 2}px`,
+                } as React.CSSProperties}
+            />
 
             <svg
                 className={styles.canvasLayer}
