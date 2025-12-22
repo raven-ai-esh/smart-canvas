@@ -25,6 +25,8 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
     const selectEdge = useStore((state) => state.selectEdge);
     const edgeData = useStore((state) => state.edges.find((e) => e.id === id));
     const monitoringMode = useStore((state) => state.monitoringMode);
+    const authorshipMode = useStore((state) => state.authorshipMode);
+    const [isHovered, setIsHovered] = React.useState(false);
     const sourceEnergy = useStore((state) => {
         const eff = state.effectiveEnergy[sourceId];
         if (Number.isFinite(eff)) return eff;
@@ -216,6 +218,8 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
 
     const isEnergyEnabled = edgeData?.energyEnabled !== false;
     const isSelectedEdge = (selectedEdge === id) || selectedEdges.includes(id);
+    const authorLabel = typeof edgeData?.authorName === 'string' ? edgeData?.authorName.trim() : '';
+    const showAuthor = authorshipMode && !!authorLabel && (isHovered || isSelectedEdge);
     const hasFocus = !!selectedNode;
 
     // Check states
@@ -340,6 +344,8 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
                 onClick={selectThisEdge}
                 onContextMenu={handleContextMenu}
                 onPointerDownCapture={startTouchLongPress}
+                onPointerEnter={() => setIsHovered(true)}
+                onPointerLeave={() => setIsHovered(false)}
             />
             <path
                 d={geom.d}
@@ -354,6 +360,17 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
                 className={`${styles.edgeArrow} ${isSelectedEdge ? styles.edgeArrowSelected : ''}${isMonitoringEdge ? ` ${styles.edgeArrowMonitoring}` : ''}${!isEnergyEnabled ? ` ${styles.edgeArrowDisabled}` : ''}`}
                 style={{ fill: strokePaint, ...(monitorStyle ?? {}) }}
             />
+            {authorLabel && (
+                <text
+                    x={Math.min(sx, tx) - 6}
+                    y={Math.min(sy, ty) - 8}
+                    className={`${styles.edgeAuthor} ${showAuthor ? styles.edgeAuthorVisible : ''}`}
+                    textAnchor="start"
+                    dominantBaseline="text-after-edge"
+                >
+                    {authorLabel}
+                </text>
+            )}
         </>
     );
 };

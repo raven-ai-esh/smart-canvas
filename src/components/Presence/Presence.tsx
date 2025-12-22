@@ -1,20 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Moon, Sun, Snowflake, ChevronDown, ChevronUp } from 'lucide-react';
+import { Moon, Sun, Snowflake, User, ChevronDown, ChevronUp } from 'lucide-react';
 import { useStore } from '../../store/useStore';
+import { animalNames, getGuestIdentity, hashString } from '../../utils/guestIdentity';
 
 const palette = ['#5E81AC', '#A3BE8C', '#B48EAD', '#D08770', '#88C0D0', '#EBCB8B', '#BF616A', '#8FBCBB'];
-const animalNames = [
-  'Aardvark', 'Albatross', 'Alligator', 'Alpaca', 'Antelope', 'Armadillo', 'Axolotl', 'Badger', 'Bat', 'Beaver',
-  'Bison', 'Boar', 'Capybara', 'Caracal', 'Cassowary', 'Cheetah', 'Chinchilla', 'Cobra', 'Coyote', 'Crab',
-  'Crane', 'Crocodile', 'Crow', 'Deer', 'Dingo', 'Dolphin', 'Duck', 'Eagle', 'Echidna', 'Egret',
-  'Elephant', 'Elk', 'Falcon', 'Fennec', 'Ferret', 'Flamingo', 'Fox', 'Frog', 'Gazelle', 'Gibbon',
-  'Giraffe', 'Goose', 'Gorilla', 'Heron', 'Hedgehog', 'Hippo', 'Hornbill', 'Hyena', 'Ibis', 'Iguana',
-  'Jaguar', 'Kangaroo', 'Koala', 'Kudu', 'Lemur', 'Leopard', 'Llama', 'Lobster', 'Lynx', 'Manatee',
-  'Mantis', 'Meerkat', 'Moose', 'Narwhal', 'Ocelot', 'Octopus', 'Orca', 'Oryx', 'Otter', 'Panda',
-  'Panther', 'Parrot', 'Pelican', 'Penguin', 'Piranha', 'Porcupine', 'Quokka', 'Raccoon', 'Raven', 'Rhino',
-  'Salamander', 'Seal', 'Serval', 'Sloth', 'Sparrow', 'Swan', 'Tapir', 'Tiger', 'Toucan', 'Turtle',
-  'Walrus', 'Warthog', 'Weasel', 'Whale', 'Wolf', 'Wolverine', 'Wombat', 'Yak', 'Zebra', 'Zebu',
-];
 const colorColumns = 10;
 const colorRows = 10;
 const baseSaturation = 64;
@@ -148,21 +137,6 @@ function LabeledInputField({
       ) : null}
     </div>
   );
-}
-
-function hashString(s: string) {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
-function getGuestIdentity(seed: string, fallbackName: string) {
-  const key = seed || fallbackName || 'Guest';
-  const index = hashString(key) % animalNames.length;
-  return { index, name: animalNames[index] };
 }
 
 function AnimalIcon({ kind }: { kind: number }) {
@@ -494,8 +468,10 @@ export const Presence: React.FC = () => {
   const me = useStore((s) => s.me);
   const theme = useStore((s) => s.theme);
   const snowEnabled = useStore((s) => s.snowEnabled);
+  const authorshipMode = useStore((s) => s.authorshipMode);
   const toggleTheme = useStore((s) => s.toggleTheme);
   const toggleSnow = useStore((s) => s.toggleSnow);
+  const toggleAuthorshipMode = useStore((s) => s.toggleAuthorshipMode);
   const isCompactAuth = useIsCompactAuthModal();
 
   const [open, setOpen] = useState(false);
@@ -1126,6 +1102,24 @@ export const Presence: React.FC = () => {
                 }}
               >
                 <Snowflake size={18} />
+              </button>
+              <button
+                type="button"
+                onClick={toggleAuthorshipMode}
+                title={authorshipMode ? 'Disable Authorship Mode' : 'Enable Authorship Mode'}
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: 999,
+                  border: '1px solid var(--border-strong)',
+                  background: authorshipMode ? 'var(--accent-glow)' : 'transparent',
+                  color: 'var(--text-primary)',
+                  display: 'grid',
+                  placeItems: 'center',
+                  cursor: 'pointer',
+                }}
+              >
+                <User size={18} />
               </button>
             </div>
             <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.45 }} />

@@ -9,6 +9,8 @@ export interface NodeData {
   y: number;
   createdAt?: number; // epoch ms
   updatedAt?: number; // epoch ms
+  authorId?: string | null;
+  authorName?: string | null;
   // Visual state
   clarity: number; // 0-1
   energy: number; // 0-100 (base energy)
@@ -27,6 +29,8 @@ export interface EdgeData {
   energyEnabled?: boolean;
   createdAt?: number; // epoch ms
   updatedAt?: number; // epoch ms
+  authorId?: string | null;
+  authorName?: string | null;
 }
 
 export type PenToolType = 'pen' | 'eraser' | 'highlighter';
@@ -41,6 +45,8 @@ export interface Drawing {
   tool: PenToolType;
   createdAt?: number; // epoch ms
   updatedAt?: number; // epoch ms
+  authorId?: string | null;
+  authorName?: string | null;
 }
 
 export interface TextBox {
@@ -54,6 +60,8 @@ export interface TextBox {
   src?: string;
   createdAt?: number; // epoch ms
   updatedAt?: number; // epoch ms
+  authorId?: string | null;
+  authorName?: string | null;
 }
 
 export interface Tombstones {
