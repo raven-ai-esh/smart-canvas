@@ -21,6 +21,8 @@ export function useAuth() {
         name: String(user.name ?? ''),
         avatarSeed: String(user.avatarSeed ?? ''),
         avatarUrl: typeof user.avatarUrl === 'string' ? user.avatarUrl : null,
+        avatarAnimal: Number.isFinite(user.avatarAnimal) ? Number(user.avatarAnimal) : null,
+        avatarColor: Number.isFinite(user.avatarColor) ? Number(user.avatarColor) : null,
         verified: !!user.verified,
       });
       window.dispatchEvent(new Event('auth-changed'));

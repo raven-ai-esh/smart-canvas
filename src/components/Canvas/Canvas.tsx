@@ -4,7 +4,7 @@ import { Node } from '../Node/Node';
 import { Edge, ConnectionLine } from '../Edge/Edge';
 import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
-import { Link2, X } from 'lucide-react';
+import { Link2, X, Zap, ZapOff } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
 import type { EdgeData, NodeData, TextBox as TextBoxType } from '../../types';
 import { debugLog } from '../../utils/debug';
@@ -64,6 +64,7 @@ export const Canvas: React.FC = () => {
 	    const addTextBox = useStore((state) => state.addTextBox);
 	    const setEditingTextBoxId = useStore((state) => state.setEditingTextBoxId);
 	    const toggleTextMode = useStore((state) => state.toggleTextMode);
+	    const updateEdge = useStore((state) => state.updateEdge);
 
     const canvasRef = useRef(canvas);
     useEffect(() => {
@@ -2209,6 +2210,10 @@ export const Canvas: React.FC = () => {
     };
 
     const noteScale = 1 / Math.max(0.0001, canvas.scale);
+    const contextEdge = contextMenu?.kind === 'edge'
+        ? edges.find((edge) => edge.id === contextMenu.id) ?? null
+        : null;
+    const contextEdgeEnergyEnabled = contextEdge?.energyEnabled !== false;
 
     return (
         <div
@@ -2268,6 +2273,23 @@ export const Canvas: React.FC = () => {
 	                        >
 	                            <X size={18} />
 	                        </button>
+                            {contextMenu.kind === 'edge' && contextEdge && (
+                                <button
+                                    type="button"
+                                    className={styles.contextButton}
+                                    title={contextEdgeEnergyEnabled ? 'Disable energy flow' : 'Enable energy flow'}
+                                    data-interactive="true"
+                                    onPointerDown={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        useStore.getState().pushHistory();
+                                        updateEdge(contextMenu.id, { energyEnabled: !contextEdgeEnergyEnabled });
+                                        setContextMenu(null);
+                                    }}
+                                >
+                                    {contextEdgeEnergyEnabled ? <ZapOff size={18} /> : <Zap size={18} />}
+                                </button>
+                            )}
 	                        {contextMenu.kind === 'node' && (
 	                            <button
 	                                type="button"

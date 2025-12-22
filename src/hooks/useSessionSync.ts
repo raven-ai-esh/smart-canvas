@@ -309,6 +309,8 @@ export function useSessionSync() {
                 name: String(p.name ?? 'Guest'),
                 avatarSeed: String(p.avatarSeed ?? ''),
                 avatarUrl: typeof p.avatarUrl === 'string' ? p.avatarUrl : null,
+                avatarAnimal: Number.isFinite(p.avatarAnimal) ? Number(p.avatarAnimal) : null,
+                avatarColor: Number.isFinite(p.avatarColor) ? Number(p.avatarColor) : null,
                 registered: !!p.registered,
               }))
               .filter((p: any) => p.id),

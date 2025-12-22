@@ -24,6 +24,7 @@ export interface EdgeData {
   source: string;
   target: string;
   type: 'default' | 'connection';
+  energyEnabled?: boolean;
   createdAt?: number; // epoch ms
   updatedAt?: number; // epoch ms
 }

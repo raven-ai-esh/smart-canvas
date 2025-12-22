@@ -1,8 +1,34 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Moon, Sun, Snowflake } from 'lucide-react';
+import { Moon, Sun, Snowflake, ChevronDown, ChevronUp } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 
 const palette = ['#5E81AC', '#A3BE8C', '#B48EAD', '#D08770', '#88C0D0', '#EBCB8B', '#BF616A', '#8FBCBB'];
+const animalNames = [
+  'Aardvark', 'Albatross', 'Alligator', 'Alpaca', 'Antelope', 'Armadillo', 'Axolotl', 'Badger', 'Bat', 'Beaver',
+  'Bison', 'Boar', 'Capybara', 'Caracal', 'Cassowary', 'Cheetah', 'Chinchilla', 'Cobra', 'Coyote', 'Crab',
+  'Crane', 'Crocodile', 'Crow', 'Deer', 'Dingo', 'Dolphin', 'Duck', 'Eagle', 'Echidna', 'Egret',
+  'Elephant', 'Elk', 'Falcon', 'Fennec', 'Ferret', 'Flamingo', 'Fox', 'Frog', 'Gazelle', 'Gibbon',
+  'Giraffe', 'Goose', 'Gorilla', 'Heron', 'Hedgehog', 'Hippo', 'Hornbill', 'Hyena', 'Ibis', 'Iguana',
+  'Jaguar', 'Kangaroo', 'Koala', 'Kudu', 'Lemur', 'Leopard', 'Llama', 'Lobster', 'Lynx', 'Manatee',
+  'Mantis', 'Meerkat', 'Moose', 'Narwhal', 'Ocelot', 'Octopus', 'Orca', 'Oryx', 'Otter', 'Panda',
+  'Panther', 'Parrot', 'Pelican', 'Penguin', 'Piranha', 'Porcupine', 'Quokka', 'Raccoon', 'Raven', 'Rhino',
+  'Salamander', 'Seal', 'Serval', 'Sloth', 'Sparrow', 'Swan', 'Tapir', 'Tiger', 'Toucan', 'Turtle',
+  'Walrus', 'Warthog', 'Weasel', 'Whale', 'Wolf', 'Wolverine', 'Wombat', 'Yak', 'Zebra', 'Zebu',
+];
+const colorColumns = 10;
+const colorRows = 10;
+const baseSaturation = 64;
+const minSaturation = 24;
+const baseLightness = 54;
+const colorHues = Array.from({ length: colorColumns }, (_, i) => Math.round((360 / colorColumns) * i));
+const guestPalette: string[] = [];
+for (let row = 0; row < colorRows; row += 1) {
+  const t = row / (colorRows - 1);
+  const sat = Math.round(baseSaturation - (baseSaturation - minSaturation) * t);
+  for (const hue of colorHues) {
+    guestPalette.push(`hsl(${hue} ${sat}% ${baseLightness}%)`);
+  }
+}
 
 type FieldStatus = 'ok' | 'missing' | 'invalid';
 
@@ -133,72 +159,95 @@ function hashString(s: string) {
   return h >>> 0;
 }
 
+function getGuestIdentity(seed: string, fallbackName: string) {
+  const key = seed || fallbackName || 'Guest';
+  const index = hashString(key) % animalNames.length;
+  return { index, name: animalNames[index] };
+}
+
 function AnimalIcon({ kind }: { kind: number }) {
-  const k = kind % 6;
-  const common = { stroke: 'currentColor', fill: 'none', strokeWidth: 1.7, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
-  if (k === 0) {
-    // Cat
-    return (
-      <svg viewBox="0 0 24 24" width="22" height="22">
-        <path {...common} d="M7 9 5.2 6.2 7.8 7.6M17 9l1.8-2.8-2.6 1.4" />
-        <path {...common} d="M7.5 10.5c-1.3 1.2-2 2.6-2 4.2 0 3.1 2.9 5.3 6.5 5.3s6.5-2.2 6.5-5.3c0-1.6-.7-3-2-4.2" />
-        <path {...common} d="M9.5 14.2h.01M14.5 14.2h.01" />
-        <path {...common} d="M10.8 16.2c.6.5 1.7.5 2.4 0" />
-      </svg>
-    );
-  }
-  if (k === 1) {
-    // Dog
-    return (
-      <svg viewBox="0 0 24 24" width="22" height="22">
-        <path {...common} d="M8 9 6 7.4 5 10.2M16 9l2-1.6 1 2.8" />
-        <path {...common} d="M7.5 11.5c-1.2 1.1-2 2.6-2 4.3 0 3 2.9 5.2 6.5 5.2s6.5-2.2 6.5-5.2c0-1.7-.8-3.2-2-4.3" />
-        <path {...common} d="M10 15.2h.01M14 15.2h.01" />
-        <path {...common} d="M11.2 17.2c.5.4 1.1.4 1.6 0" />
-      </svg>
-    );
-  }
-  if (k === 2) {
-    // Owl
-    return (
-      <svg viewBox="0 0 24 24" width="22" height="22">
-        <path {...common} d="M7.2 10.2c-1.1 1.3-1.7 2.9-1.7 4.6 0 3.5 2.9 6.2 6.5 6.2s6.5-2.7 6.5-6.2c0-1.7-.6-3.3-1.7-4.6" />
-        <path {...common} d="M9.2 13.2c.2-1 1.3-1.8 2.8-1.8s2.6.8 2.8 1.8" />
-        <path {...common} d="M9.1 15.2c0 .8.8 1.4 1.7 1.4s1.7-.6 1.7-1.4" />
-        <path {...common} d="M12.5 15.2c0 .8.8 1.4 1.7 1.4s1.7-.6 1.7-1.4" />
-        <path {...common} d="M11.6 17.3c.3.3.5.5.8.5s.6-.2.8-.5" />
-      </svg>
-    );
-  }
-  if (k === 3) {
-    // Fish
-    return (
-      <svg viewBox="0 0 24 24" width="22" height="22">
-        <path {...common} d="M4.5 12c2.1-2.6 4.7-4 7.6-4 4.3 0 7.4 3.1 7.4 4s-3.1 4-7.4 4c-2.9 0-5.5-1.4-7.6-4Z" />
-        <path {...common} d="M19.5 12l2.6-2.2v4.4Z" />
-        <path {...common} d="M13.7 11.1h.01" />
-      </svg>
-    );
-  }
-  if (k === 4) {
-    // Rabbit
-    return (
-      <svg viewBox="0 0 24 24" width="22" height="22">
-        <path {...common} d="M9 6c0-1.6.9-2.8 2-2.8S13 4.4 13 6" />
-        <path {...common} d="M15 6c0-1.6.9-2.8 2-2.8S19 4.4 19 6" />
-        <path {...common} d="M8 11c-1.5 1.2-2.5 2.9-2.5 4.8 0 3.1 2.9 5.2 6.5 5.2s6.5-2.1 6.5-5.2c0-1.9-1-3.6-2.5-4.8" />
-        <path {...common} d="M10 15.2h.01M14 15.2h.01" />
-        <path {...common} d="M11.2 17.1c.5.5 1.1.5 1.6 0" />
-      </svg>
-    );
-  }
-  // Fox-ish
+  const k = ((kind % animalNames.length) + animalNames.length) % animalNames.length;
+  const head = (k * 3) % 6;
+  const ear = (k * 5 + 1) % 6;
+  const eye = (k * 7 + 2) % 6;
+  const mouth = (k * 11 + 3) % 6;
+  const extra = (k * 13 + 5) % 6;
+  const common = { stroke: 'currentColor', fill: 'none', strokeWidth: 1.6, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+
   return (
     <svg viewBox="0 0 24 24" width="22" height="22">
-      <path {...common} d="M7 9 5.2 6.3 8.1 7.9M17 9l1.8-2.7-2.9 1.6" />
-      <path {...common} d="M7.2 10.6c-.9 1.1-1.7 2.4-1.7 4.2 0 3.1 2.9 5.2 6.5 5.2s6.5-2.1 6.5-5.2c0-1.8-.8-3.1-1.7-4.2" />
-      <path {...common} d="M9.5 14.2h.01M14.5 14.2h.01" />
-      <path {...common} d="M10.9 16.4c.6.4 1.6.4 2.2 0" />
+      {head === 0 && <circle cx="12" cy="13" r="6.2" {...common} />}
+      {head === 1 && <rect x="6.2" y="7.2" width="11.6" height="11.6" rx="4" {...common} />}
+      {head === 2 && <ellipse cx="12" cy="13.2" rx="6.6" ry="5.6" {...common} />}
+      {head === 3 && <path {...common} d="M6.8 10.2c0-2.6 2.2-4.6 5.2-4.6s5.2 2 5.2 4.6c0 4.4-2 7.5-5.2 7.5s-5.2-3.1-5.2-7.5Z" />}
+      {head === 4 && <path {...common} d="M12 6.8c3.8 0 6 2.5 6 5.4 0 3.8-2.3 7-6 7s-6-3.2-6-7c0-2.9 2.2-5.4 6-5.4Z" />}
+      {head === 5 && <path {...common} d="M12 6.6 18 11.2 15.8 19H8.2L6 11.2Z" />}
+
+      {ear === 0 && <path {...common} d="M7.2 9.4 5.2 6.6 8.6 8.2M16.8 9.4l2-2.8-3.4 1.6" />}
+      {ear === 1 && <path {...common} d="M8 9c-.2-1.6 1.1-3 2.4-3m3.6 3c.2-1.6-1.1-3-2.4-3" />}
+      {ear === 2 && <path {...common} d="M9 9.2V4.4M15 9.2V4.4" />}
+      {ear === 3 && <path {...common} d="M7.6 10.4l-2.4-1.2M16.4 10.4l2.4-1.2" />}
+      {ear === 4 && <path {...common} d="M8 9.2l-1.6-2.2M16 9.2l1.6-2.2" />}
+      {ear === 5 && <path {...common} d="M9 9.4c-.8-1.8.6-3.6 2-4m4 4c.8-1.8-.6-3.6-2-4" />}
+
+      {eye === 0 && (
+        <>
+          <circle cx="9.5" cy="14" r="0.7" fill="currentColor" />
+          <circle cx="14.5" cy="14" r="0.7" fill="currentColor" />
+        </>
+      )}
+      {eye === 1 && (
+        <>
+          <circle cx="9.5" cy="14" r="1.2" />
+          <circle cx="14.5" cy="14" r="1.2" />
+        </>
+      )}
+      {eye === 2 && (
+        <>
+          <path {...common} d="M8.4 14c.6-.6 1.6-.6 2.2 0" />
+          <path {...common} d="M13.4 14c.6-.6 1.6-.6 2.2 0" />
+        </>
+      )}
+      {eye === 3 && (
+        <>
+          <path {...common} d="M8.7 13.2l1.6 1.6M10.3 13.2l-1.6 1.6" />
+          <path {...common} d="M13.7 13.2l1.6 1.6M15.3 13.2l-1.6 1.6" />
+        </>
+      )}
+      {eye === 4 && (
+        <>
+          <circle cx="9.5" cy="14" r="1.6" />
+          <circle cx="14.5" cy="14" r="1.6" />
+        </>
+      )}
+      {eye === 5 && (
+        <>
+          <path {...common} d="M8.3 13.6c.7-1 2-1 2.7 0" />
+          <path {...common} d="M13 13.6c.7-1 2-1 2.7 0" />
+        </>
+      )}
+
+      {mouth === 0 && <path {...common} d="M10.4 17.2c.9.8 2.3.8 3.2 0" />}
+      {mouth === 1 && <path {...common} d="M12 15.6l-1.2 1.6 1.2 1.2 1.2-1.2Z" />}
+      {mouth === 2 && <path {...common} d="M10.6 16.6c0 .8 2.8.8 2.8 0" />}
+      {mouth === 3 && <path {...common} d="M11.2 16.2l.8.9.8-.9" />}
+      {mouth === 4 && <path {...common} d="M11 16.5h2M11.4 17.4h1.2" />}
+      {mouth === 5 && <path {...common} d="M11.2 16c.6.6 1 .9.8 1.6M12.8 16c-.6.6-1 .9-.8 1.6" />}
+
+      {extra === 1 && (
+        <>
+          <path {...common} d="M6.6 14.6l-2 1M6.8 16.2l-2 .4M17.4 14.6l2 1M17.2 16.2l2 .4" />
+        </>
+      )}
+      {extra === 2 && (
+        <>
+          <circle cx="8.3" cy="16.4" r="0.8" fill="currentColor" />
+          <circle cx="15.7" cy="16.4" r="0.8" fill="currentColor" />
+        </>
+      )}
+      {extra === 3 && <path {...common} d="M8.5 11.2h7M9 12.6h6M9.5 14h5" />}
+      {extra === 4 && <path {...common} d="M12 6.4l-1.6-2M12 6.4l1.6-2" />}
+      {extra === 5 && <path {...common} d="M12 9.2c0-1.2.9-2.2 2.1-2.4" />}
     </svg>
   );
 }
@@ -356,6 +405,8 @@ function Avatar({
   name,
   seed,
   registered,
+  animalIndex,
+  colorIndex,
   onClick,
   highlight,
   theme,
@@ -365,6 +416,8 @@ function Avatar({
   name: string;
   seed: string;
   registered: boolean;
+  animalIndex?: number | null;
+  colorIndex?: number | null;
   highlight?: boolean;
   onClick?: () => void;
   theme: 'dark' | 'light';
@@ -375,13 +428,32 @@ function Avatar({
   useEffect(() => {
     setImageFailed(false);
   }, [imageUrl]);
-  const h = useMemo(() => hashString(seed || name), [seed, name]);
-  const bg = palette[h % palette.length];
-  const kind = (h >>> 8) % 6;
-  const fg = theme === 'dark' ? '#fff' : '#111';
-  const border = highlight ? '2px solid var(--accent-primary)' : registered ? '1px solid var(--border-strong)' : '1px solid var(--border-subtle)';
-  const avatarSize = size ?? 36;
   const showImage = !!imageUrl && !imageFailed;
+  const h = useMemo(() => hashString(seed || name), [seed, name]);
+  const guest = useMemo(() => getGuestIdentity(seed, name), [seed, name]);
+  const normalizeIndex = (value: number | null | undefined, size: number) => {
+    if (!Number.isFinite(value)) return null;
+    const idx = Math.trunc(Number(value));
+    if (idx < 0 || idx >= size) return null;
+    return idx;
+  };
+  const forcedAnimal = normalizeIndex(animalIndex, animalNames.length);
+  const forcedColor = normalizeIndex(colorIndex, guestPalette.length);
+  const resolvedAnimal = registered ? (forcedAnimal ?? ((h >>> 8) % animalNames.length)) : guest.index;
+  const resolvedColor = registered ? (forcedColor != null ? guestPalette[forcedColor] : palette[h % palette.length]) : guestPalette[guest.index];
+  const bg = resolvedColor;
+  const kind = resolvedAnimal;
+  const fg = theme === 'dark' ? '#fff' : '#111';
+  const border = highlight
+    ? '2px solid var(--accent-primary)'
+    : registered && showImage
+      ? '1px solid rgba(255, 255, 255, 0.3)'
+      : registered
+        ? '1px solid var(--border-strong)'
+        : '1px solid var(--border-subtle)';
+  const avatarSize = size ?? 36;
+  const baseShadow = highlight ? '0 0 0 2px var(--accent-glow)' : '0 6px 18px rgba(0,0,0,0.25)';
+  const imageGlow = showImage && registered ? ', 0 0 6px rgba(255, 255, 255, 0.25)' : '';
 
   return (
     <button
@@ -399,7 +471,7 @@ function Avatar({
         display: 'grid',
         placeItems: 'center',
         cursor: onClick ? 'pointer' : 'default',
-        boxShadow: highlight ? '0 0 0 2px var(--accent-glow)' : '0 6px 18px rgba(0,0,0,0.25)',
+        boxShadow: `${baseShadow}${imageGlow}`,
         overflow: 'hidden',
       }}
     >
@@ -408,7 +480,7 @@ function Avatar({
           src={imageUrl ?? ''}
           alt=""
           onError={() => setImageFailed(true)}
-          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
         />
       ) : (
         <AnimalIcon kind={kind} />
@@ -447,6 +519,10 @@ export const Presence: React.FC = () => {
   const [settingsPasswordConfirm, setSettingsPasswordConfirm] = useState('');
   const [settingsAvatarData, setSettingsAvatarData] = useState<string | null>(null);
   const [settingsAvatarRemoved, setSettingsAvatarRemoved] = useState(false);
+  const [settingsAvatarAnimal, setSettingsAvatarAnimal] = useState<number | null>(null);
+  const [settingsAvatarColor, setSettingsAvatarColor] = useState<number | null>(null);
+  const [settingsAvatarAnimalOpen, setSettingsAvatarAnimalOpen] = useState(false);
+  const [settingsAvatarColorOpen, setSettingsAvatarColorOpen] = useState(false);
   const [settingsSubmitAttempted, setSettingsSubmitAttempted] = useState(false);
   const [settingsTouched, setSettingsTouched] = useState<{ name: boolean; email: boolean; password: boolean; passwordConfirm: boolean }>({ name: false, email: false, password: false, passwordConfirm: false });
   const [settingsBusy, setSettingsBusy] = useState(false);
@@ -460,11 +536,35 @@ export const Presence: React.FC = () => {
   const selfPeer = selfId ? peers.find((p) => p.id === selfId) : null;
   const others = selfId ? peers.filter((p) => p.id !== selfId) : peers;
 
-  const myName = me?.name ?? selfPeer?.name ?? 'Guest';
   const mySeed = me?.avatarSeed ?? selfPeer?.avatarSeed ?? (window.localStorage.getItem('living-canvas-client-id') ?? '');
+  const myGuestName = !me ? getGuestIdentity(mySeed, selfPeer?.name ?? 'Guest').name : null;
+  const myName = me?.name ?? myGuestName ?? selfPeer?.name ?? 'Guest';
   const myAvatarUrl = me?.avatarUrl ?? selfPeer?.avatarUrl ?? null;
   const myRegistered = !!me;
   const settingsAvatarPreview = settingsAvatarRemoved ? null : (settingsAvatarData ?? me?.avatarUrl ?? null);
+  const guestAvatarSize = 36;
+  const guestOverlap = Math.round(guestAvatarSize * 0.28);
+  const myGuestSeed = !me ? mySeed : '';
+
+  const normalizedOthers = useMemo(() => {
+    const filtered = myGuestSeed
+      ? others.filter((p) => p.registered || p.avatarSeed !== myGuestSeed)
+      : others;
+    const seen = new Set<string>();
+    const unique: typeof filtered = [];
+    for (const peer of filtered) {
+      const key = peer.registered ? `reg:${peer.id}` : `guest:${peer.avatarSeed || peer.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(peer);
+    }
+    return unique;
+  }, [others, myGuestSeed]);
+
+  const displayPeerName = (peer: typeof peers[number]) => {
+    if (peer.registered) return peer.name || 'Guest';
+    return getGuestIdentity(peer.avatarSeed || peer.id, peer.name || 'Guest').name;
+  };
 
   const returnTo = useMemo(() => window.location.pathname + window.location.search, []);
 
@@ -493,6 +593,10 @@ export const Presence: React.FC = () => {
     setSettingsPasswordConfirm('');
     setSettingsAvatarData(null);
     setSettingsAvatarRemoved(false);
+    setSettingsAvatarAnimal(null);
+    setSettingsAvatarColor(null);
+    setSettingsAvatarAnimalOpen(false);
+    setSettingsAvatarColorOpen(false);
     setSettingsNotice(null);
     setSettingsNoticeVisible(false);
   };
@@ -506,6 +610,10 @@ export const Presence: React.FC = () => {
     setSettingsPasswordConfirm('');
     setSettingsAvatarData(null);
     setSettingsAvatarRemoved(false);
+    setSettingsAvatarAnimal(Number.isFinite(me?.avatarAnimal) ? Number(me?.avatarAnimal) : null);
+    setSettingsAvatarColor(Number.isFinite(me?.avatarColor) ? Number(me?.avatarColor) : null);
+    setSettingsAvatarAnimalOpen(false);
+    setSettingsAvatarColorOpen(false);
     setSettingsMessage(null);
     setSettingsNotice(null);
     setSettingsNoticeVisible(false);
@@ -675,6 +783,8 @@ export const Presence: React.FC = () => {
       name: String(data.user.name ?? ''),
       avatarSeed: String(data.user.avatarSeed ?? ''),
       avatarUrl: typeof data.user.avatarUrl === 'string' ? data.user.avatarUrl : null,
+      avatarAnimal: Number.isFinite(data.user.avatarAnimal) ? Number(data.user.avatarAnimal) : null,
+      avatarColor: Number.isFinite(data.user.avatarColor) ? Number(data.user.avatarColor) : null,
       verified: !!data.user.verified,
     } : null);
     window.dispatchEvent(new Event('auth-changed'));
@@ -741,7 +851,15 @@ export const Presence: React.FC = () => {
     if (!me) return;
     setSettingsSubmitAttempted(true);
 
-    const payload: { name?: string; email?: string; password?: string; avatarData?: string; avatarRemove?: boolean } = {};
+    const payload: {
+      name?: string;
+      email?: string;
+      password?: string;
+      avatarData?: string;
+      avatarRemove?: boolean;
+      avatarAnimal?: number | null;
+      avatarColor?: number | null;
+    } = {};
     const nextName = settingsName.trim();
     const nextEmail = settingsEmail.trim().toLowerCase();
     const currentEmail = (me.email ?? '').trim().toLowerCase();
@@ -783,6 +901,15 @@ export const Presence: React.FC = () => {
       payload.avatarData = settingsAvatarData;
     }
 
+    const currentAvatarAnimal = Number.isFinite(me.avatarAnimal) ? Number(me.avatarAnimal) : null;
+    const currentAvatarColor = Number.isFinite(me.avatarColor) ? Number(me.avatarColor) : null;
+    if (settingsAvatarAnimal !== currentAvatarAnimal) {
+      payload.avatarAnimal = settingsAvatarAnimal;
+    }
+    if (settingsAvatarColor !== currentAvatarColor) {
+      payload.avatarColor = settingsAvatarColor;
+    }
+
     if (!Object.keys(payload).length) {
       setSettingsMessage('No changes to save');
       return;
@@ -805,6 +932,8 @@ export const Presence: React.FC = () => {
         else if (err === 'bad_password') setSettingsMessage('Password must be at least 8 characters');
         else if (err === 'bad_avatar') setSettingsMessage('Avatar must be an image file');
         else if (err === 'avatar_too_large') setSettingsMessage('Avatar is too large');
+        else if (err === 'bad_avatar_animal') setSettingsMessage('Pick a valid avatar animal');
+        else if (err === 'bad_avatar_color') setSettingsMessage('Pick a valid avatar color');
         else if (err === 'no_changes') setSettingsMessage('No changes to save');
         else setSettingsMessage('Failed to update profile');
         return;
@@ -893,22 +1022,33 @@ export const Presence: React.FC = () => {
           name={myName}
           seed={mySeed}
           registered={myRegistered}
+          animalIndex={me?.avatarAnimal ?? null}
+          colorIndex={me?.avatarColor ?? null}
           highlight
           theme={theme}
           imageUrl={myAvatarUrl}
           onClick={() => setOpen((v) => !v)}
         />
         <div style={{ display: 'flex', alignItems: 'center' }}>
-          {others.slice(0, 10).map((p, idx) => (
+          {normalizedOthers.slice(0, 10).map((p, idx) => (
             <div
               key={p.id}
               style={{
                 position: 'relative',
-                marginLeft: idx === 0 ? 0 : -4, // ~10% overlap for 36px avatar
+                marginLeft: idx === 0 ? 0 : -guestOverlap,
                 zIndex: idx,
               }}
             >
-              <Avatar name={p.name} seed={p.avatarSeed} registered={p.registered} theme={theme} imageUrl={p.avatarUrl} />
+              <Avatar
+                name={displayPeerName(p)}
+                seed={p.avatarSeed}
+                registered={p.registered}
+                animalIndex={p.avatarAnimal ?? null}
+                colorIndex={p.avatarColor ?? null}
+                theme={theme}
+                imageUrl={p.avatarUrl}
+                size={guestAvatarSize}
+              />
             </div>
           ))}
         </div>
@@ -1102,6 +1242,8 @@ export const Presence: React.FC = () => {
                   name={settingsName || myName}
                   seed={mySeed}
                   registered
+                  animalIndex={settingsAvatarAnimal}
+                  colorIndex={settingsAvatarColor}
                   theme={theme}
                   imageUrl={settingsAvatarPreview}
                   size={64}
@@ -1150,6 +1292,192 @@ export const Presence: React.FC = () => {
                       style={{ display: 'none' }}
                     />
                   </div>
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gap: 10, marginTop: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                    Avatar style (used when no photo)
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettingsAvatarAnimal(null);
+                      setSettingsAvatarColor(null);
+                    }}
+                    style={{
+                      borderRadius: 999,
+                      border: '1px solid var(--border-strong)',
+                      background: settingsAvatarAnimal === null && settingsAvatarColor === null ? 'var(--accent-glow)' : 'transparent',
+                      color: 'var(--text-primary)',
+                      padding: '4px 10px',
+                      cursor: 'pointer',
+                      fontSize: 11,
+                    }}
+                  >
+                    Auto
+                  </button>
+                </div>
+
+                <div style={{ display: 'grid', gap: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Animal</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => setSettingsAvatarAnimal(null)}
+                        style={{
+                          borderRadius: 999,
+                          border: '1px solid var(--border-strong)',
+                          background: settingsAvatarAnimal === null ? 'var(--accent-glow)' : 'transparent',
+                          color: 'var(--text-primary)',
+                          padding: '2px 8px',
+                          cursor: 'pointer',
+                          fontSize: 11,
+                        }}
+                      >
+                        Auto
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSettingsAvatarAnimalOpen((v) => !v)}
+                        aria-expanded={settingsAvatarAnimalOpen}
+                        title={settingsAvatarAnimalOpen ? 'Hide animals' : 'Show animals'}
+                        style={{
+                          width: 26,
+                          height: 26,
+                          borderRadius: 8,
+                          border: '1px solid var(--border-strong)',
+                          background: settingsAvatarAnimalOpen ? 'rgba(94, 129, 172, 0.15)' : 'transparent',
+                          color: 'var(--text-primary)',
+                          display: 'grid',
+                          placeItems: 'center',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {settingsAvatarAnimalOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                      </button>
+                    </div>
+                  </div>
+                  {settingsAvatarAnimalOpen && (
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(10, 1fr)',
+                        gap: 6,
+                        padding: 8,
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'rgba(255, 255, 255, 0.03)',
+                        maxHeight: 160,
+                        overflowY: 'auto',
+                      }}
+                    >
+                      {animalNames.map((animal, idx) => {
+                        const selected = settingsAvatarAnimal === idx;
+                        return (
+                          <button
+                            key={animal}
+                            type="button"
+                            title={animal}
+                            onClick={() => setSettingsAvatarAnimal(idx)}
+                            style={{
+                              width: 28,
+                              height: 28,
+                              borderRadius: 10,
+                              border: selected ? '2px solid var(--accent-primary)' : '1px solid var(--border-subtle)',
+                              background: selected ? 'rgba(94, 129, 172, 0.15)' : 'transparent',
+                              color: 'var(--text-primary)',
+                              display: 'grid',
+                              placeItems: 'center',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <AnimalIcon kind={idx} />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ display: 'grid', gap: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Color</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => setSettingsAvatarColor(null)}
+                        style={{
+                          borderRadius: 999,
+                          border: '1px solid var(--border-strong)',
+                          background: settingsAvatarColor === null ? 'var(--accent-glow)' : 'transparent',
+                          color: 'var(--text-primary)',
+                          padding: '2px 8px',
+                          cursor: 'pointer',
+                          fontSize: 11,
+                        }}
+                      >
+                        Auto
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSettingsAvatarColorOpen((v) => !v)}
+                        aria-expanded={settingsAvatarColorOpen}
+                        title={settingsAvatarColorOpen ? 'Hide colors' : 'Show colors'}
+                        style={{
+                          width: 26,
+                          height: 26,
+                          borderRadius: 8,
+                          border: '1px solid var(--border-strong)',
+                          background: settingsAvatarColorOpen ? 'rgba(94, 129, 172, 0.15)' : 'transparent',
+                          color: 'var(--text-primary)',
+                          display: 'grid',
+                          placeItems: 'center',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {settingsAvatarColorOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                      </button>
+                    </div>
+                  </div>
+                  {settingsAvatarColorOpen && (
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(10, 1fr)',
+                        gap: 6,
+                        padding: 8,
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'rgba(255, 255, 255, 0.03)',
+                        maxHeight: 120,
+                        overflowY: 'auto',
+                      }}
+                    >
+                      {guestPalette.map((color, idx) => {
+                        const selected = settingsAvatarColor === idx;
+                        return (
+                          <button
+                            key={color}
+                            type="button"
+                            title={`Color ${idx + 1}`}
+                            onClick={() => setSettingsAvatarColor(idx)}
+                            style={{
+                              width: 24,
+                              height: 24,
+                              borderRadius: 999,
+                              border: selected ? '2px solid var(--accent-primary)' : '1px solid rgba(255,255,255,0.2)',
+                              background: color,
+                              boxShadow: selected ? '0 0 0 2px rgba(94, 129, 172, 0.2)' : undefined,
+                              cursor: 'pointer',
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
 

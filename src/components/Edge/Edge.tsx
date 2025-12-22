@@ -23,6 +23,7 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
     const selectedTextBoxes = useStore((state) => state.selectedTextBoxes);
     const neighbors = useStore((state) => state.neighbors);
     const selectEdge = useStore((state) => state.selectEdge);
+    const edgeData = useStore((state) => state.edges.find((e) => e.id === id));
     const monitoringMode = useStore((state) => state.monitoringMode);
     const sourceEnergy = useStore((state) => {
         const eff = state.effectiveEnergy[sourceId];
@@ -213,6 +214,7 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
 
     if (!geom) return null;
 
+    const isEnergyEnabled = edgeData?.energyEnabled !== false;
     const isSelectedEdge = (selectedEdge === id) || selectedEdges.includes(id);
     const hasFocus = !!selectedNode;
 
@@ -232,13 +234,14 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
 
     const sourceProgress = Math.min(100, Math.max(0, Number.isFinite(sourceNode.progress as number) ? (sourceNode.progress as number) : 0));
     const sourceStatus = sourceProgress >= 100 ? 'done' : sourceProgress <= 0 ? 'queued' : 'in_progress';
-    const isMonitoringEdge = monitoringMode && sourceNode.type === 'task' && sourceStatus === 'in_progress';
+    const isMonitoringEdge = isEnergyEnabled && monitoringMode && sourceNode.type === 'task' && sourceStatus === 'in_progress';
     const monitorColor = energyToColor(sourceEnergy);
 
     // Highlight Logic
     let className = styles.edgePath;
     if (isSelectedEdge) className += ` ${styles.edgeSelected}`;
     if (isMonitoringEdge) className += ` ${styles.edgeMonitoring}`;
+    if (!isEnergyEnabled) className += ` ${styles.edgeDisabled}`;
     const monitorStyle = isMonitoringEdge ? ({ '--edge-monitor-color': monitorColor } as React.CSSProperties) : undefined;
 
     const selectThisEdge = (e: any) => {
@@ -305,6 +308,14 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
         }, 500);
     };
 
+    const handleContextMenu = (e: React.MouseEvent) => {
+        if (!onRequestContextMenu) return;
+        e.preventDefault();
+        e.stopPropagation();
+        selectEdge(id);
+        onRequestContextMenu({ kind: 'edge', id, x: e.clientX, y: e.clientY });
+    };
+
     const gradId = `edge-grad-${id}`;
     const baseColor = isMonitoringEdge ? monitorColor : (isSelectedEdge ? 'var(--accent-primary)' : hasFocus ? 'var(--text-primary)' : 'var(--text-dim)');
     const sOpacity = isSelectedEdge ? 1 : (hasFocus ? focusOpacityFor(sourceId, sDist) : 1);
@@ -327,6 +338,7 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
                 data-edge-id={id}
                 onPointerDown={selectThisEdge}
                 onClick={selectThisEdge}
+                onContextMenu={handleContextMenu}
                 onPointerDownCapture={startTouchLongPress}
             />
             <path
@@ -339,7 +351,7 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
             />
             <path
                 d={geom.arrowD}
-                className={`${styles.edgeArrow} ${isSelectedEdge ? styles.edgeArrowSelected : ''}${isMonitoringEdge ? ` ${styles.edgeArrowMonitoring}` : ''}`}
+                className={`${styles.edgeArrow} ${isSelectedEdge ? styles.edgeArrowSelected : ''}${isMonitoringEdge ? ` ${styles.edgeArrowMonitoring}` : ''}${!isEnergyEnabled ? ` ${styles.edgeArrowDisabled}` : ''}`}
                 style={{ fill: strokePaint, ...(monitorStyle ?? {}) }}
             />
         </>
