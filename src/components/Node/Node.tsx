@@ -1,13 +1,14 @@
 import React, { useCallback, useRef, useState } from 'react';
-import { Bold, Italic, Strikethrough, Code, List, ListOrdered, Quote } from 'lucide-react';
+import { Bold, Italic, Strikethrough, Code, List, ListOrdered, Quote, Paperclip, Trash2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/useStore';
-import type { NodeData } from '../../types';
+import type { Attachment, NodeData } from '../../types';
 import styles from './Node.module.css';
 import { numberLines, prefixLines, wrapSelection } from '../../utils/textEditing';
 import { clampEnergy, energyToColor } from '../../utils/energy';
 import { EnergySvgLiquidGauge } from './EnergySvgLiquidGauge';
+import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES } from '../../utils/attachments';
 
 // View Components
 const GraphView: React.FC<{ data: NodeData; energyColor: string; fillRatio: number }> = ({ data, energyColor, fillRatio }) => (
@@ -46,39 +47,118 @@ const statusFromProgress = (progress: number) => {
     return 'in_progress';
 };
 
-const NoteContentEditor: React.FC<{
-    nodeId: string;
+
+type MarkdownEditorProps = {
     value: string;
-}> = ({ nodeId, value }) => {
-    const updateNode = useStore((state) => state.updateNode);
-    const [editing, setEditing] = useState(false);
+    onChange: (next: string) => void;
+    placeholder?: string;
+    alwaysEditing?: boolean;
+    exitOnEnter?: boolean;
+    submitLabel?: string;
+    onSubmit?: () => void;
+    onEditingChange?: (editing: boolean) => void;
+    attachments?: Attachment[];
+    onAddAttachments?: (attachments: Attachment[]) => void;
+    onRemoveAttachment?: (id: string) => void;
+};
+
+const AttachmentList: React.FC<{
+    attachments: Attachment[];
+    compact?: boolean;
+    onRemoveAttachment?: (id: string) => void;
+}> = ({ attachments, compact, onRemoveAttachment }) => {
+    if (!attachments.length) return null;
+    return (
+        <div className={`${styles.attachmentList}${compact ? ` ${styles.attachmentListCompact}` : ''}`}>
+            {attachments.map((attachment) => (
+                <div key={attachment.id} className={styles.attachmentItem}>
+                    <a href={attachment.dataUrl} download={attachment.name} className={styles.attachmentFile}>
+                        <span className={styles.attachmentPreview}>
+                            {attachment.kind === 'image' ? (
+                                <img
+                                    src={attachment.dataUrl}
+                                    alt={attachment.name}
+                                    className={styles.attachmentPreviewImg}
+                                />
+                            ) : (
+                                <span className={styles.attachmentPreviewText}>
+                                    {attachment.name?.split('.').pop()?.slice(0, 4)?.toUpperCase() || 'FILE'}
+                                </span>
+                            )}
+                        </span>
+                        <span className={styles.attachmentInfo}>
+                            <span className={styles.attachmentName}>{attachment.name}</span>
+                            <span className={styles.attachmentMeta}>{formatBytes(attachment.size)}</span>
+                        </span>
+                    </a>
+                    {onRemoveAttachment && (
+                        <button
+                            type="button"
+                            className={styles.attachmentRemove}
+                            onPointerDown={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                            }}
+                            onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                onRemoveAttachment(attachment.id);
+                            }}
+                        >
+                            <Trash2 size={14} />
+                        </button>
+                    )}
+                </div>
+            ))}
+        </div>
+    );
+};
+
+const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
+    value,
+    onChange,
+    placeholder,
+    alwaysEditing = false,
+    exitOnEnter = false,
+    submitLabel,
+    onSubmit,
+    onEditingChange,
+    attachments,
+    onAddAttachments,
+    onRemoveAttachment,
+}) => {
+    const [editing, setEditing] = useState(alwaysEditing);
+    const [attachNotice, setAttachNotice] = useState<string | null>(null);
     const rootRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
-    const historyPushedRef = useRef(false);
-
-    const ensureHistory = useCallback(() => {
-        if (historyPushedRef.current) return;
-        useStore.getState().pushHistory();
-        historyPushedRef.current = true;
-    }, []);
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
     React.useEffect(() => {
-        if (!editing) historyPushedRef.current = false;
-    }, [editing]);
+        if (alwaysEditing) setEditing(true);
+    }, [alwaysEditing]);
+
+    React.useEffect(() => {
+        onEditingChange?.(editing);
+    }, [editing, onEditingChange]);
+
+    React.useEffect(() => {
+        if (!attachNotice) return;
+        const t = window.setTimeout(() => setAttachNotice(null), 2000);
+        return () => window.clearTimeout(t);
+    }, [attachNotice]);
 
     const apply = useCallback((fn: (text: string, sel: TextSel) => { nextText: string; nextSelection: TextSel }) => {
         const el = textareaRef.current;
         if (!el) return;
         const { nextText, nextSelection } = fn(el.value, { start: el.selectionStart, end: el.selectionEnd });
-        ensureHistory();
-        updateNode(nodeId, { content: nextText });
+        onChange(nextText);
         requestAnimationFrame(() => {
             const t = textareaRef.current;
             if (!t) return;
             t.focus();
             t.setSelectionRange(nextSelection.start, nextSelection.end);
         });
-    }, [nodeId, updateNode]);
+    }, [onChange]);
 
     const keepTextFocus = (e: React.PointerEvent) => {
         e.preventDefault();
@@ -87,6 +167,16 @@ const NoteContentEditor: React.FC<{
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key === 'Enter') {
+            if ((e.metaKey || e.ctrlKey) && onSubmit) {
+                e.preventDefault();
+                onSubmit();
+                return;
+            }
+            if (exitOnEnter && !(e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                e.currentTarget.blur();
+                return;
+            }
             if (e.metaKey || e.ctrlKey) {
                 e.preventDefault();
                 const el = e.currentTarget;
@@ -95,7 +185,7 @@ const NoteContentEditor: React.FC<{
                 const a = Math.min(start, end);
                 const b = Math.max(start, end);
                 const nextText = `${el.value.slice(0, a)}\n${el.value.slice(b)}`;
-                updateNode(nodeId, { content: nextText });
+                onChange(nextText);
                 requestAnimationFrame(() => {
                     const t = textareaRef.current;
                     if (!t) return;
@@ -104,11 +194,8 @@ const NoteContentEditor: React.FC<{
                 });
                 return;
             }
-            e.preventDefault();
-            e.currentTarget.blur(); // finish editing
-            return;
         }
-        if (e.key === 'Escape') {
+        if (e.key === 'Escape' && !alwaysEditing) {
             e.preventDefault();
             e.currentTarget.blur();
             return;
@@ -122,10 +209,12 @@ const NoteContentEditor: React.FC<{
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'i') {
             e.preventDefault();
             apply((t, s) => wrapSelection(t, s, '_'));
+            return;
         }
     };
 
     const handleBlur = () => {
+        if (alwaysEditing) return;
         requestAnimationFrame(() => {
             const root = rootRef.current;
             if (!root) {
@@ -137,9 +226,22 @@ const NoteContentEditor: React.FC<{
         });
     };
 
+    const handleAttachments = async (files: FileList | null) => {
+        if (!files || files.length === 0 || !onAddAttachments) return;
+        // Attachments are stored as data URLs so they stay in sync across collaborators.
+        const { attachments: incoming, rejected } = await filesToAttachments(Array.from(files));
+        if (incoming.length) onAddAttachments(incoming);
+        if (rejected.length) {
+            setAttachNotice(`Max file size is ${formatBytes(MAX_ATTACHMENT_BYTES)}`);
+        }
+    };
+
+    const showPreview = !editing && !alwaysEditing;
+    const resolvedPlaceholder = placeholder ?? 'Double click to edit…';
+
     return (
         <div ref={rootRef} className={styles.editorRoot} data-interactive="true" onPointerDown={(e) => e.stopPropagation()}>
-            {!editing ? (
+            {showPreview ? (
                 <div
                     className={styles.editorPreview}
                     data-interactive="true"
@@ -150,98 +252,188 @@ const NoteContentEditor: React.FC<{
                     }}
                 >
                     {value.trim().length === 0 ? (
-                        <div className={styles.editorPlaceholder}>Double click to edit…</div>
+                        <div className={styles.editorPlaceholder}>{resolvedPlaceholder}</div>
                     ) : (
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{value}</ReactMarkdown>
                     )}
+                    <AttachmentList attachments={attachments ?? []} compact />
                 </div>
             ) : (
                 <>
-                <div className={styles.editorToolbar} data-interactive="true">
-                <button
-                    type="button"
-                    className={styles.editorButton}
-                    title="Bold (Ctrl/Cmd+B)"
-                    onPointerDown={keepTextFocus}
-                    onClick={() => apply((t, s) => wrapSelection(t, s, '**'))}
-                >
-                    <Bold size={16} />
-                </button>
-                <button
-                    type="button"
-                    className={styles.editorButton}
-                    title="Italic (Ctrl/Cmd+I)"
-                    onPointerDown={keepTextFocus}
-                    onClick={() => apply((t, s) => wrapSelection(t, s, '_'))}
-                >
-                    <Italic size={16} />
-                </button>
-                <button
-                    type="button"
-                    className={styles.editorButton}
-                    title="Strikethrough"
-                    onPointerDown={keepTextFocus}
-                    onClick={() => apply((t, s) => wrapSelection(t, s, '~~'))}
-                >
-                    <Strikethrough size={16} />
-                </button>
-                <button
-                    type="button"
-                    className={styles.editorButton}
-                    title="Inline code"
-                    onPointerDown={keepTextFocus}
-                    onClick={() => apply((t, s) => wrapSelection(t, s, '`'))}
-                >
-                    <Code size={16} />
-                </button>
+                    <div className={styles.editorToolbar} data-interactive="true">
+                        <button
+                            type="button"
+                            className={styles.editorButton}
+                            title="Bold (Ctrl/Cmd+B)"
+                            onPointerDown={keepTextFocus}
+                            onClick={() => apply((t, s) => wrapSelection(t, s, '**'))}
+                        >
+                            <Bold size={16} />
+                        </button>
+                        <button
+                            type="button"
+                            className={styles.editorButton}
+                            title="Italic (Ctrl/Cmd+I)"
+                            onPointerDown={keepTextFocus}
+                            onClick={() => apply((t, s) => wrapSelection(t, s, '_'))}
+                        >
+                            <Italic size={16} />
+                        </button>
+                        <button
+                            type="button"
+                            className={styles.editorButton}
+                            title="Strikethrough"
+                            onPointerDown={keepTextFocus}
+                            onClick={() => apply((t, s) => wrapSelection(t, s, '~~'))}
+                        >
+                            <Strikethrough size={16} />
+                        </button>
+                        <button
+                            type="button"
+                            className={styles.editorButton}
+                            title="Inline code"
+                            onPointerDown={keepTextFocus}
+                            onClick={() => apply((t, s) => wrapSelection(t, s, '`'))}
+                        >
+                            <Code size={16} />
+                        </button>
 
-                <div className={styles.editorDivider} />
+                        <div className={styles.editorDivider} />
 
-                <button
-                    type="button"
-                    className={styles.editorButton}
-                    title="Bullet list"
-                    onPointerDown={keepTextFocus}
-                    onClick={() => apply((t, s) => prefixLines(t, s, '- '))}
-                >
-                    <List size={16} />
-                </button>
-                <button
-                    type="button"
-                    className={styles.editorButton}
-                    title="Numbered list"
-                    onPointerDown={keepTextFocus}
-                    onClick={() => apply((t, s) => numberLines(t, s, 1))}
-                >
-                    <ListOrdered size={16} />
-                </button>
-                <button
-                    type="button"
-                    className={styles.editorButton}
-                    title="Quote"
-                    onPointerDown={keepTextFocus}
-                    onClick={() => apply((t, s) => prefixLines(t, s, '> '))}
-                >
-                    <Quote size={16} />
-                </button>
-
-            </div>
-                <textarea
-                    ref={textareaRef}
-                    className={styles.noteContentInput}
-                    value={value}
-                    onChange={(e) => {
-                        ensureHistory();
-                        updateNode(nodeId, { content: e.target.value });
-                    }}
-                    onBlur={handleBlur}
-                    onKeyDown={handleKeyDown}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    placeholder="Double click to edit…"
-                />
+                        <button
+                            type="button"
+                            className={styles.editorButton}
+                            title="Bullet list"
+                            onPointerDown={keepTextFocus}
+                            onClick={() => apply((t, s) => prefixLines(t, s, '- '))}
+                        >
+                            <List size={16} />
+                        </button>
+                        <button
+                            type="button"
+                            className={styles.editorButton}
+                            title="Numbered list"
+                            onPointerDown={keepTextFocus}
+                            onClick={() => apply((t, s) => numberLines(t, s, 1))}
+                        >
+                            <ListOrdered size={16} />
+                        </button>
+                        <button
+                            type="button"
+                            className={styles.editorButton}
+                            title="Quote"
+                            onPointerDown={keepTextFocus}
+                            onClick={() => apply((t, s) => prefixLines(t, s, '> '))}
+                        >
+                            <Quote size={16} />
+                        </button>
+                        {onAddAttachments && (
+                            <>
+                                <div className={styles.editorDivider} />
+                                <button
+                                    type="button"
+                                    className={styles.editorButton}
+                                    title="Attach file"
+                                    onPointerDown={keepTextFocus}
+                                    onClick={() => fileInputRef.current?.click()}
+                                >
+                                    <Paperclip size={16} />
+                                </button>
+                            </>
+                        )}
+                    </div>
+                    <textarea
+                        ref={textareaRef}
+                        className={styles.noteContentInput}
+                        value={value}
+                        onChange={(e) => onChange(e.target.value)}
+                        onBlur={handleBlur}
+                        onKeyDown={handleKeyDown}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        placeholder={resolvedPlaceholder}
+                    />
+                    <AttachmentList
+                        attachments={attachments ?? []}
+                        onRemoveAttachment={onRemoveAttachment}
+                    />
+                    {attachNotice && (
+                        <div className={styles.editorNotice}>{attachNotice}</div>
+                    )}
+                    {onSubmit && submitLabel && (
+                        <div className={styles.editorSubmitRow}>
+                            <button
+                                type="button"
+                                className={styles.editorSubmitButton}
+                                onPointerDown={(e) => e.stopPropagation()}
+                                onClick={onSubmit}
+                            >
+                                {submitLabel}
+                            </button>
+                        </div>
+                    )}
+                    {onAddAttachments && (
+                        <input
+                            ref={fileInputRef}
+                            type="file"
+                            multiple
+                            className={styles.editorAttachmentInput}
+                            onChange={(e) => {
+                                handleAttachments(e.target.files);
+                                e.currentTarget.value = '';
+                            }}
+                        />
+                    )}
                 </>
             )}
         </div>
+    );
+};
+
+const NoteContentEditor: React.FC<{
+    nodeId: string;
+    value: string;
+    attachments: Attachment[];
+}> = ({ nodeId, value, attachments }) => {
+    const updateNode = useStore((state) => state.updateNode);
+    const historyPushedRef = useRef(false);
+
+    const ensureHistory = useCallback(() => {
+        if (historyPushedRef.current) return;
+        useStore.getState().pushHistory();
+        historyPushedRef.current = true;
+    }, []);
+
+    const handleEditingChange = (editing: boolean) => {
+        if (!editing) historyPushedRef.current = false;
+    };
+
+    const updateContent = (next: string) => {
+        ensureHistory();
+        updateNode(nodeId, { content: next });
+    };
+
+    const addAttachments = (incoming: Attachment[]) => {
+        if (!incoming.length) return;
+        ensureHistory();
+        updateNode(nodeId, { attachments: [...attachments, ...incoming] });
+    };
+
+    const removeAttachment = (id: string) => {
+        ensureHistory();
+        updateNode(nodeId, { attachments: attachments.filter((item) => item.id !== id) });
+    };
+
+    return (
+        <MarkdownEditor
+            value={value}
+            onChange={updateContent}
+            placeholder="Double click to edit…"
+            exitOnEnter
+            onEditingChange={handleEditingChange}
+            attachments={attachments}
+            onAddAttachments={addAttachments}
+            onRemoveAttachment={removeAttachment}
+        />
     );
 };
 
@@ -633,6 +825,7 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
     const progress = clampProgress(typeof data.progress === 'number' && Number.isFinite(data.progress) ? data.progress : 0);
     const status = statusFromProgress(progress);
     const shouldPulse = monitoringMode && isTask && status === 'in_progress';
+    const nodeAttachments = Array.isArray(data.attachments) ? data.attachments : [];
 
     React.useEffect(() => {
         if (!showEnergyPanel) return;
@@ -978,7 +1171,7 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
                         </div>
                     )}
 
-                    <NoteContentEditor nodeId={data.id} value={data.content} />
+                    <NoteContentEditor nodeId={data.id} value={data.content} attachments={nodeAttachments} />
                 </div>
                 </div>
 

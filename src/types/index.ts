@@ -1,5 +1,14 @@
 export type NodeType = 'task' | 'idea';
 
+export interface Attachment {
+  id: string;
+  kind: 'image' | 'file';
+  name: string;
+  size: number;
+  mime: string;
+  dataUrl: string;
+}
+
 export interface NodeData {
   id: string;
   title: string;
@@ -19,6 +28,7 @@ export interface NodeData {
   endDate?: string;
   status?: 'queued' | 'in_progress' | 'done';
   progress?: number;
+  attachments?: Attachment[];
 }
 
 export interface EdgeData {
@@ -72,6 +82,7 @@ export interface Comment {
   x?: number; // world (for canvas comments)
   y?: number; // world (for canvas comments)
   text: string;
+  attachments?: Attachment[];
   createdAt?: number; // epoch ms
   updatedAt?: number; // epoch ms
   authorId?: string | null;
