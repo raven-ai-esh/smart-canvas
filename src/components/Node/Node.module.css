@@ -413,8 +413,51 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+.noteProgressQuickRow {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: -4px 0 10px;
+}
+
+.noteProgressQuickButton {
+    border-radius: 999px;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-primary);
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease, color 160ms ease;
+}
+
+.noteProgressQuickButton:hover {
+    border-color: var(--border-strong);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.noteProgressQuickActive {
+    border-color: var(--progress-color, var(--accent-task));
+    color: var(--progress-color, var(--accent-task));
+    background: rgba(255, 255, 255, 0.1);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--progress-color, var(--accent-task)) 55%, transparent);
+}
+
 :global(body.light-theme) .noteProgressTrack {
     background: rgba(0, 0, 0, 0.08);
+}
+
+:global(body.light-theme) .noteProgressQuickButton {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+:global(body.light-theme) .noteProgressQuickButton:hover {
+    background: rgba(0, 0, 0, 0.08);
+}
+
+:global(body.light-theme) .noteProgressQuickActive {
+    background: rgba(0, 0, 0, 0.08);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--progress-color, var(--accent-task)) 35%, transparent);
 }
 
 
@@ -792,6 +835,15 @@
 .highlightLevel0 .noteNode {
     /* Selected */
     box-shadow: 0 0 0 2px var(--accent-primary), 0 0 32px rgba(94, 129, 172, 0.6);
+    opacity: 1 !important;
+}
+
+.highlightLevel0 .taskNode {
+    /* Selected task uses progress ring color for a subtle glow */
+    box-shadow:
+        0 4px 12px rgba(0, 0, 0, 0.25),
+        0 0 0 2px var(--progress-color, var(--accent-task)),
+        0 0 18px color-mix(in srgb, var(--progress-color, var(--accent-task)) 55%, transparent);
     opacity: 1 !important;
 }
 
