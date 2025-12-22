@@ -24,6 +24,7 @@ function pickSessionState(state: ReturnType<typeof useStore.getState>) {
     edges: state.edges,
     drawings: state.drawings,
     textBoxes: state.textBoxes,
+    comments: state.comments,
     tombstones: state.tombstones,
   };
 }
@@ -35,6 +36,7 @@ function applySessionState(state: SessionState) {
     edges: state.edges as any,
     drawings: state.drawings as any,
     textBoxes: state.textBoxes as any,
+    comments: state.comments as any,
     tombstones: state.tombstones,
     effectiveEnergy: computeEffectiveEnergy(state.nodes as any, state.edges as any, { blockDoneTasks: monitoringMode }),
     selectedNode: null,
@@ -149,6 +151,7 @@ export function useSessionSync() {
         edges: [] as any,
         drawings: [] as any,
         textBoxes: [] as any,
+        comments: [] as any,
 	        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {} },
 	        selectedNode: null,
 	        selectedNodes: [],

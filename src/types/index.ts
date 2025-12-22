@@ -64,6 +64,23 @@ export interface TextBox {
   authorName?: string | null;
 }
 
+export interface Comment {
+  id: string;
+  targetKind: 'canvas' | 'node' | 'edge' | 'textBox';
+  targetId?: string | null;
+  parentId?: string | null;
+  x?: number; // world (for canvas comments)
+  y?: number; // world (for canvas comments)
+  text: string;
+  createdAt?: number; // epoch ms
+  updatedAt?: number; // epoch ms
+  authorId?: string | null;
+  authorName?: string | null;
+  avatarUrl?: string | null;
+  avatarAnimal?: number | null;
+  avatarColor?: number | null;
+}
+
 export interface Tombstones {
   nodes: Record<string, number>;
   edges: Record<string, number>;
