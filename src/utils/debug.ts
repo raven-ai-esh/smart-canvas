@@ -28,14 +28,14 @@ type DebugEvent =
       localCounts: { nodes: number; edges: number; drawings: number; textBoxes: number };
       remoteCounts: { nodes: number; edges: number; drawings: number; textBoxes: number };
       mergedCounts: { nodes: number; edges: number; drawings: number; textBoxes: number };
-      tombstones: { nodes: number; edges: number; drawings: number; textBoxes: number };
+      tombstones: { nodes: number; edges: number; drawings: number; textBoxes: number; comments: number };
     }
   | {
       type: 'sync_send';
       t: number;
       requestId: string;
       counts: { nodes: number; edges: number; drawings: number; textBoxes: number };
-      tombstones: { nodes: number; edges: number; drawings: number; textBoxes: number };
+      tombstones: { nodes: number; edges: number; drawings: number; textBoxes: number; comments: number };
     }
   | {
       type: 'delete_call';

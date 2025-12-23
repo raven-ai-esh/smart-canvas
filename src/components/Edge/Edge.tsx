@@ -21,6 +21,7 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
     const selectedEdges = useStore((state) => state.selectedEdges);
     const selectedNodes = useStore((state) => state.selectedNodes);
     const selectedTextBoxes = useStore((state) => state.selectedTextBoxes);
+    const setMultiSelection = useStore((state) => state.setMultiSelection);
     const neighbors = useStore((state) => state.neighbors);
     const selectEdge = useStore((state) => state.selectEdge);
     const edgeData = useStore((state) => state.edges.find((e) => e.id === id));
@@ -251,6 +252,17 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
     const selectThisEdge = (e: any) => {
         e?.preventDefault?.();
         e?.stopPropagation?.();
+
+        if (e?.shiftKey) {
+            const st = useStore.getState();
+            const selNodes = st.selectedNodes?.length ? st.selectedNodes : (st.selectedNode ? [st.selectedNode] : []);
+            const selEdges = st.selectedEdges?.length ? st.selectedEdges : (st.selectedEdge ? [st.selectedEdge] : []);
+            const selText = st.selectedTextBoxes?.length ? st.selectedTextBoxes : (st.selectedTextBoxId ? [st.selectedTextBoxId] : []);
+            if (!selEdges.includes(id)) {
+                setMultiSelection({ nodes: selNodes, edges: [...selEdges, id], textBoxes: selText });
+            }
+            return;
+        }
 
         const multiCount = (selectedNodes?.length ?? 0) + (selectedEdges?.length ?? 0) + (selectedTextBoxes?.length ?? 0);
         const isInSelection = (selectedEdges?.includes(id) ?? false) || selectedEdge === id;

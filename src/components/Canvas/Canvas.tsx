@@ -41,7 +41,7 @@ type ClipboardPayload =
     | { kind: 'selection'; nodes: NodeData[]; edges: EdgeData[]; textBoxes: TextBoxType[] };
 
 type ContextMenuState = {
-    kind: 'node' | 'textBox' | 'edge' | 'selection' | 'canvas';
+    kind: 'node' | 'textBox' | 'edge' | 'selection' | 'canvas' | 'comment';
     id?: string;
     x: number;
     y: number;
@@ -90,6 +90,7 @@ export const Canvas: React.FC = () => {
 	    const toggleTextMode = useStore((state) => state.toggleTextMode);
 	    const updateEdge = useStore((state) => state.updateEdge);
 	    const addComment = useStore((state) => state.addComment);
+	    const deleteComment = useStore((state) => state.deleteComment);
 	    const toggleCommentsMode = useStore((state) => state.toggleCommentsMode);
 
     const canvasRef = useRef(canvas);
@@ -183,6 +184,12 @@ export const Canvas: React.FC = () => {
         downClientX: number;
         downClientY: number;
         pointerType: string;
+    } | null>(null);
+    const shiftPressCandidate = useRef<{
+        nodeId: string;
+        pointerId: number;
+        downClientX: number;
+        downClientY: number;
     } | null>(null);
     const canvasLongPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const canvasTouchCandidate = useRef<{
@@ -1654,12 +1661,37 @@ export const Canvas: React.FC = () => {
         };
     }, [physicsEnabled]);
 
+    const startNodeConnection = (e: React.PointerEvent, nodeId: string) => {
+        const node = nodes.find((n) => n.id === nodeId);
+        if (!node) return;
+
+        // While connecting we don't want existing selection-driven dimming (backgroundNoise).
+        // Clear selection so all nodes remain fully visible when choosing a target.
+        {
+            const { selectNode, selectEdge, selectTextBox } = useStore.getState();
+            selectNode(null);
+            selectEdge(null);
+            selectTextBox(null);
+            setEditingTextBoxId(null);
+            clearMarqueeHover();
+        }
+
+        setMode('connecting');
+        setActiveId(nodeId);
+        connectingPointerIdRef.current = e.pointerId;
+        connectingPointerTypeRef.current = e.pointerType;
+        setConnectionStart({ x: node.x, y: node.y });
+        setCursorPos(screenToWorld(e.clientX, e.clientY));
+        updateConnectionTargetFromClientPoint(e.clientX, e.clientY, nodeId);
+    };
+
 	    const handlePointerDown = (e: React.PointerEvent) => {
 	        // Palm rejection: ignore touch pointers while a pencil stroke is active.
 	        if (penStrokeActiveRef.current && e.pointerType === 'touch') {
 	            e.preventDefault();
 	            return;
 	        }
+        shiftPressCandidate.current = null;
 
         const target = e.target as HTMLElement;
         const isInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
@@ -1754,23 +1786,14 @@ export const Canvas: React.FC = () => {
             }
 
 		            if (e.shiftKey) {
-	                // While connecting we don't want existing selection-driven dimming (backgroundNoise).
-	                // Clear selection so all nodes remain fully visible when choosing a target.
-	                {
-	                    const { selectNode, selectEdge, selectTextBox } = useStore.getState();
-	                    selectNode(null);
-	                    selectEdge(null);
-	                    selectTextBox(null);
-	                    setEditingTextBoxId(null);
-	                    clearMarqueeHover();
-	                }
-		                // Start Connecting
-		                setMode('connecting');
-		                setActiveId(nodeId);
-		                connectingPointerIdRef.current = e.pointerId;
-		                connectingPointerTypeRef.current = e.pointerType;
-		                setConnectionStart({ x: node.x, y: node.y });
-		                setCursorPos(worldPos);
+		                shiftPressCandidate.current = {
+		                    nodeId,
+		                    pointerId: e.pointerId,
+		                    downClientX: e.clientX,
+		                    downClientY: e.clientY,
+		                };
+		                e.stopPropagation();
+		                return;
 		            } else {
 	                const st = useStore.getState();
 	                const selectedNodes = st.selectedNodes?.length ? st.selectedNodes : (st.selectedNode ? [st.selectedNode] : []);
@@ -1954,6 +1977,19 @@ export const Canvas: React.FC = () => {
             setMarqueeRect({ left, top, width, height });
             updateMarqueeHover({ left, top, width, height });
             return;
+        }
+
+        const shiftCandidate = shiftPressCandidate.current;
+        if (shiftCandidate && shiftCandidate.pointerId === e.pointerId) {
+            const dist = Math.hypot(
+                e.clientX - shiftCandidate.downClientX,
+                e.clientY - shiftCandidate.downClientY
+            );
+            if (dist > CLICK_THRESHOLD) {
+                shiftPressCandidate.current = null;
+                startNodeConnection(e, shiftCandidate.nodeId);
+                return;
+            }
         }
 
 	        const candidate = touchPressCandidate.current;
@@ -2297,11 +2333,36 @@ export const Canvas: React.FC = () => {
 	        }
 
 	        // Check for click (small movement)
-	        const dist = Math.sqrt(
-	            Math.pow(e.clientX - pointerDownPos.current.x, 2) +
-	            Math.pow(e.clientY - pointerDownPos.current.y, 2)
+        const dist = Math.sqrt(
+            Math.pow(e.clientX - pointerDownPos.current.x, 2) +
+            Math.pow(e.clientY - pointerDownPos.current.y, 2)
         );
         const isClick = dist < CLICK_THRESHOLD;
+
+        const shiftCandidate = shiftPressCandidate.current;
+        if (shiftCandidate && shiftCandidate.pointerId === e.pointerId) {
+            shiftPressCandidate.current = null;
+            if (isClick) {
+                const st = useStore.getState();
+                const selectedNodes = st.selectedNodes?.length ? st.selectedNodes : (st.selectedNode ? [st.selectedNode] : []);
+                const selectedEdges = st.selectedEdges?.length ? st.selectedEdges : (st.selectedEdge ? [st.selectedEdge] : []);
+                const selectedTextBoxes = st.selectedTextBoxes?.length ? st.selectedTextBoxes : (st.selectedTextBoxId ? [st.selectedTextBoxId] : []);
+                const nextNodes = Array.from(new Set([...selectedNodes, shiftCandidate.nodeId]));
+                const { selectNode, selectEdge, selectTextBox, setMultiSelection, setEditingTextBoxId } = st;
+
+                setEditingTextBoxId(null);
+                if (nextNodes.length === 1 && selectedEdges.length === 0 && selectedTextBoxes.length === 0) {
+                    selectEdge(null);
+                    selectTextBox(null);
+                    selectNode(nextNodes[0]);
+                } else {
+                    selectNode(null);
+                    selectEdge(null);
+                    selectTextBox(null);
+                    setMultiSelection({ nodes: nextNodes, textBoxes: selectedTextBoxes, edges: selectedEdges });
+                }
+            }
+        }
 
         // Touch candidate: treat as tap-select if we didn't long-press and didn't start dragging.
         if (touchPressCandidate.current) {
@@ -2388,6 +2449,7 @@ export const Canvas: React.FC = () => {
 		        connectingPointerTypeRef.current = null;
 		        groupDragRef.current = null;
 		        draggingNodeIdRef.current = null;
+        shiftPressCandidate.current = null;
 		        lastDragPos.current = null;
 	        pendingDragUndoSnapshotRef.current = null;
 	        dragUndoCommittedRef.current = false;
@@ -2450,7 +2512,8 @@ export const Canvas: React.FC = () => {
 	        drawingPointerTypeRef.current = null;
 	        penStrokeActiveRef.current = false;
         useStore.getState().setConnectionTargetId(null);
-        clearLongPress();
+	        clearLongPress();
+        shiftPressCandidate.current = null;
 	        draggingNodeIdRef.current = null;
 	        lastDragPos.current = null;
 	        pendingDragUndoSnapshotRef.current = null;
@@ -2468,12 +2531,25 @@ export const Canvas: React.FC = () => {
 	        clearAlignmentGuides();
 	    };
 
-	    const handlePointerLeave = (e: React.PointerEvent) => {
-	        // On touch devices pointerleave can fire mid-gesture when the finger crosses fixed UI,
-	        // which would prematurely finalize drags/connections. Let touch gestures finish via touchend/pointerup.
-	        if (e.pointerType === 'touch') return;
-	        handlePointerUp(e);
-	    };
+    const handlePointerLeave = (e: React.PointerEvent) => {
+        // On touch devices pointerleave can fire mid-gesture when the finger crosses fixed UI,
+        // which would prematurely finalize drags/connections. Let touch gestures finish via touchend/pointerup.
+        if (e.pointerType === 'touch') return;
+        handlePointerUp(e);
+    };
+
+    const handleCommentContextMenu = useCallback((e: React.MouseEvent) => {
+        if (e.defaultPrevented) return;
+        const target = e.target as HTMLElement;
+        if (target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]')) return;
+        const commentEl = target.closest('[data-comment-id]');
+        if (!commentEl) return;
+        const id = commentEl.getAttribute('data-comment-id');
+        if (!id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setContextMenu({ kind: 'comment', id, x: e.clientX, y: e.clientY });
+    }, [setContextMenu]);
 
     const handleContextMenu = useCallback((e: React.MouseEvent) => {
         if (e.defaultPrevented) return;
@@ -2622,7 +2698,7 @@ export const Canvas: React.FC = () => {
 	                        onPointerDown={(e) => e.stopPropagation()}
 	                        onClick={(e) => e.stopPropagation()}
 	                    >
-	                        {contextMenu.kind !== 'selection' && (
+	                        {contextMenu.kind !== 'selection' && contextMenu.kind !== 'comment' && (
 	                            <button
 	                                type="button"
 	                                className={styles.contextButton}
@@ -2673,6 +2749,10 @@ export const Canvas: React.FC = () => {
 	                                        st.deleteTextBox(contextMenu.id);
 	                                        st.selectTextBox(null);
 	                                        st.setEditingTextBoxId(null);
+	                                    } else if (contextMenu.kind === 'comment' && contextMenu.id) {
+	                                        deleteComment(contextMenu.id);
+	                                        setOpenCommentId((prev) => (prev === contextMenu.id ? null : prev));
+	                                        setHoverCommentId((prev) => (prev === contextMenu.id ? null : prev));
 	                                    }
 	                                    setContextMenu(null);
 	                                }}
@@ -2845,7 +2925,7 @@ export const Canvas: React.FC = () => {
                     </div>
                 ))}
                 {showCommentLayer && (
-                    <div className={styles.commentLayer} data-comment-ui="true">
+                    <div className={styles.commentLayer} data-comment-ui="true" onContextMenu={handleCommentContextMenu}>
                         {rootComments.map((comment) => {
                             const anchor = resolveCommentAnchor(comment);
                             if (!anchor) return null;
@@ -2861,6 +2941,7 @@ export const Canvas: React.FC = () => {
                                     className={styles.commentItem}
                                     style={{ left: anchor.x, top: anchor.y }}
                                     data-comment-ui="true"
+                                    data-comment-id={comment.id}
                                     onPointerDown={(e) => e.stopPropagation()}
                                 >
                                     <button
@@ -2908,7 +2989,7 @@ export const Canvas: React.FC = () => {
                                                 {replies.map((reply) => {
                                                     const replyLabel = getCommentLabel(reply);
                                                     return (
-                                                        <div key={reply.id} className={styles.commentReply}>
+                                                        <div key={reply.id} className={styles.commentReply} data-comment-id={reply.id}>
                                                             <span className={styles.commentReplyAuthor}>{replyLabel}</span>
                                                             <span className={styles.commentReplyText}>{reply.text}</span>
                                                         </div>

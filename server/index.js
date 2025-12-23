@@ -405,12 +405,13 @@ async function createSession(id, state, opts = {}) {
 }
 
 function normalizeTombstones(raw) {
-  if (!raw || typeof raw !== 'object') return { nodes: {}, edges: {}, drawings: {}, textBoxes: {} };
+  if (!raw || typeof raw !== 'object') return { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {} };
   return {
     nodes: raw.nodes && typeof raw.nodes === 'object' ? raw.nodes : {},
     edges: raw.edges && typeof raw.edges === 'object' ? raw.edges : {},
     drawings: raw.drawings && typeof raw.drawings === 'object' ? raw.drawings : {},
     textBoxes: raw.textBoxes && typeof raw.textBoxes === 'object' ? raw.textBoxes : {},
+    comments: raw.comments && typeof raw.comments === 'object' ? raw.comments : {},
   };
 }
 
@@ -432,11 +433,18 @@ const ts = (x) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
 function mergeTombstones(a, b) {
   const ta = normalizeTombstones(a);
   const tb = normalizeTombstones(b);
-  const out = { nodes: { ...ta.nodes }, edges: { ...ta.edges }, drawings: { ...ta.drawings }, textBoxes: { ...ta.textBoxes } };
+  const out = {
+    nodes: { ...ta.nodes },
+    edges: { ...ta.edges },
+    drawings: { ...ta.drawings },
+    textBoxes: { ...ta.textBoxes },
+    comments: { ...ta.comments },
+  };
   for (const [id, t] of Object.entries(tb.nodes)) out.nodes[id] = Math.max(ts(out.nodes[id]), ts(t));
   for (const [id, t] of Object.entries(tb.edges)) out.edges[id] = Math.max(ts(out.edges[id]), ts(t));
   for (const [id, t] of Object.entries(tb.drawings)) out.drawings[id] = Math.max(ts(out.drawings[id]), ts(t));
   for (const [id, t] of Object.entries(tb.textBoxes)) out.textBoxes[id] = Math.max(ts(out.textBoxes[id]), ts(t));
+  for (const [id, t] of Object.entries(tb.comments)) out.comments[id] = Math.max(ts(out.comments[id]), ts(t));
   return out;
 }
 
@@ -479,7 +487,7 @@ function mergeState(currentRaw, incomingRaw) {
   });
   const drawings = mergeById(current.drawings, incoming.drawings, tombstones.drawings);
   const textBoxes = mergeById(current.textBoxes, incoming.textBoxes, tombstones.textBoxes);
-  const comments = mergeById(current.comments, incoming.comments, {});
+  const comments = mergeById(current.comments, incoming.comments, tombstones.comments);
 
   return {
     nodes,
