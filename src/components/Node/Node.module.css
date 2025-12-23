@@ -31,6 +31,33 @@
     opacity: 0.85;
 }
 
+.graphLabel {
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translate(-50%, 8px);
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-node);
+    color: var(--text-primary);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    opacity: 0;
+    pointer-events: none;
+    white-space: nowrap;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: opacity 140ms ease;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
+    z-index: 30;
+}
+
+.graphLabelVisible {
+    opacity: 0.9;
+}
+
 .nodeWrapper:hover {
     z-index: 10;
 }

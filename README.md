@@ -21,7 +21,7 @@ A spatial thinking canvas for tasks and ideas. Place nodes in an infinite space,
 - Task cards with status (`queued`, `in_progress`, `done`), dates, and a progress ring.
 - Monitoring mode with animated tasks and energy-aware connections.
 - Pen mode with pen/eraser/highlighter, plus touch and stylus optimizations.
-- Local UI modes: grid snapping, focus, monitoring, and move.
+- Local UI modes: grid snapping, focus, monitorin, and move.
 - Display: light/dark themes and snow overlay, now available from the avatar menu.
 
 ## Accounts and Sessions

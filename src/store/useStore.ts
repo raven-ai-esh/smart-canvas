@@ -183,6 +183,7 @@ interface AppState {
     updateTextBox: (id: string, data: Partial<TextBox>) => void;
     deleteTextBox: (id: string) => void;
     addComment: (comment: Comment) => void;
+    deleteComment: (id: string) => void;
 
     theme: 'dark' | 'light';
     toggleTheme: () => void;
@@ -258,7 +259,7 @@ export const useStore = create<AppState>()(
             edges: [],
             canvas: { x: 0, y: 0, scale: 1 },
             effectiveEnergy: {},
-            tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {} },
+            tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {} },
             sessionId: null,
             sessionName: null,
             sessionSaved: false,
@@ -401,6 +402,7 @@ export const useStore = create<AppState>()(
                 const tombstones: Tombstones = {
                     ...state.tombstones,
                     nodes: { ...state.tombstones.nodes },
+                    comments: { ...state.tombstones.comments },
                 };
                 delete tombstones.nodes[normalized.id];
                 const normalizedEnergy = normalizeEnergies(nodes, state.edges);
@@ -472,6 +474,7 @@ export const useStore = create<AppState>()(
                     edges: { ...state.tombstones.edges },
                     drawings: { ...state.tombstones.drawings },
                     textBoxes: { ...state.tombstones.textBoxes },
+                    comments: { ...state.tombstones.comments },
                 };
                 for (const e of removedEdges) {
                     tombstones.edges[e.id] = tombstoneFor(now, e.updatedAt);
@@ -499,6 +502,7 @@ export const useStore = create<AppState>()(
                 const tombstones: Tombstones = {
                     ...state.tombstones,
                     edges: { ...state.tombstones.edges },
+                    comments: { ...state.tombstones.comments },
                 };
                 delete tombstones.edges[normalized.id];
                 const normalizedEnergy = normalizeEnergies(state.nodes, edges);
@@ -533,6 +537,7 @@ export const useStore = create<AppState>()(
                 const tombstones: Tombstones = {
                     ...state.tombstones,
                     edges: { ...state.tombstones.edges, [id]: tombstoneEdge },
+                    comments: { ...state.tombstones.comments },
                 };
                 debugLog({ type: 'delete_call', t: performance.now(), kind: 'edge', id, now, updatedAt: edge?.updatedAt, tombstone: tombstoneEdge });
                 const normalizedEnergy = normalizeEnergies(state.nodes, edges);
@@ -693,6 +698,7 @@ export const useStore = create<AppState>()(
                     edges: { ...state.tombstones.edges },
                     drawings: { ...state.tombstones.drawings },
                     textBoxes: { ...state.tombstones.textBoxes },
+                    comments: { ...state.tombstones.comments },
                 };
 
                 for (const nodeId of removeNodeSet) {
@@ -754,6 +760,7 @@ export const useStore = create<AppState>()(
                 const tombstones: Tombstones = {
                     ...state.tombstones,
                     drawings: { ...state.tombstones.drawings },
+                    comments: { ...state.tombstones.comments },
                 };
                 delete tombstones.drawings[normalized.id];
                 return { ...pushHistoryReducer(state), drawings, tombstones };
@@ -766,6 +773,7 @@ export const useStore = create<AppState>()(
                 const tombstones: Tombstones = {
                     ...state.tombstones,
                     drawings: { ...state.tombstones.drawings, [id]: tombstoneDrawing },
+                    comments: { ...state.tombstones.comments },
                 };
                 debugLog({ type: 'delete_call', t: performance.now(), kind: 'drawing', id, now, updatedAt: drawing?.updatedAt, tombstone: tombstoneDrawing });
                 return { ...pushHistoryReducer(state), drawings, tombstones };
@@ -794,6 +802,7 @@ export const useStore = create<AppState>()(
                     const tombstones: Tombstones = {
                         ...state.tombstones,
                         textBoxes: { ...state.tombstones.textBoxes },
+                        comments: { ...state.tombstones.comments },
                     };
                     delete tombstones.textBoxes[normalized.id];
                     return {
@@ -825,6 +834,7 @@ export const useStore = create<AppState>()(
                     const tombstones: Tombstones = {
                         ...state.tombstones,
                         textBoxes: { ...state.tombstones.textBoxes, [id]: tombstoneTextBox },
+                        comments: { ...state.tombstones.comments },
                     };
 	                    debugLog({ type: 'delete_call', t: performance.now(), kind: 'textBox', id, now, updatedAt: tb?.updatedAt, tombstone: tombstoneTextBox });
 	                    const editingTextBoxId = state.editingTextBoxId === id ? null : state.editingTextBoxId;
@@ -850,7 +860,46 @@ export const useStore = create<AppState>()(
                         createdAt: comment.createdAt ?? now,
                         updatedAt: comment.updatedAt ?? now,
                     };
-                    return { comments: [...state.comments, normalized] };
+                    const tombstones: Tombstones = {
+                        ...state.tombstones,
+                        comments: { ...state.tombstones.comments },
+                    };
+                    delete tombstones.comments[normalized.id];
+                    return { comments: [...state.comments, normalized], tombstones };
+                }),
+            deleteComment: (id) =>
+                set((state) => {
+                    if (!id) return {};
+                    const now = Date.now();
+                    const hasTarget = state.comments.some((comment) => comment.id === id);
+                    if (!hasTarget) return {};
+                    const childrenByParent = new Map<string, string[]>();
+                    state.comments.forEach((comment) => {
+                        if (!comment.parentId) return;
+                        const list = childrenByParent.get(comment.parentId) ?? [];
+                        list.push(comment.id);
+                        childrenByParent.set(comment.parentId, list);
+                    });
+                    const toDelete = new Set<string>();
+                    const stack = [id];
+                    while (stack.length > 0) {
+                        const next = stack.pop();
+                        if (!next || toDelete.has(next)) continue;
+                        toDelete.add(next);
+                        const children = childrenByParent.get(next);
+                        if (children && children.length) stack.push(...children);
+                    }
+                    if (toDelete.size === 0) return {};
+                    const comments = state.comments.filter((comment) => !toDelete.has(comment.id));
+                    const tombstones: Tombstones = {
+                        ...state.tombstones,
+                        comments: { ...state.tombstones.comments },
+                    };
+                    state.comments.forEach((comment) => {
+                        if (!toDelete.has(comment.id)) return;
+                        tombstones.comments[comment.id] = tombstoneFor(now, comment.updatedAt);
+                    });
+                    return { comments, tombstones };
                 }),
 
 	            theme: 'dark',
@@ -859,23 +908,27 @@ export const useStore = create<AppState>()(
 	            toggleSnow: () => set((state) => ({ snowEnabled: !state.snowEnabled })),
 
 	        }),
-	        {
-	            name: 'living-canvas-storage',
-	            version: 5,
-	            partialize: (state) => ({
-	                theme: state.theme,
-	                penTool: state.penTool,
-	                snowEnabled: state.snowEnabled,
-	            }), // Don't persist canvas position/focus
-	            migrate: (persisted: unknown, _version: number) => {
-	                if (!persisted || typeof persisted !== 'object') return persisted as any;
-	                const anyState = persisted as any;
-	                return {
-	                    theme: anyState.theme === 'light' ? 'light' : 'dark',
-	                    penTool: anyState.penTool === 'eraser' || anyState.penTool === 'highlighter' ? anyState.penTool : 'pen',
-	                    snowEnabled: !!anyState.snowEnabled,
-	                };
-	            },
-	        }
+        {
+            name: 'living-canvas-storage',
+            version: 6,
+            partialize: (state) => ({
+                theme: state.theme,
+                penTool: state.penTool,
+                snowEnabled: state.snowEnabled,
+                commentsMode: state.commentsMode,
+                authorshipMode: state.authorshipMode,
+            }), // Don't persist canvas position/focus
+            migrate: (persisted: unknown, _version: number) => {
+                if (!persisted || typeof persisted !== 'object') return persisted as any;
+                const anyState = persisted as any;
+                return {
+                    theme: anyState.theme === 'light' ? 'light' : 'dark',
+                    penTool: anyState.penTool === 'eraser' || anyState.penTool === 'highlighter' ? anyState.penTool : 'pen',
+                    snowEnabled: !!anyState.snowEnabled,
+                    commentsMode: !!anyState.commentsMode,
+                    authorshipMode: !!anyState.authorshipMode,
+                };
+            },
+        }
 	    )
 	);

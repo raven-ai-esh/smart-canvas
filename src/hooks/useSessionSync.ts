@@ -152,7 +152,7 @@ export function useSessionSync() {
         drawings: [] as any,
         textBoxes: [] as any,
         comments: [] as any,
-	        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {} },
+	        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {} },
 	        selectedNode: null,
 	        selectedNodes: [],
 	        selectedEdge: null,
@@ -198,6 +198,7 @@ export function useSessionSync() {
             edges: Object.keys(next.tombstones.edges).length,
             drawings: Object.keys(next.tombstones.drawings).length,
             textBoxes: Object.keys(next.tombstones.textBoxes).length,
+            comments: Object.keys(next.tombstones.comments).length,
           },
         });
         applySessionState(next);
@@ -241,13 +242,14 @@ export function useSessionSync() {
           drawings: desiredStateRef.current.drawings.length,
           textBoxes: desiredStateRef.current.textBoxes.length,
         },
-        tombstones: {
-          nodes: Object.keys(desiredStateRef.current.tombstones.nodes).length,
-          edges: Object.keys(desiredStateRef.current.tombstones.edges).length,
-          drawings: Object.keys(desiredStateRef.current.tombstones.drawings).length,
-          textBoxes: Object.keys(desiredStateRef.current.tombstones.textBoxes).length,
-        },
-      });
+      tombstones: {
+        nodes: Object.keys(desiredStateRef.current.tombstones.nodes).length,
+        edges: Object.keys(desiredStateRef.current.tombstones.edges).length,
+        drawings: Object.keys(desiredStateRef.current.tombstones.drawings).length,
+        textBoxes: Object.keys(desiredStateRef.current.tombstones.textBoxes).length,
+        comments: Object.keys(desiredStateRef.current.tombstones.comments).length,
+      },
+    });
       ws.send(
         JSON.stringify({
           type: 'update',

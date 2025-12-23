@@ -97,6 +97,7 @@ export interface Tombstones {
   edges: Record<string, number>;
   drawings: Record<string, number>;
   textBoxes: Record<string, number>;
+  comments: Record<string, number>;
 }
 
 export interface CanvasState {

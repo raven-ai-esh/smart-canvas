@@ -1333,6 +1333,8 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
     const isSelected = selectedNode === data.id || selectedNodes.includes(data.id);
     const authorLabel = typeof data.authorName === 'string' ? data.authorName.trim() : '';
     const showAuthor = authorshipMode && !!authorLabel && (isHovered || isSelected);
+    const graphLabel = data.title?.trim();
+    const showGraphLabel = isGraph && !!graphLabel && isHovered;
     const neighborDist = neighbors[data.id];
     const isTarget = connectionTargetId === data.id;
     const energyColor = energyToColor(effectiveEnergy);
@@ -1382,6 +1384,11 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
                 data-node-rect-id={data.id}
             >
                 {renderAuthorBadge()}
+                {graphLabel ? (
+                    <div className={`${styles.graphLabel} ${showGraphLabel ? styles.graphLabelVisible : ''}`}>
+                        {graphLabel}
+                    </div>
+                ) : null}
                 <GraphView data={data} energyColor={energyColor} fillRatio={fillRatio} />
             </div>
 

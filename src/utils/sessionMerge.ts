@@ -12,13 +12,14 @@ export type SessionState = {
 const ts = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
 
 const normalizeTombstones = (raw: unknown): Tombstones => {
-  if (!raw || typeof raw !== 'object') return { nodes: {}, edges: {}, drawings: {}, textBoxes: {} };
+  if (!raw || typeof raw !== 'object') return { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {} };
   const r: any = raw;
   return {
     nodes: r.nodes && typeof r.nodes === 'object' ? r.nodes : {},
     edges: r.edges && typeof r.edges === 'object' ? r.edges : {},
     drawings: r.drawings && typeof r.drawings === 'object' ? r.drawings : {},
     textBoxes: r.textBoxes && typeof r.textBoxes === 'object' ? r.textBoxes : {},
+    comments: r.comments && typeof r.comments === 'object' ? r.comments : {},
   };
 };
 
@@ -40,11 +41,13 @@ function mergeTombstones(a: Tombstones, b: Tombstones): Tombstones {
     edges: { ...a.edges },
     drawings: { ...a.drawings },
     textBoxes: { ...a.textBoxes },
+    comments: { ...a.comments },
   };
   for (const [id, t] of Object.entries(b.nodes)) out.nodes[id] = Math.max(ts(out.nodes[id]), ts(t));
   for (const [id, t] of Object.entries(b.edges)) out.edges[id] = Math.max(ts(out.edges[id]), ts(t));
   for (const [id, t] of Object.entries(b.drawings)) out.drawings[id] = Math.max(ts(out.drawings[id]), ts(t));
   for (const [id, t] of Object.entries(b.textBoxes)) out.textBoxes[id] = Math.max(ts(out.textBoxes[id]), ts(t));
+  for (const [id, t] of Object.entries(b.comments)) out.comments[id] = Math.max(ts(out.comments[id]), ts(t));
   return out;
 }
 
@@ -87,7 +90,7 @@ export function mergeSessionState(localRaw: unknown, remoteRaw: unknown): Sessio
   });
   const drawings = mergeById(local.drawings, remote.drawings, tombstones.drawings);
   const textBoxes = mergeById(local.textBoxes, remote.textBoxes, tombstones.textBoxes);
-  const comments = mergeById(local.comments, remote.comments, {});
+  const comments = mergeById(local.comments, remote.comments, tombstones.comments);
 
   return { nodes, edges, drawings, textBoxes, comments, tombstones };
 }

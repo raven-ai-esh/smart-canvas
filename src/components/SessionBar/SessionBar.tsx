@@ -411,7 +411,8 @@ export const SessionBar: React.FC = () => {
                         edges: [],
                         drawings: [],
                         textBoxes: [],
-                        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {} },
+                        comments: [],
+                        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {} },
                     },
                 }),
             });
