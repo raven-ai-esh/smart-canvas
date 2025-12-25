@@ -33,8 +33,11 @@ services:
       TEST_USER_EMAIL: "${TEST_USER_EMAIL:-test@raven-ai.local}"
       TEST_USER_PASSWORD: "${TEST_USER_PASSWORD:-test1234}"
       TEST_USER_NAME: "${TEST_USER_NAME:-Test User}"
+      MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp:7010/mcp}"
+      REDIS_URL: "redis://redis:6379"
     depends_on:
       - db
+      - redis
     restart: always
 
   mcp:
@@ -54,7 +57,7 @@ services:
     restart: always
 
   db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -63,5 +66,12 @@ services:
       - db-data:/var/lib/postgresql/data
     restart: always
 
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+    restart: always
+
 volumes:
   db-data:
+  redis-data:

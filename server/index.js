@@ -9,6 +9,10 @@ import cookie from 'cookie';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
+import OpenAI from 'openai';
+import { Agent, MCPServerStreamableHttp, run } from '@openai/agents';
+import { OpenAIResponsesModel } from '@openai/agents-openai';
+import Redis from 'ioredis';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/smart_tracker';
@@ -34,6 +38,22 @@ const TEMP_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * (Number.isFinite(TEMP_SESSION_
 const MCP_TOKEN_DEFAULT_TTL_DAYS = Number(process.env.MCP_TOKEN_DEFAULT_TTL_DAYS ?? 90);
 const MCP_TOKEN_MAX_TTL_DAYS = Number(process.env.MCP_TOKEN_MAX_TTL_DAYS ?? 365);
 const MCP_SNAPSHOT_TIMEOUT_MS = Number(process.env.MCP_SNAPSHOT_TIMEOUT_MS ?? 12000);
+const MCP_SERVER_URL = process.env.MCP_SERVER_URL ?? 'http://localhost:7010/mcp';
+const OPENAI_API_BASE_URL = process.env.OPENAI_API_BASE_URL ?? 'https://api.openai.com/v1';
+const OPENAI_MODEL = process.env.OPENAI_MODEL ?? 'gpt-5.2';
+const OPENAI_SUMMARY_MODEL = process.env.OPENAI_SUMMARY_MODEL ?? OPENAI_MODEL;
+const OPENAI_EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL ?? 'text-embedding-3-small';
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS ?? 30000);
+const OPENAI_MAX_TURNS = Number(process.env.OPENAI_MAX_TURNS ?? 6);
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? null;
+const ASSISTANT_CONTEXT_LIMIT = Number(process.env.ASSISTANT_CONTEXT_LIMIT ?? 20);
+const ASSISTANT_MEMORY_K = Number(process.env.ASSISTANT_MEMORY_K ?? 5);
+const ASSISTANT_MEMORY_MAX_CHARS = Number(process.env.ASSISTANT_MEMORY_MAX_CHARS ?? 1200);
+const ASSISTANT_SUMMARY_THRESHOLD = Number(process.env.ASSISTANT_SUMMARY_THRESHOLD ?? 14);
+const ASSISTANT_SUMMARY_MAX_CHARS = Number(process.env.ASSISTANT_SUMMARY_MAX_CHARS ?? 1400);
+const ASSISTANT_CACHE_TTL_MS = Number(process.env.ASSISTANT_CACHE_TTL_MS ?? 60000);
+const REDIS_URL = process.env.REDIS_URL ?? '';
+const EMBEDDING_DIM = Number(process.env.OPENAI_EMBEDDING_DIM ?? 1536);
 const parseCorsOrigin = (v) => {
   if (v === undefined) return true;
   if (v === 'true') return true;
@@ -43,8 +63,30 @@ const parseCorsOrigin = (v) => {
 const CORS_ORIGIN = parseCorsOrigin(process.env.CORS_ORIGIN);
 
 const pool = new Pool({ connectionString: DATABASE_URL });
+let VECTOR_ENABLED = false;
+
+const memoryCache = new Map();
+const redis = REDIS_URL
+  ? new Redis(REDIS_URL, {
+    maxRetriesPerRequest: 1,
+    enableOfflineQueue: false,
+  })
+  : null;
+
+if (redis) {
+  redis.on('error', (err) => {
+    console.warn('[cache] redis error', err?.message ?? err);
+  });
+}
 
 async function initDb() {
+  try {
+    await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
+    VECTOR_ENABLED = true;
+  } catch {
+    VECTOR_ENABLED = false;
+  }
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
@@ -179,9 +221,136 @@ async function initDb() {
   } catch {
     // ignore
   }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS openai_keys (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      api_key TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_used_at TIMESTAMPTZ
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS assistant_threads (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      session_id TEXT,
+      title TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_message_at TIMESTAMPTZ
+    );
+  `);
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS assistant_threads_user_id_idx ON assistant_threads (user_id)');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS assistant_threads_session_id_idx ON assistant_threads (session_id)');
+  } catch {
+    // ignore
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS assistant_messages (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS assistant_messages_thread_id_idx ON assistant_messages (thread_id)');
+  } catch {
+    // ignore
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS assistant_summaries (
+      thread_id TEXT PRIMARY KEY REFERENCES assistant_threads(id) ON DELETE CASCADE,
+      summary TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  if (VECTOR_ENABLED) {
+    const dim = Number.isFinite(EMBEDDING_DIM) && EMBEDDING_DIM > 0 ? Math.floor(EMBEDDING_DIM) : 1536;
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS assistant_memories (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        thread_id TEXT REFERENCES assistant_threads(id) ON DELETE CASCADE,
+        content TEXT NOT NULL,
+        embedding vector(${dim}),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    try {
+      await pool.query('CREATE INDEX IF NOT EXISTS assistant_memories_user_id_idx ON assistant_memories (user_id)');
+    } catch {
+      // ignore
+    }
+    try {
+      await pool.query('CREATE INDEX IF NOT EXISTS assistant_memories_thread_id_idx ON assistant_memories (thread_id)');
+    } catch {
+      // ignore
+    }
+    try {
+      await pool.query('CREATE INDEX IF NOT EXISTS assistant_memories_embedding_idx ON assistant_memories USING ivfflat (embedding vector_cosine_ops)');
+    } catch {
+      // ignore
+    }
+  } else {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS assistant_memories (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        thread_id TEXT REFERENCES assistant_threads(id) ON DELETE CASCADE,
+        content TEXT NOT NULL,
+        embedding DOUBLE PRECISION[],
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    try {
+      await pool.query('CREATE INDEX IF NOT EXISTS assistant_memories_user_id_idx ON assistant_memories (user_id)');
+    } catch {
+      // ignore
+    }
+    try {
+      await pool.query('CREATE INDEX IF NOT EXISTS assistant_memories_thread_id_idx ON assistant_memories (thread_id)');
+    } catch {
+      // ignore
+    }
+  }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const scrubAssistantLogValue = (value) => {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return `[len:${value.length}]`;
+  if (Array.isArray(value)) return `[len:${value.length}]`;
+  if (typeof value === 'object') return '[object]';
+  return value;
+};
+
+const logAssistantEvent = (event, payload) => {
+  const safe = {};
+  if (payload && typeof payload === 'object') {
+    for (const [key, value] of Object.entries(payload)) {
+      if (key.toLowerCase().includes('content') || key.toLowerCase().includes('message')) {
+        safe[key] = scrubAssistantLogValue(value);
+      } else {
+        safe[key] = value;
+      }
+    }
+  }
+  console.log('[assistant]', event, JSON.stringify(safe));
+};
 
 async function initDbWithRetry() {
   let lastError;
@@ -444,6 +613,57 @@ async function touchMcpToken(tokenHash) {
   await pool.query('UPDATE mcp_tokens SET last_used_at = NOW() WHERE token_hash = $1', [tokenHash]);
 }
 
+function maskOpenAiKey(key) {
+  const raw = typeof key === 'string' ? key.trim() : '';
+  if (!raw) return '';
+  if (raw.length <= 10) return `${raw.slice(0, 2)}...`;
+  return `${raw.slice(0, 3)}...${raw.slice(-4)}`;
+}
+
+function serializeOpenAiKeyRow(row) {
+  if (!row) return null;
+  const createdAt = row.created_at ? new Date(row.created_at) : null;
+  const updatedAt = row.updated_at ? new Date(row.updated_at) : null;
+  const lastUsedAt = row.last_used_at ? new Date(row.last_used_at) : null;
+  return {
+    masked: maskOpenAiKey(row.api_key),
+    createdAt: createdAt ? createdAt.toISOString() : null,
+    updatedAt: updatedAt ? updatedAt.toISOString() : null,
+    lastUsedAt: lastUsedAt ? lastUsedAt.toISOString() : null,
+  };
+}
+
+async function getOpenAiKeyForUser(userId) {
+  const res = await pool.query(
+    `SELECT user_id, api_key, created_at, updated_at, last_used_at
+       FROM openai_keys
+      WHERE user_id = $1`,
+    [userId],
+  );
+  return res.rows[0] ?? null;
+}
+
+async function upsertOpenAiKey({ userId, apiKey }) {
+  const res = await pool.query(
+    `INSERT INTO openai_keys (user_id, api_key)
+     VALUES ($1, $2)
+     ON CONFLICT (user_id) DO UPDATE
+       SET api_key = EXCLUDED.api_key,
+           updated_at = NOW()
+     RETURNING user_id, api_key, created_at, updated_at, last_used_at`,
+    [userId, apiKey],
+  );
+  return res.rows[0] ?? null;
+}
+
+async function deleteOpenAiKey(userId) {
+  await pool.query('DELETE FROM openai_keys WHERE user_id = $1', [userId]);
+}
+
+async function touchOpenAiKey(userId) {
+  await pool.query('UPDATE openai_keys SET last_used_at = NOW() WHERE user_id = $1', [userId]);
+}
+
 async function getSetting(key) {
   const res = await pool.query('SELECT value FROM app_settings WHERE key = $1', [key]);
   return res.rows[0]?.value ?? null;
@@ -457,6 +677,372 @@ async function setSetting(key, value) {
     [key, value],
   );
 }
+
+const MAX_MESSAGE_CHARS = 4000;
+
+const readLocalCache = (key) => {
+  const entry = memoryCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    memoryCache.delete(key);
+    return null;
+  }
+  return entry.value;
+};
+
+const writeLocalCache = (key, value, ttlMs) => {
+  if (!ttlMs) return;
+  memoryCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+};
+
+const cacheGetJson = async (key) => {
+  if (redis) {
+    const value = await redis.get(key);
+    if (value) {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return null;
+      }
+    }
+  }
+  return readLocalCache(key);
+};
+
+const cacheSetJson = async (key, value, ttlMs) => {
+  if (redis) {
+    await redis.set(key, JSON.stringify(value), 'PX', ttlMs);
+  } else {
+    writeLocalCache(key, value, ttlMs);
+  }
+};
+
+const normalizeEmbeddingDim = () => {
+  if (Number.isFinite(EMBEDDING_DIM) && EMBEDDING_DIM > 0) return Math.floor(EMBEDDING_DIM);
+  return 1536;
+};
+
+const toVectorLiteral = (embedding) => `[${embedding.map((val) => (Number.isFinite(val) ? val : 0)).join(',')}]`;
+
+const normalizeMessageContent = (value) => {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return trimmed.slice(0, MAX_MESSAGE_CHARS);
+};
+
+const buildAgentSystemPrompt = ({ sessionId, userName }) => {
+  const base = [
+    'You are Raven, the Smart Tracker AI assistant.',
+    'You can use MCP tools to read and update the canvas.',
+    'Use tools when a user asks to inspect or change the canvas.',
+    'For destructive actions (delete/clear), ask for explicit confirmation first.',
+    'If a tool fails, explain what happened and ask how to proceed.',
+    'Keep responses concise and actionable.',
+  ];
+  if (userName) base.push(`The user name is "${userName}".`);
+  if (sessionId) base.push(`The active sessionId is "${sessionId}".`);
+  return base.join(' ');
+};
+
+const createOpenAiClient = (apiKey) => new OpenAI({
+  apiKey,
+  baseURL: OPENAI_API_BASE_URL,
+  timeout: OPENAI_TIMEOUT_MS,
+});
+
+const hashText = (value) => createHash('sha256').update(value).digest('hex');
+
+const serializeAssistantThreadRow = (row) => ({
+  id: row.id,
+  sessionId: row.session_id ?? null,
+  title: row.title ?? null,
+  createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+  updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+  lastMessageAt: row.last_message_at ? new Date(row.last_message_at).toISOString() : null,
+});
+
+const serializeAssistantMessageRow = (row) => ({
+  id: row.id,
+  role: row.role,
+  content: row.content,
+  createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+});
+
+async function createAssistantThread({ userId, sessionId, title }) {
+  const id = randomUUID();
+  const res = await pool.query(
+    `INSERT INTO assistant_threads (id, user_id, session_id, title)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id, user_id, session_id, title, created_at, updated_at, last_message_at`,
+    [id, userId, sessionId ?? null, title ?? null],
+  );
+  return res.rows[0] ? serializeAssistantThreadRow(res.rows[0]) : null;
+}
+
+async function getAssistantThread(userId, threadId) {
+  const res = await pool.query(
+    `SELECT id, user_id, session_id, title, created_at, updated_at, last_message_at
+       FROM assistant_threads
+      WHERE id = $1 AND user_id = $2`,
+    [threadId, userId],
+  );
+  return res.rows[0] ? serializeAssistantThreadRow(res.rows[0]) : null;
+}
+
+async function listAssistantMessages(threadId, limit = ASSISTANT_CONTEXT_LIMIT) {
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(200, Math.floor(limit)) : ASSISTANT_CONTEXT_LIMIT;
+  const res = await pool.query(
+    `SELECT id, role, content, created_at
+       FROM assistant_messages
+      WHERE thread_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2`,
+    [threadId, safeLimit],
+  );
+  return res.rows.reverse().map(serializeAssistantMessageRow);
+}
+
+async function countAssistantMessages(threadId) {
+  const res = await pool.query(
+    'SELECT COUNT(*) AS count FROM assistant_messages WHERE thread_id = $1',
+    [threadId],
+  );
+  const raw = res.rows[0]?.count;
+  const count = typeof raw === 'string' ? Number(raw) : Number(raw ?? 0);
+  return Number.isFinite(count) ? count : 0;
+}
+
+async function insertAssistantMessage({ threadId, role, content }) {
+  const res = await pool.query(
+    `INSERT INTO assistant_messages (id, thread_id, role, content)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id, role, content, created_at`,
+    [randomUUID(), threadId, role, content],
+  );
+  await pool.query(
+    `UPDATE assistant_threads
+        SET updated_at = NOW(),
+            last_message_at = NOW()
+      WHERE id = $1`,
+    [threadId],
+  );
+  return res.rows[0] ? serializeAssistantMessageRow(res.rows[0]) : null;
+}
+
+async function getAssistantSummary(threadId) {
+  const res = await pool.query(
+    `SELECT summary, updated_at
+       FROM assistant_summaries
+      WHERE thread_id = $1`,
+    [threadId],
+  );
+  return res.rows[0] ?? null;
+}
+
+async function upsertAssistantSummary(threadId, summary) {
+  await pool.query(
+    `INSERT INTO assistant_summaries (thread_id, summary)
+     VALUES ($1, $2)
+     ON CONFLICT (thread_id) DO UPDATE
+       SET summary = EXCLUDED.summary,
+           updated_at = NOW()`,
+    [threadId, summary],
+  );
+}
+
+async function insertAssistantMemory({ userId, threadId, content, embedding }) {
+  if (!Array.isArray(embedding) || embedding.length === 0) return;
+  const vectorValue = VECTOR_ENABLED ? toVectorLiteral(embedding) : embedding;
+  await pool.query(
+    `INSERT INTO assistant_memories (id, user_id, thread_id, content, embedding)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [randomUUID(), userId, threadId, content, vectorValue],
+  );
+}
+
+async function findAssistantMemories({ userId, threadId, embedding, limit }) {
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(20, Math.floor(limit)) : ASSISTANT_MEMORY_K;
+  if (!Array.isArray(embedding) || embedding.length === 0) return [];
+  if (VECTOR_ENABLED) {
+    const vectorLiteral = toVectorLiteral(embedding);
+    const res = await pool.query(
+      `SELECT content
+         FROM assistant_memories
+        WHERE user_id = $1
+          AND thread_id = $2
+        ORDER BY embedding <-> $3
+        LIMIT $4`,
+      [userId, threadId, vectorLiteral, safeLimit],
+    );
+    return res.rows.map((row) => row.content);
+  }
+  const res = await pool.query(
+    `SELECT content
+       FROM assistant_memories
+      WHERE user_id = $1
+        AND thread_id = $2
+      ORDER BY created_at DESC
+      LIMIT $3`,
+    [userId, threadId, safeLimit],
+  );
+  return res.rows.map((row) => row.content);
+}
+
+async function embedText(apiKey, text) {
+  const input = normalizeMessageContent(text);
+  if (!input) return null;
+  const cacheKey = `emb:${OPENAI_EMBEDDING_MODEL}:${hashText(input)}`;
+  const cached = await cacheGetJson(cacheKey);
+  if (Array.isArray(cached)) return cached;
+
+  try {
+    const client = createOpenAiClient(apiKey);
+    const res = await client.embeddings.create({
+      model: OPENAI_EMBEDDING_MODEL,
+      input,
+    });
+    const embedding = res?.data?.[0]?.embedding;
+    if (Array.isArray(embedding)) {
+      await cacheSetJson(cacheKey, embedding, ASSISTANT_CACHE_TTL_MS);
+      return embedding;
+    }
+    return null;
+  } catch (err) {
+    console.warn('[assistant] embedding failed', err?.message ?? err);
+    return null;
+  }
+}
+
+const extractResponseText = (response) => {
+  if (typeof response?.output_text === 'string') return response.output_text;
+  const output = Array.isArray(response?.output) ? response.output : [];
+  for (const item of output) {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    for (const part of content) {
+      if (part?.type === 'output_text' && typeof part.text === 'string') {
+        return part.text;
+      }
+    }
+  }
+  return '';
+};
+
+const buildMemoryBlock = (memories) => {
+  if (!memories || memories.length === 0) return '';
+  const lines = memories.map((m) => `- ${m}`);
+  return `Relevant memory:\n${lines.join('\n')}`;
+};
+
+const buildAssistantContext = async ({ threadId, userId, apiKey }) => {
+  const summaryRow = await getAssistantSummary(threadId);
+  const summary = summaryRow?.summary ? summaryRow.summary.trim() : '';
+  const messages = await listAssistantMessages(threadId, ASSISTANT_CONTEXT_LIMIT);
+  const lastUserMessage = [...messages].reverse().find((msg) => msg.role === 'user')?.content ?? '';
+  const embedding = await embedText(apiKey, lastUserMessage);
+  const memories = embedding ? await findAssistantMemories({
+    userId,
+    threadId,
+    embedding,
+    limit: ASSISTANT_MEMORY_K,
+  }) : [];
+
+  const items = [];
+  if (summary) {
+    items.push({ role: 'system', content: `Conversation summary:\n${summary}` });
+  }
+  const memoryBlock = buildMemoryBlock(memories);
+  if (memoryBlock) {
+    items.push({ role: 'system', content: memoryBlock });
+  }
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      items.push({
+        role: 'assistant',
+        content: [{ type: 'output_text', text: message.content }],
+      });
+      continue;
+    }
+    items.push({ role: message.role, content: message.content });
+  }
+  return items;
+};
+
+const refreshAssistantSummary = async ({ threadId, apiKey }) => {
+  const messageCount = await countAssistantMessages(threadId);
+  if (messageCount < ASSISTANT_SUMMARY_THRESHOLD) return;
+  const summaryRow = await getAssistantSummary(threadId);
+  const existing = summaryRow?.summary ? summaryRow.summary.trim() : '';
+  const messages = await listAssistantMessages(threadId, Math.max(ASSISTANT_CONTEXT_LIMIT * 2, 40));
+  if (!messages.length) return;
+
+  const transcript = messages.map((msg) => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n');
+  const prompt = [
+    'You are summarizing a user/assistant conversation for future context.',
+    'Keep the summary concise and actionable: goals, decisions, preferences, open tasks, and unresolved questions.',
+    existing ? `Previous summary:\n${existing}` : '',
+    `New conversation:\n${transcript}`,
+    `Return a summary under ${ASSISTANT_SUMMARY_MAX_CHARS} characters.`,
+  ].filter(Boolean).join('\n\n');
+
+  const client = createOpenAiClient(apiKey);
+  const response = await client.responses.create({
+    model: OPENAI_SUMMARY_MODEL,
+    input: prompt,
+    temperature: 0.2,
+  });
+  const summary = normalizeMessageContent(extractResponseText(response));
+  if (summary) {
+    await upsertAssistantSummary(threadId, summary.slice(0, ASSISTANT_SUMMARY_MAX_CHARS));
+  }
+};
+
+const scheduleSummaryRefresh = ({ threadId, apiKey }) => {
+  setTimeout(() => {
+    refreshAssistantSummary({ threadId, apiKey }).catch((err) => {
+      console.warn('[assistant] summary refresh failed', err?.message ?? err);
+    });
+  }, 0);
+};
+
+const addAssistantMemory = async ({ threadId, userId, apiKey, userText, assistantText }) => {
+  const combined = `User: ${userText}\nAssistant: ${assistantText}`.slice(0, ASSISTANT_MEMORY_MAX_CHARS);
+  const embedding = await embedText(apiKey, combined);
+  if (!embedding) return;
+  await insertAssistantMemory({
+    userId,
+    threadId,
+    content: combined,
+    embedding,
+  });
+};
+
+const runAssistantTurn = async ({ apiKey, sessionId, userName, inputItems }) => {
+  const client = createOpenAiClient(apiKey);
+  const model = new OpenAIResponsesModel(client, OPENAI_MODEL);
+  const mcpServer = new MCPServerStreamableHttp({
+    url: MCP_SERVER_URL,
+    name: 'Smart Tracker MCP',
+    cacheToolsList: true,
+  });
+  const agent = new Agent({
+    name: 'Smart Tracker Assistant',
+    instructions: buildAgentSystemPrompt({ sessionId, userName }),
+    model,
+    modelSettings: { temperature: 0.3 },
+    mcpServers: [mcpServer],
+  });
+  await mcpServer.connect();
+  try {
+    const result = await run(agent, inputItems, { maxTurns: OPENAI_MAX_TURNS });
+    const output = typeof result.finalOutput === 'string'
+      ? result.finalOutput
+      : JSON.stringify(result.finalOutput ?? '');
+    return normalizeMessageContent(output) || '';
+  } finally {
+    await mcpServer.close();
+  }
+};
 
 async function createSession(id, state, opts = {}) {
   const expiresAt = Object.prototype.hasOwnProperty.call(opts, 'expiresAt') ? opts.expiresAt : new Date(Date.now() + TEMP_SESSION_TTL_MS);
@@ -934,6 +1520,171 @@ app.delete('/api/integrations/mcp/token', async (req, res) => {
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
   await deleteMcpToken(auth.userId);
   res.json({ ok: true });
+});
+
+app.get('/api/integrations/ai/key', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const row = await getOpenAiKeyForUser(auth.userId);
+  res.json({ key: row ? serializeOpenAiKeyRow(row) : null });
+});
+
+app.post('/api/integrations/ai/key', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const rawKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+  if (!rawKey || rawKey.length < 10) return res.status(400).json({ error: 'bad_api_key' });
+  const row = await upsertOpenAiKey({ userId: auth.userId, apiKey: rawKey });
+  res.json({ key: serializeOpenAiKeyRow(row) });
+});
+
+app.delete('/api/integrations/ai/key', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  await deleteOpenAiKey(auth.userId);
+  res.json({ ok: true });
+});
+
+app.post('/api/assistant/chat', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (auth) {
+    logAssistantEvent('legacy_chat', { userId: auth.userId, hasMessages: Array.isArray(req.body?.messages) });
+  } else {
+    logAssistantEvent('legacy_chat', { userId: null });
+  }
+  res.status(410).json({ error: 'assistant_chat_deprecated' });
+});
+
+app.post('/api/assistant/threads', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : null;
+  const rawTitle = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  const title = rawTitle ? rawTitle.slice(0, 120) : null;
+  const thread = await createAssistantThread({
+    userId: auth.userId,
+    sessionId: sessionId || null,
+    title,
+  });
+  logAssistantEvent('thread_create', {
+    userId: auth.userId,
+    threadId: thread?.id ?? null,
+    sessionId: thread?.sessionId ?? null,
+  });
+  res.json({ thread });
+});
+
+app.get('/api/assistant/threads/:id', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const threadId = req.params?.id;
+  if (!threadId) return res.status(400).json({ error: 'thread_required' });
+  const thread = await getAssistantThread(auth.userId, threadId);
+  if (!thread) return res.status(404).json({ error: 'thread_not_found' });
+  logAssistantEvent('thread_get', { userId: auth.userId, threadId });
+  res.json({ thread });
+});
+
+app.get('/api/assistant/threads/:id/messages', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const threadId = req.params?.id;
+  if (!threadId) return res.status(400).json({ error: 'thread_required' });
+  const thread = await getAssistantThread(auth.userId, threadId);
+  if (!thread) return res.status(404).json({ error: 'thread_not_found' });
+  const rawLimit = req.query?.limit;
+  const parsedLimit = typeof rawLimit === 'string' ? Number(rawLimit) : Number(rawLimit ?? NaN);
+  const limit = Number.isFinite(parsedLimit) ? parsedLimit : ASSISTANT_CONTEXT_LIMIT;
+  const messages = await listAssistantMessages(threadId, limit);
+  logAssistantEvent('thread_messages', {
+    userId: auth.userId,
+    threadId,
+    limit,
+    count: messages.length,
+  });
+  res.json({ messages });
+});
+
+app.post('/api/assistant/threads/:id/messages', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const threadId = req.params?.id;
+  if (!threadId) return res.status(400).json({ error: 'thread_required' });
+  const thread = await getAssistantThread(auth.userId, threadId);
+  if (!thread) return res.status(404).json({ error: 'thread_not_found' });
+
+  const userText = normalizeMessageContent(req.body?.content);
+  if (!userText) return res.status(400).json({ error: 'content_required' });
+
+  const user = await getUserById(auth.userId);
+  const keyRow = await getOpenAiKeyForUser(auth.userId);
+  const apiKey = keyRow?.api_key ?? OPENAI_API_KEY;
+  if (!apiKey) return res.status(400).json({ error: 'openai_key_required' });
+
+  try {
+    logAssistantEvent('message_start', {
+      userId: auth.userId,
+      threadId,
+      sessionId: thread.sessionId ?? null,
+      content: userText,
+    });
+    const userMessage = await insertAssistantMessage({
+      threadId,
+      role: 'user',
+      content: userText,
+    });
+    const inputItems = await buildAssistantContext({
+      threadId,
+      userId: auth.userId,
+      apiKey,
+    });
+    const assistantText = await runAssistantTurn({
+      apiKey,
+      sessionId: thread.sessionId,
+      userName: user?.name ?? null,
+      inputItems,
+    });
+    const reply = assistantText || 'No response returned.';
+    const assistantMessage = await insertAssistantMessage({
+      threadId,
+      role: 'assistant',
+      content: reply,
+    });
+    scheduleSummaryRefresh({ threadId, apiKey });
+    if (userText && reply) {
+      await addAssistantMemory({
+        threadId,
+        userId: auth.userId,
+        apiKey,
+        userText,
+        assistantText: reply,
+      });
+    }
+    if (keyRow) {
+      await touchOpenAiKey(auth.userId);
+    }
+    logAssistantEvent('message_done', {
+      userId: auth.userId,
+      threadId,
+      assistantMessageId: assistantMessage?.id ?? null,
+    });
+    res.json({
+      message: reply,
+      userMessage,
+      assistantMessage,
+    });
+  } catch (err) {
+    const status = err?.statusCode ?? err?.status;
+    logAssistantEvent('message_error', {
+      userId: auth.userId,
+      threadId,
+      status: status ?? null,
+      error: err?.message ?? String(err),
+    });
+    if (status === 401) return res.status(401).json({ error: 'invalid_openai_key' });
+    if (status === 429) return res.status(429).json({ error: 'openai_rate_limited' });
+    res.status(502).json({ error: err?.message ?? 'assistant_failed' });
+  }
 });
 
 app.post('/api/integrations/mcp/verify', async (req, res) => {

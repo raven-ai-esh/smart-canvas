@@ -25,6 +25,12 @@ type McpTokenInfo = {
   expiresAt: string | null;
   lastUsedAt: string | null;
 };
+type AiKeyInfo = {
+  masked: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  lastUsedAt: string | null;
+};
 
 const mcpExpiryOptions = [
   { value: '30', label: '30 days' },
@@ -542,9 +548,12 @@ export const Presence: React.FC = () => {
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [integrationsBusy, setIntegrationsBusy] = useState(false);
   const [integrationsMessage, setIntegrationsMessage] = useState<string | null>(null);
+  const [integrationsTab, setIntegrationsTab] = useState<'mcp' | 'ai'>('mcp');
   const [mcpTokenInfo, setMcpTokenInfo] = useState<McpTokenInfo | null>(null);
   const [mcpTokenValue, setMcpTokenValue] = useState<string | null>(null);
   const [mcpExpiryChoice, setMcpExpiryChoice] = useState('90');
+  const [aiKeyInfo, setAiKeyInfo] = useState<AiKeyInfo | null>(null);
+  const [aiKeyInput, setAiKeyInput] = useState('');
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   const selfId = presence.selfId;
@@ -562,6 +571,7 @@ export const Presence: React.FC = () => {
   const guestOverlap = Math.round(guestAvatarSize * 0.28);
   const myGuestSeed = !me ? mySeed : '';
   const mcpStatusLabel = mcpTokenInfo ? 'Active' : 'Not generated';
+  const aiStatusLabel = aiKeyInfo ? 'Active' : 'Not set';
 
   const normalizedOthers = useMemo(() => {
     const filtered = myGuestSeed
@@ -604,6 +614,7 @@ export const Presence: React.FC = () => {
   const openIntegrations = () => {
     if (!me) return;
     setOpen(false);
+    setIntegrationsTab('mcp');
     setIntegrationsOpen(true);
   };
 
@@ -629,6 +640,7 @@ export const Presence: React.FC = () => {
     setIntegrationsBusy(false);
     setIntegrationsMessage(null);
     setMcpTokenValue(null);
+    setAiKeyInput('');
   };
 
   const formatDateTime = (value: string | null) => {
@@ -715,6 +727,71 @@ export const Presence: React.FC = () => {
     }
   };
 
+  const loadAiKey = async () => {
+    setIntegrationsBusy(true);
+    setIntegrationsMessage(null);
+    setAiKeyInfo(null);
+    try {
+      const res = await fetch('/api/integrations/ai/key');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setIntegrationsMessage('Failed to load AI key');
+        return;
+      }
+      setAiKeyInfo(data?.key ?? null);
+    } catch {
+      setIntegrationsMessage('Failed to load AI key');
+    } finally {
+      setIntegrationsBusy(false);
+    }
+  };
+
+  const saveAiKey = async () => {
+    const key = aiKeyInput.trim();
+    if (!key) return;
+    setIntegrationsBusy(true);
+    setIntegrationsMessage(null);
+    try {
+      const res = await fetch('/api/integrations/ai/key', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apiKey: key }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setIntegrationsMessage('Failed to save AI key');
+        return;
+      }
+      setAiKeyInfo(data?.key ?? null);
+      setAiKeyInput('');
+      setIntegrationsMessage('AI key saved');
+    } catch {
+      setIntegrationsMessage('Failed to save AI key');
+    } finally {
+      setIntegrationsBusy(false);
+    }
+  };
+
+  const revokeAiKey = async () => {
+    if (!window.confirm('Remove the saved OpenAI key?')) return;
+    setIntegrationsBusy(true);
+    setIntegrationsMessage(null);
+    try {
+      const res = await fetch('/api/integrations/ai/key', { method: 'DELETE' });
+      if (!res.ok) {
+        setIntegrationsMessage('Failed to remove AI key');
+        return;
+      }
+      setAiKeyInfo(null);
+      setAiKeyInput('');
+      setIntegrationsMessage('AI key removed');
+    } catch {
+      setIntegrationsMessage('Failed to remove AI key');
+    } finally {
+      setIntegrationsBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (!settingsOpen) return;
     // Seed the settings form from the latest profile data.
@@ -745,8 +822,17 @@ export const Presence: React.FC = () => {
   useEffect(() => {
     if (!integrationsOpen) return;
     setMcpTokenValue(null);
-    loadMcpToken();
-  }, [integrationsOpen]);
+    if (integrationsTab === 'mcp') {
+      loadMcpToken();
+    } else if (integrationsTab === 'ai') {
+      loadAiKey();
+    }
+  }, [integrationsOpen, integrationsTab]);
+
+  useEffect(() => {
+    if (!integrationsOpen) return;
+    setIntegrationsMessage(null);
+  }, [integrationsOpen, integrationsTab]);
 
   useEffect(() => {
     if (integrationsOpen && !me) {
@@ -1806,7 +1892,35 @@ export const Presence: React.FC = () => {
                 </button>
               </div>
 
+              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                {[
+                  { key: 'mcp' as const, label: 'MCP' },
+                  { key: 'ai' as const, label: 'AI' },
+                ].map((tab) => {
+                  const active = integrationsTab === tab.key;
+                  return (
+                    <button
+                      key={tab.key}
+                      type="button"
+                      onClick={() => setIntegrationsTab(tab.key)}
+                      style={{
+                        borderRadius: 999,
+                        border: '1px solid var(--border-strong)',
+                        background: active ? 'var(--accent-glow)' : 'transparent',
+                        color: 'var(--text-primary)',
+                        padding: '6px 12px',
+                        fontSize: 12,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+
               <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
+                {integrationsTab === 'mcp' && (
                 <div
                   style={{
                     borderRadius: 14,
@@ -1975,6 +2089,131 @@ export const Presence: React.FC = () => {
                     <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{integrationsMessage}</div>
                   )}
                 </div>
+                )}
+
+                {integrationsTab === 'ai' && (
+                <div
+                  style={{
+                    borderRadius: 14,
+                    border: '1px solid var(--border-strong)',
+                    background: 'rgba(255,255,255,0.03)',
+                    padding: 12,
+                    display: 'grid',
+                    gap: 10,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>AI</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>OpenAI API key</div>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-secondary)',
+                      padding: '10px 12px',
+                      borderRadius: 12,
+                      border: '1px solid var(--border-strong)',
+                      background: 'rgba(15, 20, 28, 0.45)',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    Store an OpenAI API key to enable the in-app assistant. The key is saved to your account.
+                  </div>
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                      Key status
+                    </div>
+                    <div style={{ display: 'grid', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                        <span>Status</span>
+                        <span style={{ color: aiKeyInfo ? 'var(--text-primary)' : 'var(--text-secondary)' }}>{aiStatusLabel}</span>
+                      </div>
+                      {aiKeyInfo && (
+                        <>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                            <span>Key</span>
+                            <span>{aiKeyInfo.masked}</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                            <span>Updated</span>
+                            <span>{formatDateTime(aiKeyInfo.updatedAt ?? aiKeyInfo.createdAt)}</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                            <span>Last used</span>
+                            <span>{formatDateTime(aiKeyInfo.lastUsedAt)}</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                      API key
+                    </div>
+                    <input
+                      value={aiKeyInput}
+                      onChange={(e) => setAiKeyInput(e.target.value)}
+                      type="password"
+                      placeholder="sk-..."
+                      disabled={integrationsBusy}
+                      style={{
+                        width: '100%',
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'rgba(15, 20, 28, 0.45)',
+                        color: 'var(--text-primary)',
+                        padding: '8px 10px',
+                        fontSize: 12,
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      onClick={saveAiKey}
+                      disabled={integrationsBusy || !aiKeyInput.trim()}
+                      style={{
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'var(--accent-primary)',
+                        color: '#fff',
+                        padding: '8px 12px',
+                        cursor: integrationsBusy || !aiKeyInput.trim() ? 'not-allowed' : 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 8,
+                      }}
+                    >
+                      <span>{aiKeyInfo ? 'Update key' : 'Save key'}</span>
+                      {integrationsBusy && <LoadingSpinner size={12} />}
+                    </button>
+                    {aiKeyInfo && (
+                      <button
+                        type="button"
+                        onClick={revokeAiKey}
+                        disabled={integrationsBusy}
+                        style={{
+                          borderRadius: 12,
+                          border: '1px solid var(--border-strong)',
+                          background: 'transparent',
+                          color: 'var(--text-primary)',
+                          padding: '8px 12px',
+                          cursor: integrationsBusy ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        Remove key
+                      </button>
+                    )}
+                  </div>
+
+                  {integrationsMessage && (
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{integrationsMessage}</div>
+                  )}
+                </div>
+                )}
               </div>
             </div>
           </div>

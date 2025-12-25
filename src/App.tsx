@@ -2,6 +2,7 @@ import { Canvas } from './components/Canvas/Canvas';
 import { Controls } from './components/Controls/Controls';
 import { Presence } from './components/Presence/Presence';
 import { SessionBar } from './components/SessionBar/SessionBar';
+import { AgentWidget } from './components/AgentWidget/AgentWidget';
 import { useEffect } from 'react';
 import { useSessionSync } from './hooks/useSessionSync';
 import { useAuth } from './hooks/useAuth';
@@ -28,6 +29,7 @@ function App() {
       <SessionBar />
       <Presence />
       <Controls />
+      <AgentWidget />
     </div>
   );
 }
