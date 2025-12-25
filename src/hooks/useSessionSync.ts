@@ -3,6 +3,7 @@ import { useStore } from '../store/useStore';
 import { computeEffectiveEnergy } from '../utils/energy';
 import { mergeSessionState, normalizeSessionState, type SessionState } from '../utils/sessionMerge';
 import { debugLog } from '../utils/debug';
+import html2canvas from 'html2canvas';
 
 function getSessionIdFromUrl() {
   return new URLSearchParams(window.location.search).get('session');
@@ -181,6 +182,281 @@ export function useSessionSync() {
       reconnectTimer.current = null;
     };
 
+    const applyCanvasViewAction = (action: string, nodeId: string | null) => {
+      if (typeof window === 'undefined' || typeof document === 'undefined') return false;
+      const MIN_SCALE = 0.1;
+      const MAX_SCALE = 5;
+      const ZOOM_DETAIL = 1.12;
+      const ZOOM_GRAPH = 0.58;
+      const clampScale = (scale: number) => Math.min(Math.max(scale, MIN_SCALE), MAX_SCALE);
+      const getViewportMetrics = () => {
+        const viewport = window.visualViewport;
+        const width = viewport?.width ?? window.innerWidth;
+        const height = viewport?.height ?? window.innerHeight;
+        return { width, height, centerX: width / 2, centerY: height / 2 };
+      };
+      const centerOnWorldPoint = (worldX: number, worldY: number, targetScale: number) => {
+        const { centerX, centerY } = getViewportMetrics();
+        const nextScale = clampScale(targetScale);
+        const nextX = centerX - worldX * nextScale;
+        const nextY = centerY - worldY * nextScale;
+        useStore.getState().setCanvasTransform(nextX, nextY, nextScale);
+      };
+      const applyZoomPreset = (targetScale: number) => {
+        const { centerX, centerY } = getViewportMetrics();
+        const canvas = useStore.getState().canvas;
+        const worldX = (centerX - canvas.x) / canvas.scale;
+        const worldY = (centerY - canvas.y) / canvas.scale;
+        centerOnWorldPoint(worldX, worldY, targetScale);
+      };
+      const applyZoomToFit = () => {
+        const st = useStore.getState();
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+
+        const addRect = (x: number, y: number, width: number, height: number) => {
+          if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) return;
+          minX = Math.min(minX, x);
+          minY = Math.min(minY, y);
+          maxX = Math.max(maxX, x + width);
+          maxY = Math.max(maxY, y + height);
+        };
+
+        const getNodeSize = (id: string) => {
+          const el = document.querySelector<HTMLElement>(`[data-node-rect="true"][data-node-rect-id="${id}"]`);
+          if (!el) return null;
+          const rect = el.getBoundingClientRect();
+          const scale = Math.max(0.0001, useStore.getState().canvas.scale);
+          return { width: rect.width / scale, height: rect.height / scale };
+        };
+
+        for (const node of st.nodes) {
+          const size = getNodeSize(node.id) ?? { width: 240, height: 120 };
+          addRect(node.x - size.width / 2, node.y - size.height / 2, size.width, size.height);
+        }
+
+        for (const box of st.textBoxes) {
+          addRect(box.x, box.y, box.width, box.height);
+        }
+
+        for (const drawing of st.drawings) {
+          const points = Array.isArray(drawing.points) ? drawing.points : [];
+          if (points.length === 0) continue;
+          let dMinX = Infinity;
+          let dMinY = Infinity;
+          let dMaxX = -Infinity;
+          let dMaxY = -Infinity;
+          for (const pt of points) {
+            if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) continue;
+            dMinX = Math.min(dMinX, pt.x);
+            dMinY = Math.min(dMinY, pt.y);
+            dMaxX = Math.max(dMaxX, pt.x);
+            dMaxY = Math.max(dMaxY, pt.y);
+          }
+          if (!Number.isFinite(dMinX) || !Number.isFinite(dMinY) || !Number.isFinite(dMaxX) || !Number.isFinite(dMaxY)) continue;
+          addRect(dMinX, dMinY, dMaxX - dMinX, dMaxY - dMinY);
+        }
+
+        for (const comment of st.comments) {
+          if (comment.targetKind !== 'canvas') continue;
+          const cx = comment.x;
+          const cy = comment.y;
+          if (typeof cx !== 'number' || typeof cy !== 'number') continue;
+          const size = 24;
+          addRect(cx - size / 2, cy - size / 2, size, size);
+        }
+
+        if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) return;
+
+        const { width, height } = getViewportMetrics();
+        const padding = 160;
+        const viewW = Math.max(1, width - padding * 2);
+        const viewH = Math.max(1, height - padding * 2);
+        const boundsW = Math.max(1, maxX - minX);
+        const boundsH = Math.max(1, maxY - minY);
+        const targetScale = clampScale(Math.min(viewW / boundsW, viewH / boundsH));
+        const centerX = (minX + maxX) / 2;
+        const centerY = (minY + maxY) / 2;
+        centerOnWorldPoint(centerX, centerY, targetScale);
+      };
+
+      if (action === 'zoom_to_cards') {
+        applyZoomPreset(ZOOM_DETAIL);
+        return true;
+      }
+      if (action === 'zoom_to_graph') {
+        applyZoomPreset(ZOOM_GRAPH);
+        return true;
+      }
+      if (action === 'zoom_to_fit') {
+        applyZoomToFit();
+        return true;
+      }
+      if (action === 'focus_node') {
+        if (nodeId) {
+          const node = useStore.getState().nodes.find((candidate) => candidate.id === nodeId);
+          if (node) {
+            centerOnWorldPoint(node.x, node.y, ZOOM_DETAIL);
+            return true;
+          }
+        }
+        return false;
+      }
+      return false;
+    };
+
+    const computeActiveBounds = () => {
+      const st = useStore.getState();
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+
+      const addRect = (x: number, y: number, width: number, height: number) => {
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) return;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x + width);
+        maxY = Math.max(maxY, y + height);
+      };
+
+      const getNodeSize = (id: string) => {
+        const el = document.querySelector<HTMLElement>(`[data-node-rect="true"][data-node-rect-id="${id}"]`);
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        const scale = Math.max(0.0001, useStore.getState().canvas.scale);
+        return { width: rect.width / scale, height: rect.height / scale };
+      };
+
+      for (const node of st.nodes) {
+        const size = getNodeSize(node.id) ?? { width: 240, height: 120 };
+        addRect(node.x - size.width / 2, node.y - size.height / 2, size.width, size.height);
+      }
+
+      for (const box of st.textBoxes) {
+        addRect(box.x, box.y, box.width, box.height);
+      }
+
+      for (const drawing of st.drawings) {
+        const points = Array.isArray(drawing.points) ? drawing.points : [];
+        if (points.length === 0) continue;
+        let dMinX = Infinity;
+        let dMinY = Infinity;
+        let dMaxX = -Infinity;
+        let dMaxY = -Infinity;
+        for (const pt of points) {
+          if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) continue;
+          dMinX = Math.min(dMinX, pt.x);
+          dMinY = Math.min(dMinY, pt.y);
+          dMaxX = Math.max(dMaxX, pt.x);
+          dMaxY = Math.max(dMaxY, pt.y);
+        }
+        if (!Number.isFinite(dMinX) || !Number.isFinite(dMinY) || !Number.isFinite(dMaxX) || !Number.isFinite(dMaxY)) continue;
+        addRect(dMinX, dMinY, dMaxX - dMinX, dMaxY - dMinY);
+      }
+
+      for (const comment of st.comments) {
+        if (comment.targetKind !== 'canvas') continue;
+        const cx = comment.x;
+        const cy = comment.y;
+        if (typeof cx !== 'number' || typeof cy !== 'number') continue;
+        const size = 24;
+        addRect(cx - size / 2, cy - size / 2, size, size);
+      }
+
+      if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) return null;
+      return { minX, minY, maxX, maxY };
+    };
+
+    const captureActiveSnapshot = async (requestId: string) => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (typeof window === 'undefined' || typeof document === 'undefined') return;
+      const container = document.querySelector<HTMLElement>('[data-canvas-root="true"]');
+      if (!container) {
+        ws.send(JSON.stringify({ type: 'canvas_snapshot_response', requestId, error: 'canvas_root_missing' }));
+        return;
+      }
+      const bounds = computeActiveBounds();
+      if (!bounds) {
+        ws.send(JSON.stringify({ type: 'canvas_snapshot_response', requestId, error: 'no_objects' }));
+        return;
+      }
+
+      const prev = useStore.getState().canvas;
+      const { width, height } = (() => {
+        const viewport = window.visualViewport;
+        const w = viewport?.width ?? window.innerWidth;
+        const h = viewport?.height ?? window.innerHeight;
+        return { width: w, height: h };
+      })();
+      const padding = 140;
+      const viewW = Math.max(1, width - padding * 2);
+      const viewH = Math.max(1, height - padding * 2);
+      const boundsW = Math.max(1, bounds.maxX - bounds.minX);
+      const boundsH = Math.max(1, bounds.maxY - bounds.minY);
+      const targetScale = Math.min(Math.max(Math.min(viewW / boundsW, viewH / boundsH), 0.1), 5);
+      const centerX = (bounds.minX + bounds.maxX) / 2;
+      const centerY = (bounds.minY + bounds.maxY) / 2;
+      const nextX = width / 2 - centerX * targetScale;
+      const nextY = height / 2 - centerY * targetScale;
+
+      useStore.getState().setCanvasTransform(nextX, nextY, targetScale);
+
+      const waitFrames = (count: number) => new Promise<void>((resolve) => {
+        let remaining = count;
+        const tick = () => {
+          remaining -= 1;
+          if (remaining <= 0) resolve();
+          else requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+
+      try {
+        await waitFrames(2);
+        const rect = container.getBoundingClientRect();
+        const screenshotPadding = 24;
+        const screenMinX = bounds.minX * targetScale + nextX - rect.left - screenshotPadding;
+        const screenMinY = bounds.minY * targetScale + nextY - rect.top - screenshotPadding;
+        const screenMaxX = bounds.maxX * targetScale + nextX - rect.left + screenshotPadding;
+        const screenMaxY = bounds.maxY * targetScale + nextY - rect.top + screenshotPadding;
+        const cropX = Math.max(0, Math.floor(screenMinX));
+        const cropY = Math.max(0, Math.floor(screenMinY));
+        const cropW = Math.max(1, Math.min(rect.width, Math.ceil(screenMaxX)) - cropX);
+        const cropH = Math.max(1, Math.min(rect.height, Math.ceil(screenMaxY)) - cropY);
+        const shot = await html2canvas(container, {
+          backgroundColor: null,
+          logging: false,
+          useCORS: true,
+          allowTaint: true,
+          scale: window.devicePixelRatio || 1,
+          x: cropX,
+          y: cropY,
+          width: cropW,
+          height: cropH,
+        });
+        const dataUrl = shot.toDataURL('image/png');
+        ws.send(JSON.stringify({
+          type: 'canvas_snapshot_response',
+          requestId,
+          dataUrl,
+          width: shot.width,
+          height: shot.height,
+        }));
+      } catch (err) {
+        ws.send(JSON.stringify({
+          type: 'canvas_snapshot_response',
+          requestId,
+          error: err instanceof Error ? err.message : 'snapshot_failed',
+        }));
+      } finally {
+        useStore.getState().setCanvasTransform(prev.x, prev.y, prev.scale);
+      }
+    };
+
     const applyRemote = (remote: SessionState, source: 'fetch' | 'ws_sync' | 'ws_update') => {
       applyingRemoteRef.current = true;
       try {
@@ -294,6 +570,27 @@ export function useSessionSync() {
         try {
           msg = JSON.parse(String(evt.data));
         } catch {
+          return;
+        }
+
+        if (msg?.type === 'canvas_view') {
+          const action = typeof msg?.action === 'string' ? msg.action : null;
+          if (action) {
+            const nodeId = typeof msg?.nodeId === 'string' ? msg.nodeId : null;
+            const id = typeof crypto?.randomUUID === 'function'
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            useStore.getState().setCanvasViewCommand({ id, action, nodeId });
+            applyCanvasViewAction(action, nodeId);
+          }
+          return;
+        }
+
+        if (msg?.type === 'canvas_snapshot_request') {
+          const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null;
+          if (requestId) {
+            void captureActiveSnapshot(requestId);
+          }
           return;
         }
 

@@ -89,6 +89,8 @@ interface AppState {
     sessionExpiresAt: string | null;
     setSessionId: (id: string | null) => void;
     setSessionMeta: (meta: { name?: string | null; saved?: boolean; ownerId?: string | null; expiresAt?: string | null }) => void;
+    canvasViewCommand: CanvasViewCommand | null;
+    setCanvasViewCommand: (command: CanvasViewCommand | null) => void;
     textBoxes: TextBox[];
     comments: Comment[];
     editingTextBoxId: string | null;
@@ -192,6 +194,13 @@ interface AppState {
     toggleSnow: () => void;
 }
 
+type CanvasViewAction = 'focus_node' | 'zoom_to_cards' | 'zoom_to_graph' | 'zoom_to_fit';
+type CanvasViewCommand = {
+    id: string;
+    action: CanvasViewAction;
+    nodeId?: string | null;
+};
+
 const snapshotOf = (state: Pick<AppState, 'nodes' | 'edges' | 'drawings' | 'textBoxes' | 'tombstones'>): UndoSnapshot => ({
     nodes: state.nodes,
     edges: state.edges,
@@ -272,6 +281,8 @@ export const useStore = create<AppState>()(
                 sessionOwnerId: Object.prototype.hasOwnProperty.call(meta, 'ownerId') ? meta.ownerId ?? null : state.sessionOwnerId,
                 sessionExpiresAt: Object.prototype.hasOwnProperty.call(meta, 'expiresAt') ? meta.expiresAt ?? null : state.sessionExpiresAt,
             })),
+            canvasViewCommand: null,
+            setCanvasViewCommand: (command) => set({ canvasViewCommand: command }),
             textBoxes: [],
             comments: [],
             editingTextBoxId: null,

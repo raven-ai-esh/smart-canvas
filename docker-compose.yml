@@ -37,6 +37,22 @@ services:
       - db
     restart: always
 
+  mcp:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    command: ["node", "server/mcp/canvas-server.js"]
+    environment:
+      MCP_TRANSPORT: "http"
+      MCP_HTTP_PORT: "7010"
+      CANVAS_BASE_URL: "http://api:8787"
+      CANVAS_WS_URL: "ws://api:8787/ws"
+    depends_on:
+      - api
+    ports:
+      - "7010:7010"
+    restart: always
+
   db:
     image: postgres:16-alpine
     environment:

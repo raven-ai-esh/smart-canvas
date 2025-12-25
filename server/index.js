@@ -31,6 +31,9 @@ const TEST_USER_PASSWORD = process.env.TEST_USER_PASSWORD ?? '';
 const TEST_USER_NAME = process.env.TEST_USER_NAME ?? 'Test User';
 const TEMP_SESSION_TTL_DAYS = Number(process.env.TEMP_SESSION_TTL_DAYS ?? 7);
 const TEMP_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * (Number.isFinite(TEMP_SESSION_TTL_DAYS) && TEMP_SESSION_TTL_DAYS > 0 ? TEMP_SESSION_TTL_DAYS : 7);
+const MCP_TOKEN_DEFAULT_TTL_DAYS = Number(process.env.MCP_TOKEN_DEFAULT_TTL_DAYS ?? 90);
+const MCP_TOKEN_MAX_TTL_DAYS = Number(process.env.MCP_TOKEN_MAX_TTL_DAYS ?? 365);
+const MCP_SNAPSHOT_TIMEOUT_MS = Number(process.env.MCP_SNAPSHOT_TIMEOUT_MS ?? 12000);
 const parseCorsOrigin = (v) => {
   if (v === undefined) return true;
   if (v === 'true') return true;
@@ -160,6 +163,22 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mcp_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ,
+      last_used_at TIMESTAMPTZ
+    );
+  `);
+  try {
+    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS mcp_tokens_user_id_idx ON mcp_tokens (user_id)');
+  } catch {
+    // ignore
+  }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -377,6 +396,52 @@ async function consumeEmailChangeToken(tokenHash) {
   } finally {
     client.release();
   }
+}
+
+async function getMcpTokenForUser(userId) {
+  const res = await pool.query(
+    `SELECT id, user_id, token_hash, created_at, expires_at, last_used_at
+       FROM mcp_tokens
+      WHERE user_id = $1`,
+    [userId],
+  );
+  return res.rows[0] ?? null;
+}
+
+async function upsertMcpToken({ userId, tokenHash, expiresAt }) {
+  const tokenId = randomUUID();
+  const res = await pool.query(
+    `INSERT INTO mcp_tokens (id, user_id, token_hash, expires_at)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id) DO UPDATE
+       SET token_hash = EXCLUDED.token_hash,
+           expires_at = EXCLUDED.expires_at,
+           created_at = NOW(),
+           last_used_at = NULL
+     RETURNING id, user_id, created_at, expires_at, last_used_at`,
+    [tokenId, userId, tokenHash, expiresAt ?? null],
+  );
+  return res.rows[0] ?? null;
+}
+
+async function deleteMcpToken(userId) {
+  await pool.query('DELETE FROM mcp_tokens WHERE user_id = $1', [userId]);
+}
+
+async function getMcpTokenByHash(tokenHash) {
+  const res = await pool.query(
+    `SELECT t.user_id, t.created_at, t.expires_at, t.last_used_at,
+            u.id, u.name, u.avatar_seed, u.avatar_url, u.avatar_animal, u.avatar_color
+       FROM mcp_tokens t
+       JOIN users u ON u.id = t.user_id
+      WHERE t.token_hash = $1`,
+    [tokenHash],
+  );
+  return res.rows[0] ?? null;
+}
+
+async function touchMcpToken(tokenHash) {
+  await pool.query('UPDATE mcp_tokens SET last_used_at = NOW() WHERE token_hash = $1', [tokenHash]);
 }
 
 async function getSetting(key) {
@@ -618,6 +683,39 @@ function sanitizeReturnTo(v) {
   return v;
 }
 
+function resolveMcpTokenExpiresAt(raw) {
+  if (raw === null) return null;
+  const fallback = Number.isFinite(MCP_TOKEN_DEFAULT_TTL_DAYS) && MCP_TOKEN_DEFAULT_TTL_DAYS > 0 ? MCP_TOKEN_DEFAULT_TTL_DAYS : 90;
+  const maxDays = Number.isFinite(MCP_TOKEN_MAX_TTL_DAYS) && MCP_TOKEN_MAX_TTL_DAYS > 0 ? MCP_TOKEN_MAX_TTL_DAYS : 365;
+  const value = raw === undefined ? fallback : Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  const days = Math.min(Math.floor(value), maxDays);
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+}
+
+function serializeMcpTokenRow(row) {
+  if (!row) return null;
+  const createdAt = row.created_at ? new Date(row.created_at) : null;
+  const expiresAt = row.expires_at ? new Date(row.expires_at) : null;
+  const lastUsedAt = row.last_used_at ? new Date(row.last_used_at) : null;
+  return {
+    createdAt: createdAt ? createdAt.toISOString() : null,
+    expiresAt: expiresAt ? expiresAt.toISOString() : null,
+    lastUsedAt: lastUsedAt ? lastUsedAt.toISOString() : null,
+  };
+}
+
+function getBearerToken(req) {
+  const header = req.headers?.authorization;
+  if (typeof header === 'string' && header.toLowerCase().startsWith('bearer ')) {
+    return header.slice(7).trim();
+  }
+  const alt = req.headers?.['x-mcp-token'];
+  if (typeof alt === 'string') return alt.trim();
+  if (Array.isArray(alt) && alt.length) return String(alt[0]).trim();
+  return null;
+}
+
 function setAuthCookie(res, token) {
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
@@ -802,6 +900,167 @@ app.patch('/api/auth/me', async (req, res) => {
     emailChangeSent,
     devEmailChangeUrl,
   });
+});
+
+app.get('/api/integrations/mcp/token', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const row = await getMcpTokenForUser(auth.userId);
+  if (!row) return res.json({ token: null });
+  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+    await deleteMcpToken(auth.userId);
+    return res.json({ token: null });
+  }
+  res.json({ token: serializeMcpTokenRow(row) });
+});
+
+app.post('/api/integrations/mcp/token', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const expiresAt = resolveMcpTokenExpiresAt(req.body?.expiresInDays);
+  if (expiresAt === undefined) return res.status(400).json({ error: 'bad_expiry' });
+  const rawToken = `mcp_${randomBytes(24).toString('base64url')}`;
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const row = await upsertMcpToken({ userId: auth.userId, tokenHash, expiresAt });
+  if (!row) return res.status(500).json({ error: 'token_create_failed' });
+  res.json({
+    token: serializeMcpTokenRow(row),
+    rawToken,
+  });
+});
+
+app.delete('/api/integrations/mcp/token', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  await deleteMcpToken(auth.userId);
+  res.json({ ok: true });
+});
+
+app.post('/api/integrations/mcp/verify', async (req, res) => {
+  const headerToken = getBearerToken(req);
+  const bodyToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  const rawToken = headerToken || bodyToken;
+  if (!rawToken) return res.status(400).json({ error: 'token_required' });
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const row = await getMcpTokenByHash(tokenHash);
+  if (!row) return res.status(401).json({ error: 'invalid_token' });
+  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+    await deleteMcpToken(row.user_id);
+    return res.status(401).json({ error: 'token_expired' });
+  }
+  await touchMcpToken(tokenHash);
+  res.json({
+    ok: true,
+    token: {
+      expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+    },
+    user: {
+      id: row.user_id,
+      name: row.name,
+      avatarSeed: row.avatar_seed,
+      avatarUrl: row.avatar_url,
+      avatarAnimal: row.avatar_animal,
+      avatarColor: row.avatar_color,
+    },
+  });
+});
+
+const MCP_VIEW_ACTIONS = new Set(['focus_node', 'zoom_to_cards', 'zoom_to_graph', 'zoom_to_fit']);
+
+app.post('/api/integrations/mcp/view', async (req, res) => {
+  const headerToken = getBearerToken(req);
+  const bodyToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  const rawToken = headerToken || bodyToken;
+  if (!rawToken) return res.status(400).json({ error: 'token_required' });
+
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const row = await getMcpTokenByHash(tokenHash);
+  if (!row) return res.status(401).json({ error: 'invalid_token' });
+  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+    await deleteMcpToken(row.user_id);
+    return res.status(401).json({ error: 'token_expired' });
+  }
+  await touchMcpToken(tokenHash);
+
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+  if (!sessionId) return res.status(400).json({ error: 'session_id_required' });
+
+  const action = typeof req.body?.action === 'string' ? req.body.action : '';
+  if (!MCP_VIEW_ACTIONS.has(action)) return res.status(400).json({ error: 'bad_action' });
+
+  const session = await getSession(sessionId);
+  if (!session) return res.status(404).json({ error: 'session_not_found' });
+
+  const payload = {
+    type: 'canvas_view',
+    action,
+    sessionId,
+  };
+
+  if (action === 'focus_node') {
+    const nodeId = typeof req.body?.nodeId === 'string' ? req.body.nodeId.trim() : '';
+    if (!nodeId) return res.status(400).json({ error: 'node_id_required' });
+    payload.nodeId = nodeId;
+  }
+
+  if (Number.isFinite(req.body?.scale)) {
+    payload.scale = Number(req.body.scale);
+  }
+
+  const delivered = sendCanvasViewToUser(sessionId, row.user_id, payload);
+  console.log('[mcp-view]', JSON.stringify({
+    action,
+    sessionId,
+    userId: row.user_id,
+    delivered,
+    nodeId: payload.nodeId ?? null,
+    scale: payload.scale ?? null,
+  }));
+  res.json({ ok: true, delivered, sessionId });
+});
+
+app.post('/api/integrations/mcp/snapshot', async (req, res) => {
+  const headerToken = getBearerToken(req);
+  const bodyToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  const rawToken = headerToken || bodyToken;
+  if (!rawToken) return res.status(400).json({ error: 'token_required' });
+
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const row = await getMcpTokenByHash(tokenHash);
+  if (!row) return res.status(401).json({ error: 'invalid_token' });
+  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+    await deleteMcpToken(row.user_id);
+    return res.status(401).json({ error: 'token_expired' });
+  }
+  await touchMcpToken(tokenHash);
+
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+  if (!sessionId) return res.status(400).json({ error: 'session_id_required' });
+
+  const session = await getSession(sessionId);
+  if (!session) return res.status(404).json({ error: 'session_not_found' });
+
+  try {
+    const rawTimeout = req.body?.timeoutMs;
+    const timeoutMs = Number.isFinite(rawTimeout)
+      ? Number(rawTimeout)
+      : (typeof rawTimeout === 'string' && rawTimeout.trim() ? Number(rawTimeout) : undefined);
+    const result = await requestCanvasSnapshot(sessionId, row.user_id, { timeoutMs });
+    res.json({
+      ok: true,
+      sessionId,
+      image: {
+        dataUrl: result.dataUrl ?? null,
+        width: result.width ?? null,
+        height: result.height ?? null,
+      },
+    });
+  } catch (err) {
+    const msg = err?.message ?? String(err);
+    if (msg === 'snapshot_client_not_connected') return res.status(409).json({ error: 'client_not_connected' });
+    if (msg === 'snapshot_timeout') return res.status(504).json({ error: 'snapshot_timeout' });
+    res.status(500).json({ error: 'snapshot_failed' });
+  }
 });
 
 app.get('/api/auth/providers', async (_req, res) => {
@@ -1371,6 +1630,7 @@ app.post('/api/sessions/:id/save', async (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 const rooms = new Map();
+const snapshotRequests = new Map();
 
 function roomFor(sessionId) {
   let set = rooms.get(sessionId);
@@ -1389,6 +1649,92 @@ function broadcast(sessionId, message) {
   }
 }
 
+function sendToUser(sessionId, userId, message, logTag) {
+  const clients = rooms.get(sessionId);
+  if (!clients) return 0;
+  const data = JSON.stringify(message);
+  let delivered = 0;
+  const connectedUserIds = [];
+  for (const ws of clients) {
+    const meta = ws._meta;
+    if (!meta || meta.userId !== userId) continue;
+    if (ws.readyState !== ws.OPEN) continue;
+    ws.send(data);
+    delivered += 1;
+  }
+  if (delivered === 0) {
+    for (const ws of clients) {
+      const meta = ws._meta;
+      if (!meta) continue;
+      connectedUserIds.push(meta.userId ?? null);
+    }
+    const tag = typeof logTag === 'string' && logTag ? logTag : 'ws-send';
+    console.log(`[${tag}]`, JSON.stringify({
+      action: message?.action ?? null,
+      sessionId,
+      userId,
+      delivered,
+      connectedUsers: connectedUserIds,
+    }));
+  }
+  return delivered;
+}
+
+function sendCanvasViewToUser(sessionId, userId, message) {
+  return sendToUser(sessionId, userId, message, 'mcp-view');
+}
+
+function sendSnapshotRequestToUser(sessionId, userId, message) {
+  return sendToUser(sessionId, userId, message, 'mcp-snapshot');
+}
+
+function requestCanvasSnapshot(sessionId, userId, options = {}) {
+  const timeoutMs = Number.isFinite(options.timeoutMs)
+    ? Math.max(1000, Math.min(30000, Number(options.timeoutMs)))
+    : MCP_SNAPSHOT_TIMEOUT_MS;
+  const requestId = randomUUID();
+  const delivered = sendSnapshotRequestToUser(sessionId, userId, {
+    type: 'canvas_snapshot_request',
+    requestId,
+    sessionId,
+  });
+  if (!delivered) {
+    throw new Error('snapshot_client_not_connected');
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      snapshotRequests.delete(requestId);
+      reject(new Error('snapshot_timeout'));
+    }, timeoutMs);
+    snapshotRequests.set(requestId, {
+      resolve,
+      reject,
+      sessionId,
+      userId,
+      timer,
+    });
+  });
+}
+
+function resolveSnapshotResponse(ws, message) {
+  const requestId = typeof message?.requestId === 'string' ? message.requestId : null;
+  if (!requestId) return;
+  const entry = snapshotRequests.get(requestId);
+  if (!entry) return;
+  const meta = ws?._meta;
+  if (!meta || meta.userId !== entry.userId || meta.sessionId !== entry.sessionId) return;
+  clearTimeout(entry.timer);
+  snapshotRequests.delete(requestId);
+  const error = typeof message?.error === 'string' ? message.error : null;
+  if (error) {
+    entry.reject(new Error(error));
+    return;
+  }
+  const dataUrl = typeof message?.dataUrl === 'string' ? message.dataUrl : null;
+  const width = Number.isFinite(message?.width) ? Number(message.width) : null;
+  const height = Number.isFinite(message?.height) ? Number(message.height) : null;
+  entry.resolve({ requestId, dataUrl, width, height });
+}
 function authUserFromCookieHeader(cookieHeader) {
   if (!cookieHeader) return null;
   try {
@@ -1488,6 +1834,7 @@ wss.on('connection', async (ws, req) => {
   const avatarAnimal = user?.avatar_animal ?? null;
   const avatarColor = user?.avatar_color ?? null;
   ws._meta = { sessionId, connId, clientId, userId: user?.id ?? null, name, avatarSeed, avatarUrl, avatarAnimal, avatarColor };
+  console.log('[ws] connect', JSON.stringify({ sessionId, userId: user?.id ?? null, clientId, connId }));
 
   roomFor(sessionId).add(ws);
   const payload = serializeSession(session);
@@ -1499,6 +1846,11 @@ wss.on('connection', async (ws, req) => {
     try {
       msg = JSON.parse(String(raw));
     } catch {
+      return;
+    }
+
+    if (msg?.type === 'canvas_snapshot_response') {
+      resolveSnapshotResponse(ws, msg);
       return;
     }
 
@@ -1520,6 +1872,13 @@ wss.on('connection', async (ws, req) => {
     clients.delete(ws);
     if (clients.size === 0) rooms.delete(sessionId);
     else sendPresence(sessionId);
+    const meta = ws._meta;
+    console.log('[ws] close', JSON.stringify({
+      sessionId: meta?.sessionId ?? sessionId,
+      userId: meta?.userId ?? null,
+      clientId: meta?.clientId ?? null,
+      connId: meta?.connId ?? null,
+    }));
   });
 });
 
