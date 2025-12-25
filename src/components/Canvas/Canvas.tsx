@@ -15,6 +15,11 @@ import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES } from '../../uti
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
+const ZOOM_DETAIL_THRESHOLD = 1.1;
+const ZOOM_GRAPH_THRESHOLD = 0.6;
+const ZOOM_EPS = 0.02;
+const ZOOM_DETAIL = ZOOM_DETAIL_THRESHOLD + ZOOM_EPS;
+const ZOOM_GRAPH = ZOOM_GRAPH_THRESHOLD - ZOOM_EPS;
 const CLICK_THRESHOLD = 5;
 const LONG_PRESS_MS = 500;
 const TOUCH_DRAG_THRESHOLD = 8;
@@ -62,6 +67,7 @@ export const Canvas: React.FC = () => {
 
     // Optimize Subscriptions
     const canvas = useStore((state) => state.canvas);
+    const canvasViewCommand = useStore((state) => state.canvasViewCommand);
     const nodes = useStore((state) => state.nodes);
     const edges = useStore((state) => state.edges);
     const penMode = useStore((state) => state.penMode);
@@ -91,12 +97,14 @@ export const Canvas: React.FC = () => {
 	    const updateEdge = useStore((state) => state.updateEdge);
 	    const addComment = useStore((state) => state.addComment);
 	    const deleteComment = useStore((state) => state.deleteComment);
-	    const toggleCommentsMode = useStore((state) => state.toggleCommentsMode);
+    const toggleCommentsMode = useStore((state) => state.toggleCommentsMode);
+    const setCanvasViewCommand = useStore((state) => state.setCanvasViewCommand);
 
     const canvasRef = useRef(canvas);
     useEffect(() => {
         canvasRef.current = canvas;
     }, [canvas]);
+    const lastCanvasViewIdRef = useRef<string | null>(null);
 
     // Interaction State
     const [mode, setMode] = useState<InteractionMode>('idle');
@@ -379,6 +387,128 @@ export const Canvas: React.FC = () => {
         const scale = Math.max(0.0001, canvasRef.current.scale);
         return { width: rect.width / scale, height: rect.height / scale };
     }, []);
+
+    const getViewportMetrics = useCallback(() => {
+        const viewport = window.visualViewport;
+        const width = viewport?.width ?? window.innerWidth;
+        const height = viewport?.height ?? window.innerHeight;
+        return { width, height, centerX: width / 2, centerY: height / 2 };
+    }, []);
+
+    const clampScale = useCallback((scale: number) => Math.min(Math.max(scale, MIN_SCALE), MAX_SCALE), []);
+
+    const centerOnWorldPoint = useCallback((worldX: number, worldY: number, targetScale: number) => {
+        const { centerX, centerY } = getViewportMetrics();
+        const nextScale = clampScale(targetScale);
+        const nextX = centerX - worldX * nextScale;
+        const nextY = centerY - worldY * nextScale;
+        setCanvasTransform(nextX, nextY, nextScale);
+    }, [clampScale, getViewportMetrics, setCanvasTransform]);
+
+    const applyZoomPreset = useCallback((targetScale: number) => {
+        const { centerX, centerY } = getViewportMetrics();
+        const current = canvasRef.current;
+        const worldX = (centerX - current.x) / current.scale;
+        const worldY = (centerY - current.y) / current.scale;
+        centerOnWorldPoint(worldX, worldY, targetScale);
+    }, [centerOnWorldPoint, getViewportMetrics]);
+
+    const applyZoomToFit = useCallback(() => {
+        const st = useStore.getState();
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+
+        const addRect = (x: number, y: number, width: number, height: number) => {
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) return;
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x + width);
+            maxY = Math.max(maxY, y + height);
+        };
+
+        for (const node of st.nodes) {
+            const size = getNodeSize(node.id) ?? { width: 240, height: 120 };
+            addRect(node.x - size.width / 2, node.y - size.height / 2, size.width, size.height);
+        }
+
+        for (const box of st.textBoxes) {
+            addRect(box.x, box.y, box.width, box.height);
+        }
+
+        for (const drawing of st.drawings) {
+            const points = Array.isArray(drawing.points) ? drawing.points : [];
+            if (points.length === 0) continue;
+            let dMinX = Infinity;
+            let dMinY = Infinity;
+            let dMaxX = -Infinity;
+            let dMaxY = -Infinity;
+            for (const pt of points) {
+                if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) continue;
+                dMinX = Math.min(dMinX, pt.x);
+                dMinY = Math.min(dMinY, pt.y);
+                dMaxX = Math.max(dMaxX, pt.x);
+                dMaxY = Math.max(dMaxY, pt.y);
+            }
+            if (!Number.isFinite(dMinX) || !Number.isFinite(dMinY) || !Number.isFinite(dMaxX) || !Number.isFinite(dMaxY)) continue;
+            addRect(dMinX, dMinY, dMaxX - dMinX, dMaxY - dMinY);
+        }
+
+        for (const comment of st.comments) {
+            if (comment.targetKind !== 'canvas') continue;
+            const cx = comment.x;
+            const cy = comment.y;
+            if (typeof cx !== 'number' || typeof cy !== 'number') continue;
+            const size = 24;
+            addRect(cx - size / 2, cy - size / 2, size, size);
+        }
+
+        if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) return;
+
+        const { width, height } = getViewportMetrics();
+        const padding = 160;
+        const viewW = Math.max(1, width - padding * 2);
+        const viewH = Math.max(1, height - padding * 2);
+        const boundsW = Math.max(1, maxX - minX);
+        const boundsH = Math.max(1, maxY - minY);
+        const targetScale = clampScale(Math.min(viewW / boundsW, viewH / boundsH));
+        const centerX = (minX + maxX) / 2;
+        const centerY = (minY + maxY) / 2;
+        centerOnWorldPoint(centerX, centerY, targetScale);
+    }, [centerOnWorldPoint, clampScale, getNodeSize, getViewportMetrics]);
+
+    useEffect(() => {
+        if (!canvasViewCommand) return;
+        if (canvasViewCommand.id === lastCanvasViewIdRef.current) return;
+        lastCanvasViewIdRef.current = canvasViewCommand.id;
+
+        const action = canvasViewCommand.action;
+        if (action === 'zoom_to_cards') {
+            applyZoomPreset(ZOOM_DETAIL);
+            setCanvasViewCommand(null);
+            return;
+        }
+        if (action === 'zoom_to_graph') {
+            applyZoomPreset(ZOOM_GRAPH);
+            setCanvasViewCommand(null);
+            return;
+        }
+        if (action === 'zoom_to_fit') {
+            applyZoomToFit();
+            setCanvasViewCommand(null);
+            return;
+        }
+        if (action === 'focus_node') {
+            const id = canvasViewCommand.nodeId ?? null;
+            if (id) {
+                const st = useStore.getState();
+                const node = st.nodes.find((candidate) => candidate.id === id);
+                if (node) centerOnWorldPoint(node.x, node.y, ZOOM_DETAIL);
+            }
+            setCanvasViewCommand(null);
+        }
+    }, [applyZoomPreset, applyZoomToFit, canvasViewCommand, centerOnWorldPoint, setCanvasViewCommand]);
 
     const resolveCommentAnchor = useCallback((target: CommentDraft | Comment) => {
         if (target.targetKind === 'canvas') {
@@ -2670,7 +2800,8 @@ export const Canvas: React.FC = () => {
         <div
             ref={containerRef}
             className={`${styles.canvasContainer} ${mode === 'panning' ? styles.panning : ''}`}
-	            onPointerDown={handlePointerDown}
+            data-canvas-root="true"
+	    onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerLeave={handlePointerLeave}

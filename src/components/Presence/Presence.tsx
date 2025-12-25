@@ -20,6 +20,19 @@ for (let row = 0; row < colorRows; row += 1) {
 }
 
 type FieldStatus = 'ok' | 'missing' | 'invalid';
+type McpTokenInfo = {
+  createdAt: string | null;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+};
+
+const mcpExpiryOptions = [
+  { value: '30', label: '30 days' },
+  { value: '90', label: '90 days' },
+  { value: '180', label: '180 days' },
+  { value: '365', label: '1 year' },
+  { value: 'never', label: 'Never' },
+];
 
 function useIsCompactAuthModal() {
   const [isCompact, setIsCompact] = useState(() => {
@@ -526,6 +539,12 @@ export const Presence: React.FC = () => {
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [settingsNoticeVisible, setSettingsNoticeVisible] = useState(false);
+  const [integrationsOpen, setIntegrationsOpen] = useState(false);
+  const [integrationsBusy, setIntegrationsBusy] = useState(false);
+  const [integrationsMessage, setIntegrationsMessage] = useState<string | null>(null);
+  const [mcpTokenInfo, setMcpTokenInfo] = useState<McpTokenInfo | null>(null);
+  const [mcpTokenValue, setMcpTokenValue] = useState<string | null>(null);
+  const [mcpExpiryChoice, setMcpExpiryChoice] = useState('90');
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   const selfId = presence.selfId;
@@ -542,6 +561,7 @@ export const Presence: React.FC = () => {
   const guestAvatarSize = 36;
   const guestOverlap = Math.round(guestAvatarSize * 0.28);
   const myGuestSeed = !me ? mySeed : '';
+  const mcpStatusLabel = mcpTokenInfo ? 'Active' : 'Not generated';
 
   const normalizedOthers = useMemo(() => {
     const filtered = myGuestSeed
@@ -581,6 +601,12 @@ export const Presence: React.FC = () => {
     setSettingsOpen(true);
   };
 
+  const openIntegrations = () => {
+    if (!me) return;
+    setOpen(false);
+    setIntegrationsOpen(true);
+  };
+
   const closeSettings = () => {
     setSettingsOpen(false);
     setSettingsMessage(null);
@@ -596,6 +622,97 @@ export const Presence: React.FC = () => {
     setSettingsAvatarColorOpen(false);
     setSettingsNotice(null);
     setSettingsNoticeVisible(false);
+  };
+
+  const closeIntegrations = () => {
+    setIntegrationsOpen(false);
+    setIntegrationsBusy(false);
+    setIntegrationsMessage(null);
+    setMcpTokenValue(null);
+  };
+
+  const formatDateTime = (value: string | null) => {
+    if (!value) return 'Never';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '—';
+    return date.toLocaleString();
+  };
+
+  const loadMcpToken = async () => {
+    setIntegrationsBusy(true);
+    setIntegrationsMessage(null);
+    setMcpTokenInfo(null);
+    try {
+      const res = await fetch('/api/integrations/mcp/token');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setIntegrationsMessage('Failed to load MCP token');
+        return;
+      }
+      setMcpTokenInfo(data?.token ?? null);
+      if (data?.token?.expiresAt == null) {
+        setMcpExpiryChoice('never');
+      }
+    } catch {
+      setIntegrationsMessage('Failed to load MCP token');
+    } finally {
+      setIntegrationsBusy(false);
+    }
+  };
+
+  const generateMcpToken = async () => {
+    setIntegrationsBusy(true);
+    setIntegrationsMessage(null);
+    try {
+      const expiresInDays = mcpExpiryChoice === 'never' ? null : Number(mcpExpiryChoice);
+      const res = await fetch('/api/integrations/mcp/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ expiresInDays }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setIntegrationsMessage('Failed to generate MCP token');
+        return;
+      }
+      setMcpTokenInfo(data?.token ?? null);
+      setMcpTokenValue(typeof data?.rawToken === 'string' ? data.rawToken : null);
+      setIntegrationsMessage('Token generated. Copy it now.');
+    } catch {
+      setIntegrationsMessage('Failed to generate MCP token');
+    } finally {
+      setIntegrationsBusy(false);
+    }
+  };
+
+  const revokeMcpToken = async () => {
+    if (!window.confirm('Revoke the MCP token? Existing clients will stop working.')) return;
+    setIntegrationsBusy(true);
+    setIntegrationsMessage(null);
+    try {
+      const res = await fetch('/api/integrations/mcp/token', { method: 'DELETE' });
+      if (!res.ok) {
+        setIntegrationsMessage('Failed to revoke MCP token');
+        return;
+      }
+      setMcpTokenInfo(null);
+      setMcpTokenValue(null);
+      setIntegrationsMessage('Token revoked');
+    } catch {
+      setIntegrationsMessage('Failed to revoke MCP token');
+    } finally {
+      setIntegrationsBusy(false);
+    }
+  };
+
+  const copyMcpToken = async () => {
+    if (!mcpTokenValue) return;
+    try {
+      await navigator.clipboard.writeText(mcpTokenValue);
+      setIntegrationsMessage('Token copied');
+    } catch {
+      setIntegrationsMessage('Failed to copy token');
+    }
   };
 
   useEffect(() => {
@@ -624,6 +741,18 @@ export const Presence: React.FC = () => {
       closeSettings();
     }
   }, [settingsOpen, me]);
+
+  useEffect(() => {
+    if (!integrationsOpen) return;
+    setMcpTokenValue(null);
+    loadMcpToken();
+  }, [integrationsOpen]);
+
+  useEffect(() => {
+    if (integrationsOpen && !me) {
+      closeIntegrations();
+    }
+  }, [integrationsOpen, me]);
 
   useEffect(() => {
     if (!settingsPassword) setSettingsPasswordConfirm('');
@@ -1085,6 +1214,21 @@ export const Presence: React.FC = () => {
               }}
             >
               Account settings
+            </button>
+            <button
+              type="button"
+              onClick={openIntegrations}
+              style={{
+                borderRadius: 10,
+                border: '1px solid var(--border-strong)',
+                background: 'transparent',
+                color: 'var(--text-primary)',
+                padding: '8px 10px',
+                cursor: 'pointer',
+                textAlign: 'left',
+              }}
+            >
+              Integrations
             </button>
             <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.45 }} />
             <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -1606,6 +1750,231 @@ export const Presence: React.FC = () => {
                 >
                   Cancel
                 </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Integrations modal */}
+      {integrationsOpen && me && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 2000,
+            background: 'rgba(0,0,0,0.45)',
+            display: 'grid',
+            placeItems: isCompactAuth ? 'end center' : 'center',
+            padding:
+              'calc(12px + env(safe-area-inset-top, 0px)) calc(12px + env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px))',
+          }}
+          onPointerDown={closeIntegrations}
+        >
+          <div style={{ display: 'grid', justifyItems: 'center', position: 'relative' }}>
+            <div
+              style={{
+                width: isCompactAuth ? 'min(680px, 100%)' : 'min(520px, 92vw)',
+                borderRadius: isCompactAuth ? '16px 16px 14px 14px' : 16,
+                background: 'var(--bg-node)',
+                border: '1px solid var(--border-strong)',
+                boxShadow: '0 20px 70px rgba(0,0,0,0.55)',
+                padding: 16,
+                boxSizing: 'border-box',
+                maxHeight: isCompactAuth ? 'calc(var(--visual-height, 100vh) - env(safe-area-inset-top, 0px) - 12px)' : undefined,
+                overflowY: isCompactAuth ? 'auto' : undefined,
+                paddingBottom: isCompactAuth ? 'calc(16px + env(safe-area-inset-bottom, 0px))' : 16,
+                WebkitOverflowScrolling: isCompactAuth ? 'touch' : undefined,
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>Integrations</div>
+                <button
+                  type="button"
+                  onClick={closeIntegrations}
+                  style={{
+                    borderRadius: 10,
+                    border: '1px solid var(--border-strong)',
+                    background: 'transparent',
+                    color: 'var(--text-primary)',
+                    padding: '6px 10px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+
+              <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
+                <div
+                  style={{
+                    borderRadius: 14,
+                    border: '1px solid var(--border-strong)',
+                    background: 'rgba(255,255,255,0.03)',
+                    padding: 12,
+                    display: 'grid',
+                    gap: 10,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>MCP</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Personal access token</div>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-secondary)',
+                      padding: '10px 12px',
+                      borderRadius: 12,
+                      border: '1px solid var(--border-strong)',
+                      background: 'rgba(15, 20, 28, 0.45)',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    Use this token to connect MCP clients. If no token is provided, MCP-created objects are authored by AI.
+                  </div>
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                      Token status
+                    </div>
+                    <div style={{ display: 'grid', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                        <span>Status</span>
+                        <span style={{ color: mcpTokenInfo ? 'var(--text-primary)' : 'var(--text-secondary)' }}>{mcpStatusLabel}</span>
+                      </div>
+                      {mcpTokenInfo && (
+                        <>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                            <span>Created</span>
+                            <span>{formatDateTime(mcpTokenInfo.createdAt)}</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                            <span>Expires</span>
+                            <span>{formatDateTime(mcpTokenInfo.expiresAt)}</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                            <span>Last used</span>
+                            <span>{formatDateTime(mcpTokenInfo.lastUsedAt)}</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                      Expiry
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {mcpExpiryOptions.map((opt) => {
+                        const active = mcpExpiryChoice === opt.value;
+                        return (
+                          <button
+                            key={opt.value}
+                            type="button"
+                            onClick={() => setMcpExpiryChoice(opt.value)}
+                            disabled={integrationsBusy}
+                            style={{
+                              borderRadius: 999,
+                              border: '1px solid var(--border-strong)',
+                              background: active ? 'var(--accent-glow)' : 'transparent',
+                              color: 'var(--text-primary)',
+                              padding: '6px 12px',
+                              fontSize: 12,
+                              cursor: integrationsBusy ? 'not-allowed' : 'pointer',
+                            }}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                      Actions
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        onClick={generateMcpToken}
+                        disabled={integrationsBusy}
+                        style={{
+                          borderRadius: 12,
+                          border: '1px solid var(--border-strong)',
+                          background: 'var(--accent-primary)',
+                          color: '#fff',
+                          padding: '8px 12px',
+                          cursor: integrationsBusy ? 'not-allowed' : 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 8,
+                        }}
+                      >
+                        <span>{mcpTokenInfo ? 'Rotate token' : 'Generate token'}</span>
+                        {integrationsBusy && <LoadingSpinner size={12} />}
+                      </button>
+                      {mcpTokenInfo && (
+                        <button
+                          type="button"
+                          onClick={revokeMcpToken}
+                          disabled={integrationsBusy}
+                          style={{
+                            borderRadius: 12,
+                            border: '1px solid var(--border-strong)',
+                            background: 'transparent',
+                            color: 'var(--text-primary)',
+                            padding: '8px 12px',
+                            cursor: integrationsBusy ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          Revoke token
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {mcpTokenValue && (
+                    <div
+                      style={{
+                        borderRadius: 12,
+                        border: '1px dashed var(--border-strong)',
+                        padding: 10,
+                        display: 'grid',
+                        gap: 6,
+                        background: 'rgba(15, 20, 28, 0.5)',
+                      }}
+                    >
+                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Token (visible once)</div>
+                      <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace', fontSize: 12, wordBreak: 'break-all' }}>
+                        {mcpTokenValue}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={copyMcpToken}
+                        style={{
+                          justifySelf: 'start',
+                          borderRadius: 10,
+                          border: '1px solid var(--border-strong)',
+                          background: 'transparent',
+                          color: 'var(--text-primary)',
+                          padding: '6px 10px',
+                          cursor: 'pointer',
+                          fontSize: 12,
+                        }}
+                      >
+                        Copy token
+                      </button>
+                    </div>
+                  )}
+
+                  {integrationsMessage && (
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{integrationsMessage}</div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
