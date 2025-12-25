@@ -22,7 +22,7 @@ const defaultWsUrl = process.env.CANVAS_WS_URL ?? (() => {
 const nowTs = () => Date.now();
 const ts = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
 const tombstoneFor = (now, updatedAt) => Math.max(now, ts(updatedAt) + 1);
-const AI_AUTHOR_NAME = 'AI';
+const AI_AUTHOR_NAME = 'Raven';
 const MCP_AUTH_CACHE_TTL_MS = Number(process.env.MCP_AUTH_CACHE_TTL_MS ?? 60_000);
 const authCache = new Map();
 const MCP_LOG_ENABLED = process.env.MCP_LOG_ENABLED !== 'false';
