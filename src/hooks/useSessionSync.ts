@@ -9,6 +9,10 @@ function getSessionIdFromUrl() {
   return new URLSearchParams(window.location.search).get('session');
 }
 
+function getCardIdFromUrl() {
+  return new URLSearchParams(window.location.search).get('card');
+}
+
 function getResetFromUrl() {
   return new URLSearchParams(window.location.search).get('reset') === '1';
 }
@@ -98,6 +102,7 @@ export function useSessionSync() {
   const reconnectAttempt = useRef(0);
   const resetRequestedRef = useRef(resetRequested);
   const activeSessionIdRef = useRef<string | null>(null);
+  const pendingCardFocusRef = useRef<string | null>(getCardIdFromUrl());
 
   useEffect(() => {
     resetRequestedRef.current = resetRequested;
@@ -564,6 +569,18 @@ export function useSessionSync() {
       const meta = normalizeSessionMeta(data?.meta);
       if (meta) setSessionMeta(meta);
       applyRemote(remote, 'fetch');
+      const focusNodeId = pendingCardFocusRef.current;
+      if (focusNodeId) {
+        const node = useStore.getState().nodes.find((candidate) => candidate.id === focusNodeId);
+        if (node) {
+          const id = typeof crypto?.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          useStore.getState().setCanvasViewCommand({ id, action: 'focus_node', nodeId: focusNodeId });
+          applyCanvasViewAction('focus_node', { nodeId: focusNodeId });
+          pendingCardFocusRef.current = null;
+        }
+      }
     };
 
     const flush = () => {

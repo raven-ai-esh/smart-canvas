@@ -18,7 +18,8 @@ const DEFAULT_SESSION_ID = process.env.DEFAULT_SESSION_ID;
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret';
 const COOKIE_NAME = process.env.AUTH_COOKIE_NAME ?? 'auth_token';
 const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
-const APP_ORIGIN = process.env.APP_ORIGIN; // optional: e.g. https://your-domain.com
+const normalizeEnvValue = (value) => (typeof value === 'string' ? value.trim() : '');
+const APP_ORIGIN = normalizeEnvValue(process.env.APP_ORIGIN); // optional: e.g. https://your-domain.com
 const SMTP_URL = process.env.SMTP_URL;
 const MAIL_FROM = process.env.MAIL_FROM ?? 'no-reply@smart-tracker.local';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
@@ -27,6 +28,12 @@ const YANDEX_CLIENT_ID = process.env.YANDEX_CLIENT_ID;
 const YANDEX_CLIENT_SECRET = process.env.YANDEX_CLIENT_SECRET;
 const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_AUTH_BOT_USERNAME = process.env.TELEGRAM_AUTH_BOT_USERNAME ?? TELEGRAM_BOT_USERNAME;
+const TELEGRAM_AUTH_BOT_TOKEN = process.env.TELEGRAM_AUTH_BOT_TOKEN ?? TELEGRAM_BOT_TOKEN;
+const TELEGRAM_ALERT_BOT_USERNAME = process.env.TELEGRAM_ALERT_BOT_USERNAME ?? TELEGRAM_BOT_USERNAME;
+const TELEGRAM_ALERT_BOT_TOKEN = process.env.TELEGRAM_ALERT_BOT_TOKEN ?? TELEGRAM_BOT_TOKEN;
+const TELEGRAM_ALERT_LINK_TTL_HOURS = Number(process.env.TELEGRAM_ALERT_LINK_TTL_HOURS ?? 24);
+const TELEGRAM_ALERT_WEBHOOK_SECRET = process.env.TELEGRAM_ALERT_WEBHOOK_SECRET ?? '';
 const TEST_USER_ENABLED = process.env.TEST_USER_ENABLED ?? (process.env.NODE_ENV === 'production' ? 'false' : 'true');
 const TEST_USER_EMAIL = process.env.TEST_USER_EMAIL ?? '';
 const TEST_USER_PASSWORD = process.env.TEST_USER_PASSWORD ?? '';
@@ -62,10 +69,30 @@ const ASSISTANT_CACHE_TTL_MS = Number(process.env.ASSISTANT_CACHE_TTL_MS ?? 6000
 const ASSISTANT_MODEL_CONTEXT_TOKENS = Number(process.env.ASSISTANT_MODEL_CONTEXT_TOKENS ?? 0);
 const ASSISTANT_TOKEN_ESTIMATE_CHARS = Number(process.env.ASSISTANT_TOKEN_ESTIMATE_CHARS ?? 4);
 const ASSISTANT_OUTPUT_RESERVE_TOKENS = Number(process.env.ASSISTANT_OUTPUT_RESERVE_TOKENS ?? 0);
+const ALERT_WEBHOOK_TIMEOUT_MS = Number(process.env.ALERT_WEBHOOK_TIMEOUT_MS ?? 5000);
+const ALERT_PUBLIC_BASE_URL = normalizeEnvValue(process.env.ALERT_PUBLIC_BASE_URL) || APP_ORIGIN || '';
 const REDIS_URL = process.env.REDIS_URL ?? '';
 const EMBEDDING_DIM = Number(process.env.OPENAI_EMBEDDING_DIM ?? 1536);
 const MODEL_CONTEXT_TOKENS = {
   'gpt-5.2': 400000,
+};
+
+const ALERT_EVENTS = {
+  cardChanges: 'card_changes',
+  mentionAdded: 'mention_added',
+  agentReply: 'agent_reply',
+};
+
+const DEFAULT_ALERT_CHANNELS = {
+  email: { enabled: false },
+  telegram: { enabled: false, chatId: null },
+  webhook: { enabled: false, url: null },
+};
+
+const DEFAULT_ALERT_EVENTS = {
+  [ALERT_EVENTS.cardChanges]: false,
+  [ALERT_EVENTS.mentionAdded]: false,
+  [ALERT_EVENTS.agentReply]: false,
 };
 const parseCorsOrigin = (v) => {
   if (v === undefined) return true;
@@ -231,6 +258,40 @@ async function initDb() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS telegram_alert_links (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      chat_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  try {
+    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS telegram_alert_links_chat_idx ON telegram_alert_links (chat_id)');
+  } catch {
+    // ignore
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS telegram_alert_link_tokens (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      chat_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL
+    );
+  `);
+  try {
+    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS telegram_alert_link_tokens_user_idx ON telegram_alert_link_tokens (user_id)');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS telegram_alert_link_tokens_chat_idx ON telegram_alert_link_tokens (chat_id)');
+  } catch {
+    // ignore
+  }
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS email_verification_tokens (
       token_hash TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -272,6 +333,16 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       last_used_at TIMESTAMPTZ
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS alerting_settings (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      channels JSONB NOT NULL DEFAULT '{}'::jsonb,
+      events JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 
@@ -415,6 +486,21 @@ async function getSession(id) {
     [id],
   );
   return res.rows[0] ?? null;
+}
+
+async function listSessionSavers(sessionId) {
+  const res = await pool.query(
+    `SELECT u.id, u.name, u.email
+       FROM session_savers ss
+       JOIN users u ON u.id = ss.user_id
+      WHERE ss.session_id = $1`,
+    [sessionId],
+  );
+  return res.rows.map((row) => ({
+    id: row.id,
+    name: row.name ?? 'User',
+    email: row.email ?? null,
+  }));
 }
 
 async function getUserById(id) {
@@ -754,6 +840,294 @@ async function deleteOpenAiKey(userId) {
 
 async function touchOpenAiKey(userId) {
   await pool.query('UPDATE openai_keys SET last_used_at = NOW() WHERE user_id = $1', [userId]);
+}
+
+const coerceBool = (value, fallback = false) => {
+  if (typeof value === 'boolean') return value;
+  if (value === 0 || value === 1) return Boolean(value);
+  return fallback;
+};
+
+const sanitizeTelegramChatId = (value) => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const normalized = trimmed.replace(/\s+/g, '');
+  if (!/^-?\d+$/.test(normalized)) return null;
+  return normalized;
+};
+
+const normalizeTelegramChatId = (value) => {
+  if (value === undefined || value === null) return null;
+  return sanitizeTelegramChatId(String(value));
+};
+
+const isEmailLike = (value) => {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed || trimmed.length > 254) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+};
+
+const resolveTelegramLinkExpiry = () => {
+  const hours = Number.isFinite(TELEGRAM_ALERT_LINK_TTL_HOURS) && TELEGRAM_ALERT_LINK_TTL_HOURS > 0
+    ? TELEGRAM_ALERT_LINK_TTL_HOURS
+    : 24;
+  return new Date(Date.now() + hours * 60 * 60 * 1000);
+};
+
+const sanitizeWebhookUrl = (value) => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+};
+
+const normalizeAlertingSettings = (raw) => {
+  const channels = raw?.channels && typeof raw.channels === 'object' ? raw.channels : {};
+  const events = raw?.events && typeof raw.events === 'object' ? raw.events : {};
+  return {
+    channels: {
+      email: { enabled: coerceBool(channels?.email?.enabled, DEFAULT_ALERT_CHANNELS.email.enabled) },
+      telegram: {
+        enabled: coerceBool(channels?.telegram?.enabled, DEFAULT_ALERT_CHANNELS.telegram.enabled),
+        chatId: sanitizeTelegramChatId(channels?.telegram?.chatId) ?? DEFAULT_ALERT_CHANNELS.telegram.chatId,
+      },
+      webhook: {
+        enabled: coerceBool(channels?.webhook?.enabled, DEFAULT_ALERT_CHANNELS.webhook.enabled),
+        url: sanitizeWebhookUrl(channels?.webhook?.url) ?? DEFAULT_ALERT_CHANNELS.webhook.url,
+      },
+    },
+    events: {
+      [ALERT_EVENTS.cardChanges]: coerceBool(events?.[ALERT_EVENTS.cardChanges], DEFAULT_ALERT_EVENTS[ALERT_EVENTS.cardChanges]),
+      [ALERT_EVENTS.mentionAdded]: coerceBool(events?.[ALERT_EVENTS.mentionAdded], DEFAULT_ALERT_EVENTS[ALERT_EVENTS.mentionAdded]),
+      [ALERT_EVENTS.agentReply]: coerceBool(events?.[ALERT_EVENTS.agentReply], DEFAULT_ALERT_EVENTS[ALERT_EVENTS.agentReply]),
+    },
+  };
+};
+
+const mergeAlertingSettings = (current, incoming) => {
+  const base = normalizeAlertingSettings(current);
+  const inc = incoming && typeof incoming === 'object' ? incoming : {};
+  const channels = inc.channels && typeof inc.channels === 'object' ? inc.channels : {};
+  const events = inc.events && typeof inc.events === 'object' ? inc.events : {};
+
+  const next = {
+    channels: {
+      email: {
+        enabled: channels?.email?.enabled !== undefined
+          ? coerceBool(channels.email.enabled, base.channels.email.enabled)
+          : base.channels.email.enabled,
+      },
+      telegram: {
+        enabled: channels?.telegram?.enabled !== undefined
+          ? coerceBool(channels.telegram.enabled, base.channels.telegram.enabled)
+          : base.channels.telegram.enabled,
+        chatId: channels?.telegram?.chatId !== undefined
+          ? sanitizeTelegramChatId(channels.telegram.chatId)
+          : base.channels.telegram.chatId,
+      },
+      webhook: {
+        enabled: channels?.webhook?.enabled !== undefined
+          ? coerceBool(channels.webhook.enabled, base.channels.webhook.enabled)
+          : base.channels.webhook.enabled,
+        url: channels?.webhook?.url !== undefined
+          ? sanitizeWebhookUrl(channels.webhook.url)
+          : base.channels.webhook.url,
+      },
+    },
+    events: {
+      [ALERT_EVENTS.cardChanges]: events?.[ALERT_EVENTS.cardChanges] !== undefined
+        ? coerceBool(events[ALERT_EVENTS.cardChanges], base.events[ALERT_EVENTS.cardChanges])
+        : base.events[ALERT_EVENTS.cardChanges],
+      [ALERT_EVENTS.mentionAdded]: events?.[ALERT_EVENTS.mentionAdded] !== undefined
+        ? coerceBool(events[ALERT_EVENTS.mentionAdded], base.events[ALERT_EVENTS.mentionAdded])
+        : base.events[ALERT_EVENTS.mentionAdded],
+      [ALERT_EVENTS.agentReply]: events?.[ALERT_EVENTS.agentReply] !== undefined
+        ? coerceBool(events[ALERT_EVENTS.agentReply], base.events[ALERT_EVENTS.agentReply])
+        : base.events[ALERT_EVENTS.agentReply],
+    },
+  };
+  return normalizeAlertingSettings(next);
+};
+
+async function getAlertingSettings(userId) {
+  const res = await pool.query(
+    'SELECT user_id, channels, events FROM alerting_settings WHERE user_id = $1',
+    [userId],
+  );
+  const row = res.rows[0];
+  if (!row) return normalizeAlertingSettings({});
+  return normalizeAlertingSettings({ channels: row.channels, events: row.events });
+}
+
+async function upsertAlertingSettings({ userId, settings }) {
+  const normalized = normalizeAlertingSettings(settings);
+  const res = await pool.query(
+    `INSERT INTO alerting_settings (user_id, channels, events)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (user_id) DO UPDATE
+       SET channels = EXCLUDED.channels,
+           events = EXCLUDED.events,
+           updated_at = NOW()
+     RETURNING user_id, channels, events`,
+    [userId, normalized.channels, normalized.events],
+  );
+  return res.rows[0] ? normalizeAlertingSettings(res.rows[0]) : normalized;
+}
+
+async function listAlertingSettingsByUserIds(userIds) {
+  if (!userIds.length) return new Map();
+  const res = await pool.query(
+    'SELECT user_id, channels, events FROM alerting_settings WHERE user_id = ANY($1)',
+    [userIds],
+  );
+  const map = new Map();
+  for (const row of res.rows) {
+    map.set(row.user_id, normalizeAlertingSettings({ channels: row.channels, events: row.events }));
+  }
+  return map;
+}
+
+async function getTelegramAlertLink(userId) {
+  const res = await pool.query(
+    'SELECT chat_id, created_at, updated_at FROM telegram_alert_links WHERE user_id = $1',
+    [userId],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return {
+    chatId: row.chat_id,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+  };
+}
+
+async function getTelegramAlertLinkByChatId(chatId) {
+  const res = await pool.query(
+    'SELECT user_id, chat_id FROM telegram_alert_links WHERE chat_id = $1',
+    [chatId],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return { userId: row.user_id, chatId: row.chat_id };
+}
+
+async function upsertTelegramAlertLink({ userId, chatId }) {
+  const res = await pool.query(
+    `INSERT INTO telegram_alert_links (user_id, chat_id)
+     VALUES ($1, $2)
+     ON CONFLICT (user_id) DO UPDATE
+       SET chat_id = EXCLUDED.chat_id,
+           updated_at = NOW()
+     RETURNING user_id, chat_id, created_at, updated_at`,
+    [userId, chatId],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return {
+    chatId: row.chat_id,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+  };
+}
+
+async function deleteTelegramAlertLinkByChatId(chatId) {
+  await pool.query('DELETE FROM telegram_alert_links WHERE chat_id = $1', [chatId]);
+}
+
+async function getTelegramAlertLinkRequest(userId) {
+  const res = await pool.query(
+    `SELECT token, chat_id, created_at, expires_at
+       FROM telegram_alert_link_tokens
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [userId],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  const expiresAt = row.expires_at ? new Date(row.expires_at) : null;
+  if (expiresAt && expiresAt.getTime() < Date.now()) {
+    await pool.query('DELETE FROM telegram_alert_link_tokens WHERE token = $1', [row.token]);
+    return null;
+  }
+  return {
+    token: row.token,
+    chatId: row.chat_id,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    expiresAt: expiresAt ? expiresAt.toISOString() : null,
+  };
+}
+
+async function createTelegramAlertLinkRequest({ userId, chatId }) {
+  const token = randomBytes(18).toString('hex');
+  const expiresAt = resolveTelegramLinkExpiry();
+  await pool.query('DELETE FROM telegram_alert_link_tokens WHERE user_id = $1 OR chat_id = $2', [userId, chatId]);
+  await pool.query(
+    `INSERT INTO telegram_alert_link_tokens (token, user_id, chat_id, expires_at)
+     VALUES ($1, $2, $3, $4)`,
+    [token, userId, chatId, expiresAt],
+  );
+  return {
+    token,
+    chatId,
+    expiresAt: expiresAt.toISOString(),
+  };
+}
+
+async function consumeTelegramAlertLinkRequest({ userId, token }) {
+  const res = await pool.query(
+    `SELECT token, chat_id, expires_at
+       FROM telegram_alert_link_tokens
+      WHERE user_id = $1 AND token = $2
+      LIMIT 1`,
+    [userId, token],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  const expiresAt = row.expires_at ? new Date(row.expires_at) : null;
+  await pool.query('DELETE FROM telegram_alert_link_tokens WHERE token = $1', [token]);
+  if (expiresAt && expiresAt.getTime() < Date.now()) return null;
+  return { chatId: row.chat_id };
+}
+
+async function clearTelegramAlertLinkRequest(userId) {
+  await pool.query('DELETE FROM telegram_alert_link_tokens WHERE user_id = $1', [userId]);
+}
+
+async function listTelegramAlertLinksByUserIds(userIds) {
+  if (!userIds.length) return new Map();
+  const res = await pool.query(
+    'SELECT user_id, chat_id FROM telegram_alert_links WHERE user_id = ANY($1)',
+    [userIds],
+  );
+  const map = new Map();
+  for (const row of res.rows) {
+    map.set(row.user_id, row.chat_id);
+  }
+  return map;
+}
+
+async function listUsersByIds(ids) {
+  if (!ids.length) return new Map();
+  const res = await pool.query(
+    `SELECT id, name, email
+       FROM users
+      WHERE id = ANY($1)`,
+    [ids],
+  );
+  const map = new Map();
+  for (const row of res.rows) {
+    map.set(row.id, { id: row.id, name: row.name ?? 'User', email: row.email ?? null });
+  }
+  return map;
 }
 
 async function getSetting(key) {
@@ -1388,6 +1762,21 @@ const runAssistantTurn = async ({ apiKey, sessionId, userName, userId, inputItem
   }
 };
 
+const notifyAgentReply = async ({ userId, sessionId, message }) => {
+  if (!userId || !message) return;
+  const session = sessionId ? await getSession(sessionId) : null;
+  const alerts = [
+    {
+      userId,
+      event: ALERT_EVENTS.agentReply,
+      sessionId: sessionId ?? null,
+      sessionName: session?.name ?? null,
+      message,
+    },
+  ];
+  await dispatchAlertEvents(alerts);
+};
+
 async function createSession(id, state, opts = {}) {
   const expiresAt = Object.prototype.hasOwnProperty.call(opts, 'expiresAt') ? opts.expiresAt : new Date(Date.now() + TEMP_SESSION_TTL_MS);
   const res = await pool.query(
@@ -1495,6 +1884,123 @@ function mergeState(currentRaw, incomingRaw) {
   };
 }
 
+const nodeTitle = (node) => {
+  const title = typeof node?.title === 'string' ? node.title.trim() : '';
+  return title || 'Untitled card';
+};
+
+const normalizeBaseUrl = (value) => {
+  if (!value || typeof value !== 'string') return '';
+  return value.endsWith('/') ? value.slice(0, -1) : value;
+};
+
+const escapeHtml = (value) => {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+};
+
+const buildCardUrl = ({ baseUrl, sessionId, nodeId }) => {
+  if (!baseUrl || !sessionId || !nodeId) return null;
+  const base = normalizeBaseUrl(baseUrl);
+  return `${base}/?session=${encodeURIComponent(sessionId)}&card=${encodeURIComponent(nodeId)}`;
+};
+
+const buildAlertLinkSet = ({ sessionId, nodes }) => {
+  const baseUrl = normalizeBaseUrl(ALERT_PUBLIC_BASE_URL);
+  if (!baseUrl || !sessionId || !Array.isArray(nodes)) return [];
+  const links = [];
+  for (const node of nodes) {
+    if (!node?.id) continue;
+    const url = buildCardUrl({ baseUrl, sessionId, nodeId: node.id });
+    if (!url) continue;
+    links.push({ title: nodeTitle(node), url });
+  }
+  return links;
+};
+
+const mentionInfo = (mentions) => {
+  const ids = new Set();
+  let hasAll = false;
+  if (!Array.isArray(mentions)) return { ids, hasAll };
+  for (const item of mentions) {
+    if (!item || typeof item !== 'object') continue;
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    const label = typeof item.label === 'string' ? item.label.trim().toLowerCase() : '';
+    if (id === 'all' || label === 'all') {
+      hasAll = true;
+      continue;
+    }
+    if (id) ids.add(id);
+  }
+  return { ids, hasAll };
+};
+
+const diffMentions = (prev, next) => {
+  const prevInfo = mentionInfo(prev);
+  const nextInfo = mentionInfo(next);
+  const addedIds = new Set();
+  nextInfo.ids.forEach((id) => {
+    if (!prevInfo.ids.has(id)) addedIds.add(id);
+  });
+  const addedAll = nextInfo.hasAll && !prevInfo.hasAll;
+  return { addedIds, addedAll };
+};
+
+const attachmentSignature = (attachments) => {
+  if (!Array.isArray(attachments) || !attachments.length) return '';
+  return attachments
+    .map((item) => ({
+      id: item?.id ?? '',
+      name: item?.name ?? '',
+      size: item?.size ?? 0,
+      mime: item?.mime ?? '',
+    }))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+    .map((item) => `${item.id}:${item.name}:${item.size}:${item.mime}`)
+    .join('|');
+};
+
+const nodeChanged = (prev, next) => {
+  if (!prev) return true;
+  if (prev.title !== next.title) return true;
+  if (prev.content !== next.content) return true;
+  if (prev.type !== next.type) return true;
+  if (prev.clarity !== next.clarity) return true;
+  if (prev.status !== next.status) return true;
+  if (prev.progress !== next.progress) return true;
+  if (prev.energy !== next.energy) return true;
+  if (prev.startDate !== next.startDate) return true;
+  if (prev.endDate !== next.endDate) return true;
+  if (attachmentSignature(prev.attachments) !== attachmentSignature(next.attachments)) return true;
+  const prevMentions = Array.isArray(prev.mentions) ? prev.mentions : [];
+  const nextMentions = Array.isArray(next.mentions) ? next.mentions : [];
+  if (JSON.stringify(prevMentions) !== JSON.stringify(nextMentions)) return true;
+  return false;
+};
+
+const collectChangedNodes = (prevState, nextState) => {
+  const prevNodes = Array.isArray(prevState?.nodes) ? prevState.nodes : [];
+  const nextNodes = Array.isArray(nextState?.nodes) ? nextState.nodes : [];
+  const prevById = new Map();
+  prevNodes.forEach((node) => {
+    if (node && typeof node.id === 'string') prevById.set(node.id, node);
+  });
+  const changes = [];
+  for (const node of nextNodes) {
+    if (!node || typeof node.id !== 'string') continue;
+    const prev = prevById.get(node.id);
+    if (nodeChanged(prev, node)) {
+      changes.push({ node, prev });
+    }
+  }
+  return changes;
+};
+
 async function mergeAndUpdateSession(sessionId, incomingState) {
   const client = await pool.connect();
   try {
@@ -1508,6 +2014,7 @@ async function mergeAndUpdateSession(sessionId, incomingState) {
       await client.query('ROLLBACK');
       return null;
     }
+    const previousState = row.state;
     const merged = mergeState(row.state, incomingState);
     const updated = await client.query(
       `UPDATE sessions
@@ -1517,7 +2024,7 @@ async function mergeAndUpdateSession(sessionId, incomingState) {
       [merged, sessionId],
     );
     await client.query('COMMIT');
-    return updated.rows[0] ?? null;
+    return { updated: updated.rows[0] ?? null, previous: previousState };
   } catch (e) {
     try {
       await client.query('ROLLBACK');
@@ -1529,6 +2036,66 @@ async function mergeAndUpdateSession(sessionId, incomingState) {
     client.release();
   }
 }
+
+const buildSessionAlertEvents = async ({ sessionId, sessionName, prevState, nextState, actor }) => {
+  const changes = collectChangedNodes(prevState, nextState);
+  if (!changes.length) return [];
+  const participants = await listSessionSavers(sessionId);
+  const participantIds = new Set(participants.map((p) => p.id));
+  const alerts = [];
+
+  for (const change of changes) {
+    const { node, prev } = change;
+    const summaryLines = limitLines(buildChangeSummary(prev, node));
+    const changeSummary = summaryLines.join('\n');
+    const mentionDiff = diffMentions(prev?.mentions, node?.mentions);
+    const mentionRecipients = new Set();
+    if (mentionDiff.addedAll) {
+      participantIds.forEach((id) => mentionRecipients.add(id));
+    }
+    mentionDiff.addedIds.forEach((id) => mentionRecipients.add(id));
+    if (actor?.id) mentionRecipients.delete(actor.id);
+
+    const mentions = mentionInfo(node?.mentions);
+    const recipients = new Set();
+    if (mentions.hasAll) {
+      participantIds.forEach((id) => recipients.add(id));
+    }
+    mentions.ids.forEach((id) => recipients.add(id));
+    if (node?.authorId) recipients.add(node.authorId);
+    if (actor?.id) recipients.delete(actor.id);
+    mentionRecipients.forEach((id) => recipients.delete(id));
+    if (recipients.size) {
+      for (const userId of recipients) {
+        alerts.push({
+          userId,
+          event: ALERT_EVENTS.cardChanges,
+          sessionId,
+          sessionName,
+          actor,
+          nodes: [{ id: node.id, title: nodeTitle(node) }],
+          message: changeSummary,
+        });
+      }
+    }
+
+    if (mentionRecipients.size) {
+      for (const userId of mentionRecipients) {
+        alerts.push({
+          userId,
+          event: ALERT_EVENTS.mentionAdded,
+          fallbackEvent: ALERT_EVENTS.cardChanges,
+          sessionId,
+          sessionName,
+          actor,
+          nodes: [{ id: node.id, title: nodeTitle(node) }],
+          message: changeSummary,
+        });
+      }
+    }
+  }
+  return alerts;
+};
 
 function serializeSession(row) {
   if (!row) return null;
@@ -1546,6 +2113,357 @@ function serializeSession(row) {
     },
   };
 }
+
+const fetchWithTimeout = async (url, options, timeoutMs) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const formatNodeList = (nodes) => {
+  const list = nodes.map((node) => nodeTitle(node));
+  const preview = list.slice(0, 3);
+  const extra = list.length - preview.length;
+  if (!preview.length) return 'Untitled card';
+  return extra > 0 ? `${preview.join(', ')} +${extra} more` : preview.join(', ');
+};
+
+const snippetText = (value, maxLen = 180) => {
+  if (!value || typeof value !== 'string') return '';
+  const clean = value.replace(/\s+/g, ' ').trim();
+  if (clean.length <= maxLen) return clean;
+  return `${clean.slice(0, maxLen).trim()}…`;
+};
+
+const formatValue = (value, maxLen = 80) => {
+  if (value === null || value === undefined) return '—';
+  if (typeof value === 'number' && !Number.isNaN(value)) return String(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'string') {
+    const clean = value.replace(/\s+/g, ' ').trim();
+    if (!clean) return '—';
+    return clean.length <= maxLen ? clean : `${clean.slice(0, maxLen).trim()}…`;
+  }
+  try {
+    return formatValue(JSON.stringify(value), maxLen);
+  } catch {
+    return '—';
+  }
+};
+
+const formatPercent = (value) => {
+  if (value === null || value === undefined || value === '') return '—';
+  const num = typeof value === 'number' ? value : Number(value);
+  if (Number.isNaN(num)) return formatValue(value);
+  return `${num}%`;
+};
+
+const buildChangeSummary = (prev, next) => {
+  const lines = [];
+  lines.push(`Card: ${nodeTitle(next)}`);
+  if (!prev) {
+    lines.push('Created');
+    return lines;
+  }
+  if (prev.title !== next.title) {
+    lines.push(`Title: "${formatValue(prev.title)}" -> "${formatValue(next.title)}"`);
+  }
+  if (prev.content !== next.content) {
+    const nextContent = formatValue(next.content, 140);
+    lines.push(nextContent === '—' ? 'Description cleared' : `Description: ${nextContent}`);
+  }
+  if (prev.status !== next.status) {
+    lines.push(`Status: ${formatValue(prev.status)} -> ${formatValue(next.status)}`);
+  }
+  if (prev.progress !== next.progress) {
+    lines.push(`Progress: ${formatPercent(prev.progress)} -> ${formatPercent(next.progress)}`);
+  }
+  if (prev.energy !== next.energy) {
+    lines.push(`Energy: ${formatValue(prev.energy)} -> ${formatValue(next.energy)}`);
+  }
+  if (prev.clarity !== next.clarity) {
+    lines.push(`Clarity: ${formatValue(prev.clarity)} -> ${formatValue(next.clarity)}`);
+  }
+  if (prev.type !== next.type) {
+    lines.push(`Type: ${formatValue(prev.type)} -> ${formatValue(next.type)}`);
+  }
+  if (prev.startDate !== next.startDate) {
+    lines.push(`Start date: ${formatValue(prev.startDate)} -> ${formatValue(next.startDate)}`);
+  }
+  if (prev.endDate !== next.endDate) {
+    lines.push(`End date: ${formatValue(prev.endDate)} -> ${formatValue(next.endDate)}`);
+  }
+  const prevAttachments = Array.isArray(prev.attachments) ? prev.attachments.length : 0;
+  const nextAttachments = Array.isArray(next.attachments) ? next.attachments.length : 0;
+  if (prevAttachments !== nextAttachments) {
+    lines.push(`Attachments: ${prevAttachments} -> ${nextAttachments}`);
+  }
+  const prevMentions = Array.isArray(prev.mentions) ? prev.mentions : [];
+  const nextMentions = Array.isArray(next.mentions) ? next.mentions : [];
+  if (JSON.stringify(prevMentions) !== JSON.stringify(nextMentions)) {
+    lines.push('Mentions updated');
+  }
+  return lines;
+};
+
+const limitLines = (lines, maxLines = 8) => {
+  if (!Array.isArray(lines) || lines.length <= maxLines) return Array.isArray(lines) ? lines : [];
+  const trimmed = lines.slice(0, maxLines);
+  trimmed.push('More changes omitted.');
+  return trimmed;
+};
+
+const resolveTelegramChatId = (settings, linkedId) => (
+  settings?.channels?.telegram?.chatId || linkedId || null
+);
+
+const renderLinkList = ({ links, max = 3, mode }) => {
+  const items = Array.isArray(links) ? links : [];
+  if (!items.length) return { text: '', extra: 0 };
+  const list = items.slice(0, max);
+  const extra = items.length - list.length;
+  if (mode === 'html') {
+    const html = list.map((item) => `<a href="${escapeHtml(item.url)}">${escapeHtml(item.title)}</a>`).join('<br/>');
+    return { text: html, extra };
+  }
+  if (mode === 'telegram') {
+    const html = list.map((item) => `<a href="${escapeHtml(item.url)}">${escapeHtml(item.title)}</a>`).join('\n');
+    return { text: html, extra };
+  }
+  const plain = list.map((item) => `${item.title}: ${item.url}`).join('\n');
+  return { text: plain, extra };
+};
+
+const buildAlertMessage = (event, payload) => {
+  const sessionLabel = payload.sessionName || 'canvas';
+  const sessionLabelHtml = escapeHtml(sessionLabel);
+  const links = buildAlertLinkSet({ sessionId: payload.sessionId, nodes: payload.nodes || [] });
+  const textLinks = renderLinkList({ links, mode: 'text' });
+  const htmlLinks = renderLinkList({ links, mode: 'html' });
+  const telegramLinks = renderLinkList({ links, mode: 'telegram' });
+  const changeLines = typeof payload.message === 'string' && payload.message.trim()
+    ? payload.message.split('\n').filter((line) => line.trim())
+    : [];
+  const quoteText = changeLines.length
+    ? changeLines.map((line) => `> ${line}`).join('\n')
+    : '';
+  const quoteHtml = changeLines.length
+    ? `<blockquote>${changeLines.map((line) => escapeHtml(line)).join('<br/>')}</blockquote>`
+    : '';
+  const quoteTelegram = changeLines.length
+    ? changeLines.map((line) => `<i>&gt; ${escapeHtml(line)}</i>`).join('\n')
+    : '';
+
+  if (event === ALERT_EVENTS.cardChanges) {
+    const actorName = payload.actor?.name ? String(payload.actor.name) : '';
+    const actorText = actorName ? ` by ${actorName}` : '';
+    const actorTextHtml = actorName ? ` by ${escapeHtml(actorName)}` : '';
+    const header = payload.nodes?.length === 1 ? 'Card updated' : 'Cards updated';
+    const subject = payload.nodes?.length === 1 ? `Card updated: ${nodeTitle(payload.nodes?.[0])}` : `Cards updated (${payload.nodes?.length || 0})`;
+    const textParts = [`${header}${actorText} in ${sessionLabel}`];
+    if (textLinks.text) textParts.push(textLinks.text);
+    if (textLinks.extra > 0) textParts.push(`+${textLinks.extra} more`);
+    const htmlParts = [`${escapeHtml(header)}${actorTextHtml} in ${sessionLabelHtml}`];
+    if (htmlLinks.text) htmlParts.push(htmlLinks.text);
+    if (htmlLinks.extra > 0) htmlParts.push(`+${htmlLinks.extra} more`);
+    const telegramParts = [`${escapeHtml(header)}${actorTextHtml} in ${sessionLabelHtml}`];
+    if (telegramLinks.text) telegramParts.push(telegramLinks.text);
+    if (telegramLinks.extra > 0) telegramParts.push(`+${telegramLinks.extra} more`);
+    if (quoteText) textParts.push('', quoteText);
+    if (quoteHtml) htmlParts.push('', quoteHtml);
+    if (quoteTelegram) telegramParts.push('', quoteTelegram);
+    return {
+      subject,
+      text: `**${subject}**\n\n${textParts.join('\n')}`,
+      html: `<strong>${escapeHtml(subject)}</strong><br/><br/>${htmlParts.join('<br/>')}`,
+      telegram: {
+        text: `<b>${escapeHtml(subject)}</b>\n\n${telegramParts.join('\n')}`,
+        parseMode: 'HTML',
+      },
+    };
+  }
+  if (event === ALERT_EVENTS.mentionAdded) {
+    const header = payload.nodes?.length === 1 ? 'You were tagged' : 'You were tagged in cards';
+    const subject = payload.nodes?.length === 1 ? `You were tagged in ${nodeTitle(payload.nodes?.[0])}` : `You were tagged in ${payload.nodes?.length || 0} cards`;
+    const textParts = [`${header} in ${sessionLabel}`];
+    if (textLinks.text) textParts.push(textLinks.text);
+    if (textLinks.extra > 0) textParts.push(`+${textLinks.extra} more`);
+    const htmlParts = [`${escapeHtml(header)} in ${sessionLabelHtml}`];
+    if (htmlLinks.text) htmlParts.push(htmlLinks.text);
+    if (htmlLinks.extra > 0) htmlParts.push(`+${htmlLinks.extra} more`);
+    const telegramParts = [`${escapeHtml(header)} in ${sessionLabelHtml}`];
+    if (telegramLinks.text) telegramParts.push(telegramLinks.text);
+    if (telegramLinks.extra > 0) telegramParts.push(`+${telegramLinks.extra} more`);
+    return {
+      subject,
+      text: `**${subject}**\n\n${textParts.join('\n')}`,
+      html: `<strong>${escapeHtml(subject)}</strong><br/><br/>${htmlParts.join('<br/>')}`,
+      telegram: {
+        text: `<b>${escapeHtml(subject)}</b>\n\n${telegramParts.join('\n')}`,
+        parseMode: 'HTML',
+      },
+    };
+  }
+  if (event === ALERT_EVENTS.agentReply) {
+    const snippet = snippetText(payload.message || '');
+    const suffix = snippet ? `: ${snippet}` : '';
+    return {
+      subject: 'Raven replied',
+      text: `**Raven replied**\n\nRaven replied in ${sessionLabel}${suffix}`,
+      html: `<strong>Raven replied</strong><br/><br/>Raven replied in ${sessionLabelHtml}${escapeHtml(suffix)}`,
+      telegram: {
+        text: `<b>Raven replied</b>\n\nRaven replied in ${sessionLabelHtml}${escapeHtml(suffix)}`,
+        parseMode: 'HTML',
+      },
+    };
+  }
+  return { subject: 'Notification', text: 'You have a new update.' };
+};
+
+const sendAlertEmail = async ({ to, subject, text, html }) => {
+  if (!SMTP_URL) return false;
+  const transport = nodemailer.createTransport(SMTP_URL);
+  await transport.sendMail({
+    from: MAIL_FROM,
+    to,
+    subject,
+    text,
+    html,
+  });
+  return true;
+};
+
+const sendTelegramAlertMessage = async ({ chatId, text, replyMarkup, parseMode }) => {
+  if (!TELEGRAM_ALERT_BOT_TOKEN) return false;
+  const url = `https://api.telegram.org/bot${TELEGRAM_ALERT_BOT_TOKEN}/sendMessage`;
+  const payload = { chat_id: chatId, text };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  if (parseMode) payload.parse_mode = parseMode;
+  payload.disable_web_page_preview = true;
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+    ALERT_WEBHOOK_TIMEOUT_MS,
+  );
+  return res.ok;
+};
+
+const sendAlertTelegram = async ({ chatId, text, parseMode }) => (
+  sendTelegramAlertMessage({ chatId, text, parseMode })
+);
+
+const sendAlertWebhook = async ({ url, payload }) => {
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-raven-event': payload.event },
+      body: JSON.stringify(payload),
+    },
+    ALERT_WEBHOOK_TIMEOUT_MS,
+  );
+  return res.ok;
+};
+
+const groupAlerts = (alerts) => {
+  const grouped = new Map();
+  for (const alert of alerts) {
+    const key = `${alert.event}:${alert.userId}`;
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, { ...alert, nodes: alert.nodes ? [...alert.nodes] : [] });
+      continue;
+    }
+    if (alert.nodes?.length) {
+      const byId = new Map(existing.nodes.map((n) => [n.id, n]));
+      for (const node of alert.nodes) {
+        if (!node?.id) continue;
+        byId.set(node.id, node);
+      }
+      existing.nodes = Array.from(byId.values());
+    }
+    if (alert.message) {
+      existing.message = existing.message ? `${existing.message}\n\n${alert.message}` : alert.message;
+    }
+  }
+  return Array.from(grouped.values());
+};
+
+const dispatchAlertEvents = async (alerts) => {
+  if (!alerts.length) return;
+  const userIds = Array.from(new Set(alerts.map((item) => item.userId)));
+  const [settingsMap, usersMap] = await Promise.all([
+    listAlertingSettingsByUserIds(userIds),
+    listUsersByIds(userIds),
+  ]);
+  const telegramLinkedMap = await listTelegramAlertLinksByUserIds(userIds);
+  const resolvedAlerts = [];
+  for (const alert of alerts) {
+    const settings = settingsMap.get(alert.userId) ?? normalizeAlertingSettings({});
+    if (settings.events?.[alert.event]) {
+      resolvedAlerts.push(alert);
+      continue;
+    }
+    if (alert.fallbackEvent && settings.events?.[alert.fallbackEvent]) {
+      resolvedAlerts.push({ ...alert, event: alert.fallbackEvent });
+    }
+  }
+  if (!resolvedAlerts.length) return;
+  const grouped = groupAlerts(resolvedAlerts);
+
+  const tasks = [];
+  for (const alert of grouped) {
+    const settings = settingsMap.get(alert.userId) ?? normalizeAlertingSettings({});
+    const user = usersMap.get(alert.userId);
+    if (!user) continue;
+    const linkedId = telegramLinkedMap.get(alert.userId) ?? null;
+    const message = buildAlertMessage(alert.event, alert);
+    const webhookPayload = {
+      event: alert.event,
+      timestamp: new Date().toISOString(),
+      user: { id: user.id, name: user.name, email: user.email },
+      session: { id: alert.sessionId, name: alert.sessionName ?? null },
+      actor: alert.actor ?? null,
+      nodes: alert.nodes ?? [],
+      message: alert.message ?? null,
+    };
+
+    if (settings.channels?.email?.enabled && user.email) {
+      tasks.push(sendAlertEmail({ to: user.email, subject: message.subject, text: message.text, html: message.html }).catch((err) => {
+        console.warn('[alerting] email failed', err?.message ?? err);
+      }));
+    }
+    if (settings.channels?.telegram?.enabled) {
+      const chatId = resolveTelegramChatId(settings, linkedId);
+      if (chatId) {
+        const tg = message.telegram;
+        tasks.push(sendAlertTelegram({
+          chatId,
+          text: tg?.text ?? message.text,
+          parseMode: tg?.parseMode,
+        }).catch((err) => {
+          console.warn('[alerting] telegram failed', err?.message ?? err);
+        }));
+      }
+    }
+    if (settings.channels?.webhook?.enabled && settings.channels.webhook.url) {
+      tasks.push(sendAlertWebhook({ url: settings.channels.webhook.url, payload: webhookPayload }).catch((err) => {
+        console.warn('[alerting] webhook failed', err?.message ?? err);
+      }));
+    }
+  }
+  if (tasks.length) {
+    await Promise.allSettled(tasks);
+  }
+};
 
 async function cleanupExpiredSessions() {
   await pool.query('DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= NOW()');
@@ -1906,6 +2824,232 @@ app.delete('/api/integrations/ai/key', async (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/integrations/alerting', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const user = await getUserById(auth.userId);
+  const settings = await getAlertingSettings(auth.userId);
+  const telegramLink = await getTelegramAlertLink(auth.userId);
+  const telegramPending = await getTelegramAlertLinkRequest(auth.userId);
+  res.json({
+    settings,
+    meta: {
+      email: user?.email ?? null,
+      emailVerified: !!user?.verified,
+      telegramLinkedId: telegramLink?.chatId ?? null,
+      telegramPending: telegramPending
+        ? { token: telegramPending.token, requestedAt: telegramPending.createdAt ?? null, expiresAt: telegramPending.expiresAt ?? null }
+        : null,
+      telegramConfigured: !!(TELEGRAM_ALERT_BOT_USERNAME && TELEGRAM_ALERT_BOT_TOKEN),
+      telegramBotUsername: TELEGRAM_ALERT_BOT_USERNAME || null,
+      telegramBotLink: TELEGRAM_ALERT_BOT_USERNAME ? `https://t.me/${TELEGRAM_ALERT_BOT_USERNAME}` : null,
+      webhookConfigured: true,
+    },
+  });
+});
+
+app.post('/api/integrations/alerting', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const current = await getAlertingSettings(auth.userId);
+  const merged = mergeAlertingSettings(current, req.body);
+  const user = await getUserById(auth.userId);
+  const telegramLink = await getTelegramAlertLink(auth.userId);
+  const telegramPending = await getTelegramAlertLinkRequest(auth.userId);
+
+  if (merged.channels.webhook.enabled && !merged.channels.webhook.url) {
+    return res.status(400).json({ error: 'bad_webhook_url' });
+  }
+  if (merged.channels.telegram.enabled && !merged.channels.telegram.chatId && !telegramLink?.chatId) {
+    return res.status(400).json({ error: 'telegram_not_linked' });
+  }
+  if (merged.channels.email.enabled && !user?.email) {
+    return res.status(400).json({ error: 'email_missing' });
+  }
+
+  const saved = await upsertAlertingSettings({ userId: auth.userId, settings: merged });
+  res.json({
+    settings: saved,
+    meta: {
+      email: user?.email ?? null,
+      emailVerified: !!user?.verified,
+      telegramLinkedId: telegramLink?.chatId ?? null,
+      telegramPending: telegramPending
+        ? { token: telegramPending.token, requestedAt: telegramPending.createdAt ?? null, expiresAt: telegramPending.expiresAt ?? null }
+        : null,
+      telegramConfigured: !!(TELEGRAM_ALERT_BOT_USERNAME && TELEGRAM_ALERT_BOT_TOKEN),
+      telegramBotUsername: TELEGRAM_ALERT_BOT_USERNAME || null,
+      telegramBotLink: TELEGRAM_ALERT_BOT_USERNAME ? `https://t.me/${TELEGRAM_ALERT_BOT_USERNAME}` : null,
+      webhookConfigured: true,
+    },
+  });
+});
+
+app.post('/api/integrations/alerting/telegram/confirm', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  if (!token) return res.status(400).json({ error: 'bad_token' });
+
+  const pending = await consumeTelegramAlertLinkRequest({ userId: auth.userId, token });
+  if (!pending) return res.status(404).json({ error: 'link_not_found' });
+
+  const chatId = normalizeTelegramChatId(pending.chatId);
+  if (!chatId) return res.status(400).json({ error: 'bad_chat_id' });
+  const existing = await getTelegramAlertLinkByChatId(chatId);
+  if (existing && existing.userId !== auth.userId) {
+    return res.status(409).json({ error: 'telegram_already_linked' });
+  }
+
+  await upsertTelegramAlertLink({ userId: auth.userId, chatId });
+  const disconnectLabel = 'Отписаться от уведомлений';
+  const disconnectKeyboard = {
+    keyboard: [[{ text: disconnectLabel }]],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
+  await sendTelegramAlertMessage({
+    chatId,
+    text: 'Оповещения подключены. Теперь я буду присылать алерты сюда.',
+    replyMarkup: disconnectKeyboard,
+  }).catch(() => {});
+
+  res.json({ ok: true });
+});
+
+app.post('/api/integrations/alerting/telegram/decline', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  await clearTelegramAlertLinkRequest(auth.userId);
+  res.json({ ok: true });
+});
+
+app.post('/api/integrations/telegram/webhook', async (req, res) => {
+  if (TELEGRAM_ALERT_WEBHOOK_SECRET) {
+    const secret = req.headers?.['x-telegram-bot-api-secret-token'];
+    const headerValue = Array.isArray(secret) ? secret[0] : secret;
+    if (headerValue !== TELEGRAM_ALERT_WEBHOOK_SECRET) {
+      return res.status(401).json({ ok: false });
+    }
+  }
+  const update = req.body ?? {};
+  const message = update.message || update.edited_message || update.callback_query?.message || null;
+  const chatIdRaw = message?.chat?.id ?? null;
+  const chatId = normalizeTelegramChatId(chatIdRaw);
+  if (!chatId) return res.json({ ok: true });
+
+  const textRaw = typeof update.message?.text === 'string'
+    ? update.message.text
+    : typeof update.edited_message?.text === 'string'
+      ? update.edited_message.text
+      : typeof update.callback_query?.data === 'string'
+        ? update.callback_query.data
+        : '';
+  const text = String(textRaw || '').trim();
+  const connectLabel = 'Подключить уведомления';
+  const disconnectLabel = 'Отписаться от уведомлений';
+  const existingLink = await getTelegramAlertLinkByChatId(chatId);
+  const hasLink = !!existingLink;
+  const keyboard = {
+    keyboard: [[{ text: hasLink ? disconnectLabel : connectLabel }]],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
+  const lower = text.toLowerCase();
+  const wantsDisconnect = text === disconnectLabel
+    || lower.includes('отпис')
+    || lower.includes('unsubscribe')
+    || lower === '/stop';
+  const wantsConnect = !text
+    || text === connectLabel
+    || text.startsWith('/start')
+    || lower.includes('подключ');
+
+  if (wantsDisconnect) {
+    if (!hasLink) {
+      await sendTelegramAlertMessage({
+        chatId,
+        text: 'Уведомления уже отключены.',
+        replyMarkup: keyboard,
+      }).catch(() => {});
+      return res.json({ ok: true });
+    }
+    await deleteTelegramAlertLinkByChatId(chatId);
+    await clearTelegramAlertLinkRequest(existingLink.userId);
+    const reconnectKeyboard = {
+      keyboard: [[{ text: connectLabel }]],
+      resize_keyboard: true,
+      one_time_keyboard: true,
+    };
+    await sendTelegramAlertMessage({
+      chatId,
+      text: 'Оповещения отключены. Если захотите вернуть, нажмите кнопку ниже.',
+      replyMarkup: reconnectKeyboard,
+    }).catch(() => {});
+    return res.json({ ok: true });
+  }
+
+  if (wantsConnect) {
+    if (hasLink) {
+      await sendTelegramAlertMessage({
+        chatId,
+        text: 'Оповещения уже подключены. Если хотите отключить, нажмите кнопку ниже.',
+        replyMarkup: keyboard,
+      }).catch(() => {});
+      return res.json({ ok: true });
+    }
+    await sendTelegramAlertMessage({
+      chatId,
+      text: 'Чтобы подключить алерты, нажмите кнопку ниже и отправьте email, который используете в Raven.',
+      replyMarkup: keyboard,
+    }).catch(() => {});
+    return res.json({ ok: true });
+  }
+
+  if (!isEmailLike(text)) {
+    await sendTelegramAlertMessage({
+      chatId,
+      text: 'Отправьте email, который используете в Raven, чтобы подключить алерты.',
+      replyMarkup: keyboard,
+    }).catch(() => {});
+    return res.json({ ok: true });
+  }
+
+  const email = text.trim().toLowerCase();
+  const user = await getUserByEmail(email);
+  if (!user) {
+    await sendTelegramAlertMessage({
+      chatId,
+      text: 'Не нашел аккаунт с таким email. Проверьте адрес и попробуйте снова.',
+    }).catch(() => {});
+    return res.json({ ok: true });
+  }
+
+  if (existingLink && existingLink.userId !== user.id) {
+    await sendTelegramAlertMessage({
+      chatId,
+      text: 'Этот чат уже привязан к другому аккаунту.',
+    }).catch(() => {});
+    return res.json({ ok: true });
+  }
+  if (existingLink && existingLink.userId === user.id) {
+    await sendTelegramAlertMessage({
+      chatId,
+      text: 'Этот Telegram уже подключен к вашему аккаунту.',
+      replyMarkup: keyboard,
+    }).catch(() => {});
+    return res.json({ ok: true });
+  }
+
+  await createTelegramAlertLinkRequest({ userId: user.id, chatId });
+  await sendTelegramAlertMessage({
+    chatId,
+    text: 'Готово! Откройте Raven → Integrations → Alerting и подтвердите подключение.',
+  }).catch(() => {});
+
+  res.json({ ok: true });
+});
+
 app.post('/api/assistant/chat', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (auth) {
@@ -2044,6 +3188,13 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
       threadId,
       role: 'assistant',
       content: reply,
+    });
+    void notifyAgentReply({
+      userId: auth.userId,
+      sessionId: thread.sessionId ?? null,
+      message: reply,
+    }).catch((err) => {
+      console.warn('[alerting] agent reply failed', err?.message ?? err);
     });
     let context = assistantResult?.context ?? null;
     if (!context) {
@@ -2273,8 +3424,8 @@ app.get('/api/auth/providers', async (_req, res) => {
     email: true,
     google: !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET),
     yandex: !!(YANDEX_CLIENT_ID && YANDEX_CLIENT_SECRET),
-    telegram: !!(TELEGRAM_BOT_USERNAME && TELEGRAM_BOT_TOKEN),
-    telegramBotUsername: TELEGRAM_BOT_USERNAME || null,
+    telegram: !!(TELEGRAM_AUTH_BOT_USERNAME && TELEGRAM_AUTH_BOT_TOKEN),
+    telegramBotUsername: TELEGRAM_AUTH_BOT_USERNAME || null,
   });
 });
 
@@ -2591,75 +3742,18 @@ app.get('/api/auth/yandex/callback', async (req, res) => {
   }
 });
 
-app.get('/api/auth/telegram/start', async (req, res) => {
-  if (!TELEGRAM_BOT_USERNAME || !TELEGRAM_BOT_TOKEN) return res.status(501).json({ error: 'telegram_not_configured' });
-  const returnTo = sanitizeReturnTo(req.query?.returnTo);
-  res.cookie('oauth_return_to', returnTo, { httpOnly: true, sameSite: 'lax', secure: COOKIE_SECURE, path: '/' });
-  const authUrl = `${getBaseUrl(req)}/api/auth/telegram/callback`;
-
-  res.setHeader('content-type', 'text/html; charset=utf-8');
-  res.end(`<!doctype html>
-<html><head><meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Telegram login</title>
-<style>
-  body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0f18; color:#e6e6e6; }
-  .wrap { min-height:100vh; display:grid; place-items:center; padding:24px; }
-  .card { max-width:520px; width:100%; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); border-radius:16px; padding:18px; }
-  .title { font-weight:600; margin-bottom:10px; }
-  .hint { font-size:12px; opacity:.75; margin-top:10px; }
-</style>
-</head><body>
-<div class="wrap"><div class="card">
-  <div class="title">Вход через Telegram</div>
-  <div class="hint" id="hint">Ожидание входа…</div>
-  <script async src="https://telegram.org/js/telegram-widget.js?22"
-    data-telegram-login="${String(TELEGRAM_BOT_USERNAME)}"
-    data-size="large"
-    data-radius="12"
-    data-userpic="false"
-    data-onauth="onTelegramAuth(user)">
-  </script>
-  <script>
-    const AUTH_URL = ${JSON.stringify(authUrl)};
-    const RETURN_TO = ${JSON.stringify(returnTo)};
-    function onTelegramAuth(user) {
-      try {
-        const hint = document.getElementById('hint');
-        if (hint) hint.textContent = 'Входим…';
-        const params = new URLSearchParams();
-        if (user && typeof user === 'object') {
-          for (const [k, v] of Object.entries(user)) {
-            if (v === undefined || v === null) continue;
-            params.set(k, String(v));
-          }
-        }
-        params.set('returnTo', RETURN_TO);
-        window.location.href = AUTH_URL + '?' + params.toString();
-      } catch (e) {
-        window.location.href = AUTH_URL;
-      }
-    }
-  </script>
-</div></div>
-</body></html>`);
-});
-
-app.get('/api/auth/telegram/callback', async (req, res) => {
-  if (!TELEGRAM_BOT_USERNAME || !TELEGRAM_BOT_TOKEN) return res.status(501).send('telegram_not_configured');
-  const returnTo = req.cookies?.oauth_return_to ?? sanitizeReturnTo(req.query?.returnTo) ?? '/';
-  res.clearCookie('oauth_return_to', { path: '/' });
-
-  const q = req.query ?? {};
+const parseTelegramAuthPayload = (query, botToken) => {
+  const q = query ?? {};
+  if (!botToken) return { error: 'telegram_not_configured' };
   const hash = typeof q.hash === 'string' ? q.hash : null;
   const id = typeof q.id === 'string' ? q.id : null;
   const authDateStr = typeof q.auth_date === 'string' ? q.auth_date : null;
-  if (!hash || !id || !authDateStr) return res.status(400).send('bad_request');
+  if (!hash || !id || !authDateStr) return { error: 'bad_request' };
 
   const authDate = Number(authDateStr);
-  if (!Number.isFinite(authDate)) return res.status(400).send('bad_request');
+  if (!Number.isFinite(authDate)) return { error: 'bad_request' };
   const nowSec = Math.floor(Date.now() / 1000);
-  if (Math.abs(nowSec - authDate) > 60 * 60 * 24) return res.status(400).send('auth_date_too_old');
+  if (Math.abs(nowSec - authDate) > 60 * 60 * 24) return { error: 'auth_date_too_old' };
 
   const allowed = new Set(['id', 'first_name', 'last_name', 'username', 'photo_url', 'auth_date']);
   const entries = Object.entries(q)
@@ -2670,13 +3764,163 @@ app.get('/api/auth/telegram/callback', async (req, res) => {
 
   entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   const dataCheckString = entries.map(([k, v]) => `${k}=${v}`).join('\n');
-  const secretKey = createHash('sha256').update(TELEGRAM_BOT_TOKEN).digest();
+  const secretKey = createHash('sha256').update(botToken).digest();
   const computedHash = createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-  if (computedHash !== hash.toLowerCase()) return res.status(401).send('invalid_hash');
+  if (computedHash !== hash.toLowerCase()) return { error: 'invalid_hash' };
 
-  const firstName = typeof q.first_name === 'string' ? q.first_name : '';
-  const lastName = typeof q.last_name === 'string' ? q.last_name : '';
-  const username = typeof q.username === 'string' ? q.username : '';
+  return {
+    data: {
+      id,
+      firstName: typeof q.first_name === 'string' ? q.first_name : '',
+      lastName: typeof q.last_name === 'string' ? q.last_name : '',
+      username: typeof q.username === 'string' ? q.username : '',
+    },
+  };
+};
+
+const renderTelegramWidgetPage = ({
+  title,
+  hint,
+  callbackUrl,
+  returnTo,
+  botUsername,
+}) => `<!doctype html>
+<html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>${title}</title>
+<style>
+  body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0f18; color:#e6e6e6; }
+  .wrap { min-height:100vh; display:grid; place-items:center; padding:24px; }
+  .card { max-width:520px; width:100%; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); border-radius:16px; padding:18px; }
+  .title { font-weight:600; margin-bottom:10px; }
+  .hint { font-size:12px; opacity:.75; margin-top:10px; }
+</style>
+</head><body>
+<div class="wrap"><div class="card">
+  <div class="title">${title}</div>
+  <div class="hint" id="hint">${hint}</div>
+  <script async src="https://telegram.org/js/telegram-widget.js?22"
+    data-telegram-login="${String(botUsername)}"
+    data-size="large"
+    data-radius="12"
+    data-userpic="false"
+    data-onauth="onTelegramAuth(user)">
+  </script>
+  <script>
+    const CALLBACK_URL = ${JSON.stringify(callbackUrl)};
+    const RETURN_TO = ${JSON.stringify(returnTo)};
+    function onTelegramAuth(user) {
+      try {
+        const hint = document.getElementById('hint');
+        if (hint) hint.textContent = 'Готово, возвращаемся…';
+        const params = new URLSearchParams();
+        if (user && typeof user === 'object') {
+          for (const [k, v] of Object.entries(user)) {
+            if (v === undefined || v === null) continue;
+            params.set(k, String(v));
+          }
+        }
+        params.set('returnTo', RETURN_TO);
+        window.location.href = CALLBACK_URL + '?' + params.toString();
+      } catch (e) {
+        window.location.href = CALLBACK_URL;
+      }
+    }
+  </script>
+</div></div>
+</body></html>`;
+
+app.get('/api/integrations/telegram/start', async (req, res) => {
+  if (!TELEGRAM_ALERT_BOT_USERNAME || !TELEGRAM_ALERT_BOT_TOKEN) return res.status(501).json({ error: 'telegram_not_configured' });
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).send('unauthorized');
+
+  const returnTo = sanitizeReturnTo(req.query?.returnTo);
+  res.cookie('telegram_link_return_to', returnTo, { httpOnly: true, sameSite: 'lax', secure: COOKIE_SECURE, path: '/' });
+  const callbackUrl = `${getBaseUrl(req)}/api/integrations/telegram/callback`;
+
+  res.setHeader('content-type', 'text/html; charset=utf-8');
+  res.end(renderTelegramWidgetPage({
+    title: 'Подключение Telegram',
+    hint: 'Подтвердите подключение…',
+    callbackUrl,
+    returnTo,
+    botUsername: TELEGRAM_ALERT_BOT_USERNAME,
+  }));
+});
+
+app.get('/api/integrations/telegram/callback', async (req, res) => {
+  if (!TELEGRAM_ALERT_BOT_USERNAME || !TELEGRAM_ALERT_BOT_TOKEN) return res.status(501).send('telegram_not_configured');
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).send('unauthorized');
+  const returnTo = req.cookies?.telegram_link_return_to ?? sanitizeReturnTo(req.query?.returnTo) ?? '/';
+  res.clearCookie('telegram_link_return_to', { path: '/' });
+
+  const parsed = parseTelegramAuthPayload(req.query, TELEGRAM_ALERT_BOT_TOKEN);
+  if (parsed.error === 'invalid_hash') return res.status(401).send('invalid_hash');
+  if (parsed.error) return res.status(400).send(parsed.error);
+  const providerAccountId = parsed.data.id;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query(
+      'SELECT user_id FROM oauth_accounts WHERE provider = $1 AND provider_account_id = $2',
+      ['telegram', providerAccountId],
+    );
+    const linkedUserId = existing.rows[0]?.user_id ?? null;
+    if (linkedUserId && linkedUserId !== auth.userId) {
+      await client.query('ROLLBACK');
+      return res.status(409).send('telegram_already_linked');
+    }
+
+    await client.query('DELETE FROM oauth_accounts WHERE provider = $1 AND user_id = $2', ['telegram', auth.userId]);
+    await client.query(
+      `INSERT INTO oauth_accounts (provider, provider_account_id, user_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (provider, provider_account_id) DO UPDATE SET user_id = EXCLUDED.user_id`,
+      ['telegram', providerAccountId, auth.userId],
+    );
+    await client.query('COMMIT');
+    res.redirect(sanitizeReturnTo(returnTo));
+  } catch {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore
+    }
+    res.status(500).send('telegram_link_failed');
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/auth/telegram/start', async (req, res) => {
+  if (!TELEGRAM_AUTH_BOT_USERNAME || !TELEGRAM_AUTH_BOT_TOKEN) return res.status(501).json({ error: 'telegram_not_configured' });
+  const returnTo = sanitizeReturnTo(req.query?.returnTo);
+  res.cookie('oauth_return_to', returnTo, { httpOnly: true, sameSite: 'lax', secure: COOKIE_SECURE, path: '/' });
+  const callbackUrl = `${getBaseUrl(req)}/api/auth/telegram/callback`;
+
+  res.setHeader('content-type', 'text/html; charset=utf-8');
+  res.end(renderTelegramWidgetPage({
+    title: 'Вход через Telegram',
+    hint: 'Ожидание входа…',
+    callbackUrl,
+    returnTo,
+    botUsername: TELEGRAM_AUTH_BOT_USERNAME,
+  }));
+});
+
+app.get('/api/auth/telegram/callback', async (req, res) => {
+  if (!TELEGRAM_AUTH_BOT_USERNAME || !TELEGRAM_AUTH_BOT_TOKEN) return res.status(501).send('telegram_not_configured');
+  const returnTo = req.cookies?.oauth_return_to ?? sanitizeReturnTo(req.query?.returnTo) ?? '/';
+  res.clearCookie('oauth_return_to', { path: '/' });
+
+  const parsed = parseTelegramAuthPayload(req.query, TELEGRAM_AUTH_BOT_TOKEN);
+  if (parsed.error === 'invalid_hash') return res.status(401).send('invalid_hash');
+  if (parsed.error) return res.status(400).send(parsed.error);
+
+  const { id, firstName, lastName, username } = parsed.data;
   const name = [firstName, lastName].filter(Boolean).join(' ').trim() || (username ? `@${username}` : `Telegram ${id}`);
 
   const providerAccountId = id;
@@ -2790,9 +4034,26 @@ app.get('/api/sessions/:id/savers', async (req, res) => {
 app.put('/api/sessions/:id', async (req, res) => {
   const state = req.body?.state;
   if (!state) return res.status(400).json({ error: 'bad_request' });
-  const updated = await mergeAndUpdateSession(req.params.id, state);
-  if (!updated) return res.status(404).json({ error: 'not_found' });
-  res.json(serializeSession(updated));
+  const result = await mergeAndUpdateSession(req.params.id, state);
+  if (!result?.updated) return res.status(404).json({ error: 'not_found' });
+  res.json(serializeSession(result.updated));
+  const auth = authUserFromRequest(req);
+  void (async () => {
+    try {
+      const actorUser = auth?.userId ? await getUserById(auth.userId) : null;
+      const actor = actorUser ? { id: actorUser.id, name: actorUser.name ?? null } : null;
+      const alerts = await buildSessionAlertEvents({
+        sessionId: req.params.id,
+        sessionName: result.updated?.name ?? null,
+        prevState: result.previous,
+        nextState: result.updated?.state,
+        actor,
+      });
+      await dispatchAlertEvents(alerts);
+    } catch (err) {
+      console.warn('[alerting] session update failed', err?.message ?? err);
+    }
+  })();
 });
 
 app.delete('/api/sessions/:id', async (req, res) => {
@@ -3108,10 +4369,27 @@ wss.on('connection', async (ws, req) => {
     const state = msg?.state;
     if (!state) return;
 
-    const updated = await mergeAndUpdateSession(sessionId, state);
-    if (!updated) return;
-    const payload = serializeSession(updated);
+    const result = await mergeAndUpdateSession(sessionId, state);
+    if (!result?.updated) return;
+    const payload = serializeSession(result.updated);
     broadcast(sessionId, { type: 'update', ...payload, sourceClientId: clientId, requestId });
+
+    const actorMeta = ws._meta;
+    const actor = actorMeta?.userId ? { id: actorMeta.userId, name: actorMeta.name ?? null } : null;
+    void (async () => {
+      try {
+        const alerts = await buildSessionAlertEvents({
+          sessionId,
+          sessionName: result.updated?.name ?? null,
+          prevState: result.previous,
+          nextState: result.updated?.state,
+          actor,
+        });
+        await dispatchAlertEvents(alerts);
+      } catch (err) {
+        console.warn('[alerting] ws update failed', err?.message ?? err);
+      }
+    })();
   });
 
   ws.on('close', (code, reason) => {
