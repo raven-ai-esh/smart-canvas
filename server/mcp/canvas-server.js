@@ -23,10 +23,13 @@ const nowTs = () => Date.now();
 const ts = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
 const tombstoneFor = (now, updatedAt) => Math.max(now, ts(updatedAt) + 1);
 const AI_AUTHOR_NAME = 'Raven';
+const MCP_TECH_USER_ID = process.env.MCP_TECH_USER_ID ?? 'raven-bot';
+const MCP_WS_ACK_TIMEOUT_MS = Number(process.env.MCP_WS_ACK_TIMEOUT_MS ?? 4000);
 const MCP_AUTH_CACHE_TTL_MS = Number(process.env.MCP_AUTH_CACHE_TTL_MS ?? 60_000);
 const authCache = new Map();
 const MCP_LOG_ENABLED = process.env.MCP_LOG_ENABLED !== 'false';
 const MCP_LOG_TRUNCATE = Number(process.env.MCP_LOG_TRUNCATE ?? 800);
+const MCP_TOOL_LIST_LIMIT = Number(process.env.MCP_TOOL_LIST_LIMIT ?? 200);
 
 const truncateString = (value) => {
   if (typeof value !== 'string') return value;
@@ -59,8 +62,8 @@ const scrubValue = (value, depth = 0) => {
       out[key] = '[redacted]';
       continue;
     }
-    if (key === 'dataUrl') {
-      out[key] = '[data_url_omitted]';
+    if (key === 'dataUrl' || key === 'avatarUrl' || key === 'src') {
+      out[key] = '[image_omitted]';
       continue;
     }
     out[key] = scrubValue(item, depth + 1);
@@ -74,6 +77,36 @@ const logEvent = (event, payload) => {
   console.log(`[mcp] ${event} ${JSON.stringify(safe)}`);
 };
 
+const normalizeListLimit = (limit) => {
+  const base = Number.isFinite(MCP_TOOL_LIST_LIMIT) && MCP_TOOL_LIST_LIMIT > 0
+    ? Math.floor(MCP_TOOL_LIST_LIMIT)
+    : 200;
+  if (!Number.isFinite(limit) || limit <= 0) return base;
+  return Math.min(Math.floor(limit), base);
+};
+
+const limitList = (items, limit) => {
+  const list = Array.isArray(items) ? items : [];
+  const capped = normalizeListLimit(limit);
+  const truncated = list.length > capped;
+  return {
+    items: truncated ? list.slice(0, capped) : list,
+    total: list.length,
+    limit: capped,
+    truncated,
+  };
+};
+
+const estimatePayloadSize = (payload) => {
+  if (payload === null || payload === undefined) return 0;
+  if (typeof payload === 'string') return payload.length;
+  try {
+    return JSON.stringify(payload).length;
+  } catch {
+    return 0;
+  }
+};
+
 const getAuthTokenFromRequest = (req) => {
   const header = req.headers?.authorization;
   if (typeof header === 'string' && header.toLowerCase().startsWith('bearer ')) {
@@ -85,15 +118,26 @@ const getAuthTokenFromRequest = (req) => {
   return null;
 };
 
+const getSessionIdFromRequest = (req) => {
+  const header = req.headers?.['x-session-id'] ?? req.headers?.['mcp-session-id'];
+  if (typeof header === 'string' && header.trim()) return header.trim();
+  if (Array.isArray(header) && header.length) return String(header[0]).trim();
+  return null;
+};
+
+const getUserIdFromRequest = (req) => {
+  const header = req.headers?.['x-user-id'] ?? req.headers?.['mcp-user-id'];
+  if (typeof header === 'string' && header.trim()) return header.trim();
+  if (Array.isArray(header) && header.length) return String(header[0]).trim();
+  return null;
+};
+
 const normalizeMcpUser = (user) => {
   if (!user || typeof user !== 'object') return null;
   const id = typeof user.id === 'string' ? user.id : null;
   if (!id) return null;
   const name = typeof user.name === 'string' && user.name.trim() ? user.name.trim() : 'User';
-  const avatarUrl = typeof user.avatarUrl === 'string' && user.avatarUrl.trim() ? user.avatarUrl : null;
-  const avatarAnimal = Number.isFinite(user.avatarAnimal) ? Number(user.avatarAnimal) : null;
-  const avatarColor = Number.isFinite(user.avatarColor) ? Number(user.avatarColor) : null;
-  return { id, name, avatarUrl, avatarAnimal, avatarColor };
+  return { id, name };
 };
 
 const resolveMcpAuth = async (token) => {
@@ -132,17 +176,11 @@ const resolveAuthorFromExtra = (extra) => {
     return {
       authorId: user.id,
       authorName: user.name,
-      avatarUrl: user.avatarUrl ?? null,
-      avatarAnimal: user.avatarAnimal ?? null,
-      avatarColor: user.avatarColor ?? null,
     };
   }
   return {
     authorId: null,
     authorName: AI_AUTHOR_NAME,
-    avatarUrl: null,
-    avatarAnimal: null,
-    avatarColor: null,
   };
 };
 
@@ -200,6 +238,7 @@ class CanvasSessionClient {
     this.ws = null;
     this.wsSessionId = null;
     this.connecting = null;
+    this.pendingAcks = new Map();
   }
 
   async resolveSessionId(sessionId) {
@@ -208,17 +247,6 @@ class CanvasSessionClient {
       return sessionId;
     }
     if (this.sessionId) return this.sessionId;
-
-    const res = await fetch(`${this.baseUrl}/api/settings/default-session`);
-    if (res.ok) {
-      const data = await res.json().catch(() => ({}));
-      const id = typeof data?.id === 'string' ? data.id : null;
-      if (id) {
-        this.sessionId = id;
-        return id;
-      }
-    }
-
     throw new Error('session_id_required');
   }
 
@@ -239,6 +267,18 @@ class CanvasSessionClient {
   async ensureWs(sessionId) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN && this.wsSessionId === sessionId) {
       return;
+    }
+
+    if (this.connecting) {
+      if (this.wsSessionId === sessionId) {
+        await this.connecting;
+        return;
+      }
+      try {
+        await this.connecting;
+      } catch {
+        // ignore failed in-flight connection
+      }
     }
 
     if (this.ws) {
@@ -265,15 +305,50 @@ class CanvasSessionClient {
         this.connecting = null;
       });
 
-      ws.on('close', () => {
+      ws.on('message', (raw) => {
+        let msg;
+        try {
+          msg = JSON.parse(String(raw));
+        } catch {
+          return;
+        }
+        if (msg?.type !== 'update') return;
+        const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null;
+        if (!requestId) return;
+        const entry = this.pendingAcks.get(requestId);
+        if (!entry) return;
+        clearTimeout(entry.timer);
+        this.pendingAcks.delete(requestId);
+        entry.resolve();
+      });
+
+      ws.on('close', (code) => {
         if (this.ws === ws) {
           this.ws = null;
           this.wsSessionId = null;
+        }
+        for (const [requestId, entry] of this.pendingAcks.entries()) {
+          clearTimeout(entry.timer);
+          entry.reject(new Error(`ws_closed:${typeof code === 'number' ? code : 1005}`));
+          this.pendingAcks.delete(requestId);
         }
       });
     }
 
     await this.connecting;
+  }
+
+  waitForAck(requestId) {
+    if (!Number.isFinite(MCP_WS_ACK_TIMEOUT_MS) || MCP_WS_ACK_TIMEOUT_MS <= 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingAcks.delete(requestId);
+        reject(new Error('ack_timeout'));
+      }, MCP_WS_ACK_TIMEOUT_MS);
+      this.pendingAcks.set(requestId, { resolve, reject, timer });
+    });
   }
 
   async sendPatch(sessionId, patch) {
@@ -286,7 +361,28 @@ class CanvasSessionClient {
       requestId,
       state: patch,
     };
-    this.ws.send(JSON.stringify(payload));
+    const sendOnce = () => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        throw new Error('ws_not_open');
+      }
+      this.ws.send(JSON.stringify(payload));
+    };
+    try {
+      const ack = this.waitForAck(requestId);
+      sendOnce();
+      await ack;
+    } catch (err) {
+      const existing = this.pendingAcks.get(requestId);
+      if (existing) {
+        clearTimeout(existing.timer);
+        this.pendingAcks.delete(requestId);
+      }
+      logEvent('patch_retry', { sessionId: id, requestId, error: err?.message ?? String(err) });
+      await this.ensureWs(id);
+      const ack = this.waitForAck(requestId);
+      sendOnce();
+      await ack;
+    }
     return { sessionId: id, requestId };
   }
 }
@@ -305,20 +401,30 @@ const toolResult = (output) => ({
 
 const NodeType = z.enum(['task', 'idea']);
 const NodeStatus = z.enum(['queued', 'in_progress', 'done']);
+const CrudAction = z.enum(['create', 'read', 'update', 'delete']);
+const StateMode = z.enum(['summary', 'full']);
 const TargetKind = z.enum(['canvas', 'node', 'edge', 'textBox']);
 const AttachmentKind = z.enum(['image', 'file']);
 const PenTool = z.enum(['pen', 'eraser', 'highlighter']);
-const ViewAction = z.enum(['focus_node', 'zoom_to_cards', 'zoom_to_graph', 'zoom_to_fit']);
+const ZoomTarget = z.enum(['to_cards', 'to_graph', 'to_fit']);
+const ViewAction = z.enum(['focus_node', 'zoom_to_cards', 'zoom_to_graph', 'zoom_to_fit', 'pan']);
 
-const sendCanvasView = async ({ sessionId, action, nodeId }, extra) => {
+const sendCanvasView = async ({ sessionId, action, nodeId, x, y, scale }, extra) => {
   const token = extra?.authInfo?.mcpToken;
   if (!token) throw new Error('mcp_token_required');
+  const targetUserId = extra?.authInfo?.actingUserId;
   const resolvedSessionId = await client.resolveSessionId(sessionId);
   const payload = {
     sessionId: resolvedSessionId,
     action,
   };
   if (nodeId) payload.nodeId = nodeId;
+  if (Number.isFinite(x)) payload.x = Number(x);
+  if (Number.isFinite(y)) payload.y = Number(y);
+  if (Number.isFinite(scale)) payload.scale = Number(scale);
+  if (typeof targetUserId === 'string' && targetUserId.trim()) {
+    payload.targetUserId = targetUserId.trim();
+  }
   const res = await fetch(`${apiBaseUrl}/api/integrations/mcp/view`, {
     method: 'POST',
     headers: {
@@ -330,13 +436,6 @@ const sendCanvasView = async ({ sessionId, action, nodeId }, extra) => {
   if (!res.ok) throw new Error(`view_failed:${res.status}`);
   const data = await res.json().catch(() => ({}));
   return { sessionId: resolvedSessionId, ...data };
-};
-
-const parseImageDataUrl = (dataUrl) => {
-  if (typeof dataUrl !== 'string') return null;
-  const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-  if (!match) return null;
-  return { mimeType: match[1], data: match[2] };
 };
 
 const requestCanvasSnapshot = async ({ sessionId, timeoutMs }, extra) => {
@@ -362,6 +461,126 @@ const requestCanvasSnapshot = async ({ sessionId, timeoutMs }, extra) => {
   return { sessionId: resolvedSessionId, ...data };
 };
 
+const fetchCanvasParticipants = async ({ sessionId }, extra) => {
+  const token = extra?.authInfo?.mcpToken;
+  if (!token) throw new Error('mcp_token_required');
+  const resolvedSessionId = await client.resolveSessionId(sessionId);
+  const res = await fetch(`${apiBaseUrl}/api/integrations/mcp/participants`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ sessionId: resolvedSessionId }),
+  });
+  if (!res.ok) throw new Error(`participants_failed:${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  const participants = Array.isArray(data?.participants) ? data.participants : [];
+  return { sessionId: resolvedSessionId, participants };
+};
+
+const normalizeParticipants = (items) => {
+  if (!Array.isArray(items)) return [];
+  const seen = new Set();
+  return items
+    .map((item) => ({
+      id: typeof item?.id === 'string' ? item.id : '',
+      name: typeof item?.name === 'string' ? item.name : '',
+      email: typeof item?.email === 'string' ? item.email : '',
+      savedAt: item?.savedAt ?? null,
+    }))
+    .filter((item) => {
+      if (!item.id || seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    });
+};
+
+const sanitizeAttachments = (attachments) => {
+  if (!Array.isArray(attachments)) return attachments;
+  return attachments.map((attachment) => {
+    if (!attachment || typeof attachment !== 'object') return attachment;
+    const { dataUrl, ...rest } = attachment;
+    return rest;
+  });
+};
+
+const sanitizeComment = (comment) => {
+  if (!comment || typeof comment !== 'object') return comment;
+  const next = { ...comment };
+  if (Array.isArray(next.attachments)) {
+    next.attachments = sanitizeAttachments(next.attachments);
+  }
+  if ('avatarUrl' in next) {
+    delete next.avatarUrl;
+  }
+  return next;
+};
+
+const sanitizeTextBox = (textBox) => {
+  if (!textBox || typeof textBox !== 'object') return textBox;
+  const hasSrc = typeof textBox.src === 'string' && textBox.src.trim();
+  if (!hasSrc && textBox.kind !== 'image') return textBox;
+  return { ...textBox, src: null };
+};
+
+const sanitizeState = (state) => {
+  if (!state || typeof state !== 'object') return state;
+  return {
+    ...state,
+    comments: Array.isArray(state.comments) ? state.comments.map(sanitizeComment) : state.comments,
+    textBoxes: Array.isArray(state.textBoxes) ? state.textBoxes.map(sanitizeTextBox) : state.textBoxes,
+  };
+};
+
+const attachParticipantsToNodes = (nodes, participants) => {
+  if (!Array.isArray(nodes)) return [];
+  const byId = new Map();
+  participants.forEach((person) => {
+    if (!person?.id) return;
+    byId.set(person.id, person);
+  });
+  return nodes.map((node) => {
+    const mentions = Array.isArray(node?.mentions) ? node.mentions : [];
+    if (!mentions.length) return node;
+    const seen = new Set();
+    const allMentioned = mentions.some((mention) => {
+      const id = typeof mention?.id === 'string' ? mention.id : '';
+      const label = typeof mention?.label === 'string' ? mention.label : '';
+      return id === 'all' || label.trim().toLowerCase() === 'all';
+    });
+    const nodeParticipants = [];
+    if (allMentioned) {
+      participants.forEach((person) => {
+        if (!person?.id || seen.has(person.id)) return;
+        seen.add(person.id);
+        nodeParticipants.push({
+          id: person.id,
+          label: person.name || person.email || 'User',
+          name: person.name ?? '',
+          email: person.email ?? '',
+        });
+      });
+    }
+    mentions.forEach((mention) => {
+      const id = typeof mention?.id === 'string' ? mention.id : '';
+      if (!id || seen.has(id)) return;
+      const label = typeof mention?.label === 'string' ? mention.label : '';
+      if (id === 'all' || label.trim().toLowerCase() === 'all') return;
+      seen.add(id);
+      const person = byId.get(id);
+      nodeParticipants.push({
+        id,
+        label,
+        name: person?.name ?? label ?? '',
+        email: person?.email ?? '',
+      });
+    });
+    if (!nodeParticipants.length) return node;
+    return { ...node, participants: nodeParticipants };
+  });
+};
+
 const server = new McpServer({
   name: 'smart-tracker-canvas',
   version: '0.1.0',
@@ -372,13 +591,36 @@ const registerTool = (name, meta, handler) => {
   toolRegistry.set(name, { meta, handler });
   const wrapped = async (input, extra) => {
     const startedAt = Date.now();
-    const sessionId = input?.sessionId ?? client.sessionId ?? null;
+    const authSessionId = typeof extra?.authInfo?.sessionId === 'string' ? extra.authInfo.sessionId : null;
+    const resolvedInput = (() => {
+      if (!authSessionId) return input;
+      if (input && typeof input === 'object' && !Array.isArray(input)) {
+        const { sessionId: _ignored, ...rest } = input;
+        return { ...rest, sessionId: authSessionId };
+      }
+      return { sessionId: authSessionId };
+    })();
+    const sessionId = resolvedInput?.sessionId ?? client.sessionId ?? null;
     const userId = extra?.authInfo?.mcpUser?.id ?? null;
-    logEvent('tool_start', { tool: name, sessionId, userId, input });
+    const inputPayload = resolvedInput ?? input;
+    logEvent('tool_start', {
+      tool: name,
+      sessionId,
+      userId,
+      inputSize: estimatePayloadSize(inputPayload),
+      input: inputPayload,
+    });
     try {
-      const result = await handler(input, extra);
+      const result = await handler(resolvedInput, extra);
       const output = result?.structuredContent ?? result;
-      logEvent('tool_ok', { tool: name, sessionId, userId, durationMs: Date.now() - startedAt, output });
+      logEvent('tool_ok', {
+        tool: name,
+        sessionId,
+        userId,
+        durationMs: Date.now() - startedAt,
+        outputSize: estimatePayloadSize(output),
+        output,
+      });
       return result;
     } catch (err) {
       logEvent('tool_error', {
@@ -394,6 +636,62 @@ const registerTool = (name, meta, handler) => {
   return server.registerTool(name, meta, wrapped);
 };
 
+const summarizeNode = (node) => ({
+  id: node.id,
+  title: node.title,
+  type: node.type,
+  status: node.status,
+  progress: node.progress,
+  authorId: node.authorId ?? null,
+  authorName: node.authorName ?? null,
+  mentions: Array.isArray(node.mentions) ? node.mentions : [],
+  createdAt: node.createdAt ?? null,
+  updatedAt: node.updatedAt ?? null,
+});
+
+const summarizeEdge = (edge) => ({
+  id: edge.id,
+  source: edge.source,
+  target: edge.target,
+  label: edge.label ?? null,
+});
+
+const summarizeState = (state, limit) => {
+  const nodes = Array.isArray(state?.nodes) ? state.nodes : [];
+  const edges = Array.isArray(state?.edges) ? state.edges : [];
+  const drawings = Array.isArray(state?.drawings) ? state.drawings : [];
+  const textBoxes = Array.isArray(state?.textBoxes) ? state.textBoxes : [];
+  const comments = Array.isArray(state?.comments) ? state.comments : [];
+  const limitedNodes = limitList(nodes, limit);
+  const limitedEdges = limitList(edges, limit);
+  return {
+    theme: state?.theme ?? 'dark',
+    nodes: limitedNodes.items.map(summarizeNode),
+    edges: limitedEdges.items.map(summarizeEdge),
+    counts: {
+      nodes: nodes.length,
+      edges: edges.length,
+      drawings: drawings.length,
+      textBoxes: textBoxes.length,
+      comments: comments.length,
+    },
+    truncated: {
+      nodes: limitedNodes.truncated,
+      edges: limitedEdges.truncated,
+    },
+    limit: limitedNodes.limit,
+  };
+};
+
+const resolveStateMode = (mode, extra) => {
+  const requested = mode === 'full' ? 'full' : 'summary';
+  const callerId = extra?.authInfo?.mcpUser?.id ?? null;
+  if (requested === 'full' && callerId === MCP_TECH_USER_ID) {
+    return 'summary';
+  }
+  return requested;
+};
+
 const toJsonSchema = (schema) => {
   if (!schema) return null;
   if (typeof schema?.toJSONSchema === 'function') {
@@ -406,432 +704,422 @@ const toJsonSchema = (schema) => {
 };
 
 registerTool(
-  'set_session',
-  {
-    title: 'Set Active Session',
-    description: 'Sets the active session id for subsequent tool calls.',
-    inputSchema: { sessionId: z.string() },
-    outputSchema: { sessionId: z.string() },
-  },
-  async ({ sessionId }) => {
-    client.sessionId = sessionId;
-    return toolResult({ sessionId });
-  }
-);
-
-registerTool(
-  'get_session',
-  {
-    title: 'Get Active Session',
-    description: 'Returns the current active session id and MCP client id.',
-    inputSchema: {},
-    outputSchema: {
-      sessionId: z.string().nullable(),
-      clientId: z.string(),
-      baseUrl: z.string(),
-      wsUrl: z.string(),
-    },
-  },
-  async () => toolResult({
-    sessionId: client.sessionId,
-    clientId: client.clientId,
-    baseUrl: client.baseUrl,
-    wsUrl: client.wsUrl,
-  })
-);
-
-registerTool(
   'get_state',
   {
     title: 'Get Canvas State',
-    description: 'Fetches the current session state (nodes, edges, drawings, textBoxes, comments).',
-    inputSchema: { sessionId: z.string().optional() },
-    outputSchema: { id: z.string(), version: z.number(), state: z.any(), meta: z.any() },
+    description: 'Fetches the current session state (nodes, edges, drawings, textBoxes, comments) and includes participants.',
+    inputSchema: { mode: StateMode.optional(), limit: z.number().optional() },
+    outputSchema: { id: z.string(), version: z.number(), state: z.any(), meta: z.any(), participants: z.array(z.any()) },
   },
-  async ({ sessionId }) => {
+  async ({ sessionId, mode, limit }, extra) => {
     const session = await client.fetchSession(sessionId);
+    const participantPayload = await fetchCanvasParticipants({ sessionId }, extra);
+    const participants = normalizeParticipants(participantPayload.participants);
     const rawVersion = session?.version;
     const version = typeof rawVersion === 'number' ? rawVersion : Number(rawVersion);
+    const state = session?.state && typeof session.state === 'object' ? session.state : {};
+    const nodesWithParticipants = attachParticipantsToNodes(state?.nodes ?? [], participants);
+    const fullState = sanitizeState({
+      ...state,
+      nodes: nodesWithParticipants,
+    });
+    const resolvedMode = resolveStateMode(mode, extra);
     const normalized = {
       ...session,
       version: Number.isFinite(version) ? version : 0,
+      participants,
+      state: resolvedMode === 'full' ? fullState : summarizeState(fullState, limit),
     };
     return toolResult(normalized);
   }
 );
 
 registerTool(
-  'apply_patch',
+  'list_canvas_participants',
   {
-    title: 'Apply Session Patch',
-    description: 'Applies a partial session state update via WebSocket sync.',
-    inputSchema: {
-      sessionId: z.string().optional(),
-      patch: z.any(),
+    title: 'List Canvas Participants',
+    description: 'Returns users who saved the canvas and can be tagged.',
+    inputSchema: { limit: z.number().optional() },
+    outputSchema: {
+      sessionId: z.string(),
+      participants: z.array(z.any()),
+      total: z.number().optional(),
+      limit: z.number().optional(),
+      truncated: z.boolean().optional(),
     },
-    outputSchema: { ok: z.boolean(), sessionId: z.string(), requestId: z.string() },
   },
-  async ({ sessionId, patch }) => {
-    if (!patch || typeof patch !== 'object') {
-      throw new Error('patch_required');
-    }
-    const normalized = normalizePatch(patch);
-    const result = await client.sendPatch(sessionId, normalized);
-    return toolResult({ ok: true, ...result });
+  async ({ sessionId, limit }, extra) => {
+    const payload = await fetchCanvasParticipants({ sessionId }, extra);
+    const participants = normalizeParticipants(payload.participants);
+    const limited = limitList(participants, limit);
+    return toolResult({
+      sessionId: payload.sessionId,
+      participants: limited.items,
+      total: limited.total,
+      limit: limited.limit,
+      truncated: limited.truncated,
+    });
   }
 );
 
 registerTool(
-  'list_nodes',
+  'node',
   {
-    title: 'List Nodes',
-    description: 'Returns all nodes in the session.',
-    inputSchema: { sessionId: z.string().optional() },
-    outputSchema: { nodes: z.array(z.any()) },
-  },
-  async ({ sessionId }) => {
-    const state = await client.fetchState(sessionId);
-    return toolResult({ nodes: state?.nodes ?? [] });
-  }
-);
-
-registerTool(
-  'get_node',
-  {
-    title: 'Get Node',
-    description: 'Returns a single node by id.',
-    inputSchema: { sessionId: z.string().optional(), id: z.string() },
-    outputSchema: { node: z.any().nullable() },
-  },
-  async ({ sessionId, id }) => {
-    const state = await client.fetchState(sessionId);
-    const node = state?.nodes?.find((n) => n.id === id) ?? null;
-    return toolResult({ node });
-  }
-);
-
-registerTool(
-  'create_node',
-  {
-    title: 'Create Node',
-    description: 'Creates a new node.',
+    title: 'Node',
+    description: 'Creates, reads, updates, or deletes nodes based on the action.',
     inputSchema: {
-      sessionId: z.string().optional(),
+      action: CrudAction,
+      mode: StateMode.optional(),
+      limit: z.number().optional(),
       id: z.string().optional(),
-      title: z.string(),
+      title: z.string().optional(),
       content: z.string().optional(),
       type: NodeType.optional(),
-      x: z.number(),
-      y: z.number(),
+      x: z.number().optional(),
+      y: z.number().optional(),
       clarity: z.number().optional(),
       energy: z.number().optional(),
       startDate: z.string().optional(),
       endDate: z.string().optional(),
       status: NodeStatus.optional(),
       progress: z.number().optional(),
+      patch: z.any().optional(),
       authorId: z.string().nullable().optional(),
       authorName: z.string().nullable().optional(),
     },
-    outputSchema: { node: z.any(), sessionId: z.string(), requestId: z.string() },
+    outputSchema: {
+      action: CrudAction,
+      node: z.any().optional(),
+      nodes: z.array(z.any()).optional(),
+      total: z.number().optional(),
+      limit: z.number().optional(),
+      truncated: z.boolean().optional(),
+      deletedNodeId: z.string().optional(),
+      deletedEdgeIds: z.array(z.string()).optional(),
+      participants: z.array(z.any()).optional(),
+      sessionId: z.string().optional(),
+      requestId: z.string().optional(),
+    },
   },
   async (input, extra) => {
-    const author = resolveAuthorFromExtra(extra);
-    const now = nowTs();
-    const node = {
-      id: input.id ?? randomUUID(),
-      title: input.title,
-      content: input.content ?? '',
-      type: input.type ?? 'idea',
-      x: input.x,
-      y: input.y,
-      clarity: Number.isFinite(input.clarity) ? input.clarity : 0.5,
-      energy: Number.isFinite(input.energy) ? input.energy : 50,
-      startDate: input.startDate,
-      endDate: input.endDate,
-      status: input.status,
-      progress: input.progress,
-      authorId: author.authorId ?? undefined,
-      authorName: author.authorName ?? undefined,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const patch = emptyPatch();
-    patch.nodes.push(node);
-    const result = await client.sendPatch(input.sessionId, patch);
-    return toolResult({ node, ...result });
-  }
-);
-
-registerTool(
-  'update_node',
-  {
-    title: 'Update Node',
-    description: 'Updates an existing node by id.',
-    inputSchema: {
-      sessionId: z.string().optional(),
-      id: z.string(),
-      patch: z.any(),
-    },
-    outputSchema: { node: z.any(), sessionId: z.string(), requestId: z.string() },
-  },
-  async ({ sessionId, id, patch }) => {
-    if (!patch || typeof patch !== 'object') throw new Error('patch_required');
-    const state = await client.fetchState(sessionId);
-    const current = state?.nodes?.find((n) => n.id === id);
-    if (!current) throw new Error('node_not_found');
-    const next = { ...current, ...patch, id, updatedAt: nowTs() };
-    const updatePatch = emptyPatch();
-    updatePatch.nodes.push(next);
-    const result = await client.sendPatch(sessionId, updatePatch);
-    return toolResult({ node: next, ...result });
-  }
-);
-
-registerTool(
-  'delete_node',
-  {
-    title: 'Delete Node',
-    description: 'Deletes a node and its connected edges.',
-    inputSchema: { sessionId: z.string().optional(), id: z.string() },
-    outputSchema: { deletedNodeId: z.string(), deletedEdgeIds: z.array(z.string()), sessionId: z.string(), requestId: z.string() },
-  },
-  async ({ sessionId, id }) => {
-    const state = await client.fetchState(sessionId);
-    const nodes = state?.nodes ?? [];
-    const node = nodes.find((n) => n.id === id);
-    const edges = state?.edges ?? [];
-    const edgesById = new Map(edges.map((edge) => [edge.id, edge]));
-    const edgeIds = edges.filter((e) => e.source === id || e.target === id).map((e) => e.id);
-    const patch = emptyPatch();
-    const now = nowTs();
-    patch.tombstones.nodes[id] = tombstoneFor(now, node?.updatedAt);
-    for (const edgeId of edgeIds) {
-      const edge = edgesById.get(edgeId);
-      patch.tombstones.edges[edgeId] = tombstoneFor(now, edge?.updatedAt);
+    const action = input.action;
+    if (action === 'read') {
+      const state = await client.fetchState(input.sessionId);
+      const participantPayload = await fetchCanvasParticipants({ sessionId: input.sessionId }, extra);
+      const participants = normalizeParticipants(participantPayload.participants);
+      const nodesWithParticipants = attachParticipantsToNodes(state?.nodes ?? [], participants);
+      if (input.id) {
+        const node = nodesWithParticipants.find((n) => n.id === input.id) ?? null;
+        return toolResult({ action, node, participants });
+      }
+      const limited = limitList(nodesWithParticipants, input.limit);
+      const resolvedMode = resolveStateMode(input.mode, extra);
+      const nodes = resolvedMode === 'full' ? limited.items : limited.items.map(summarizeNode);
+      return toolResult({
+        action,
+        nodes,
+        participants,
+        total: limited.total,
+        limit: limited.limit,
+        truncated: limited.truncated,
+      });
     }
-    const result = await client.sendPatch(sessionId, patch);
-    return toolResult({ deletedNodeId: id, deletedEdgeIds: edgeIds, ...result });
+
+    if (action === 'create') {
+      if (typeof input.title !== 'string' || !input.title.trim()) throw new Error('title_required');
+      if (!Number.isFinite(input.x)) throw new Error('x_required');
+      if (!Number.isFinite(input.y)) throw new Error('y_required');
+      const author = resolveAuthorFromExtra(extra);
+      const now = nowTs();
+      const node = {
+        id: input.id ?? randomUUID(),
+        title: input.title,
+        content: input.content ?? '',
+        type: input.type ?? 'idea',
+        x: input.x,
+        y: input.y,
+        clarity: Number.isFinite(input.clarity) ? input.clarity : 0.5,
+        energy: Number.isFinite(input.energy) ? input.energy : 50,
+        startDate: input.startDate,
+        endDate: input.endDate,
+        status: input.status,
+        progress: input.progress,
+        authorId: author.authorId ?? undefined,
+        authorName: author.authorName ?? undefined,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const patch = emptyPatch();
+      patch.nodes.push(node);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, node, ...result });
+    }
+
+    if (action === 'update') {
+      if (!input.id) throw new Error('id_required');
+      if (!input.patch || typeof input.patch !== 'object') throw new Error('patch_required');
+      const state = await client.fetchState(input.sessionId);
+      const current = state?.nodes?.find((n) => n.id === input.id);
+      if (!current) throw new Error('node_not_found');
+      const next = { ...current, ...input.patch, id: input.id, updatedAt: nowTs() };
+      const updatePatch = emptyPatch();
+      updatePatch.nodes.push(next);
+      const result = await client.sendPatch(input.sessionId, updatePatch);
+      return toolResult({ action, node: next, ...result });
+    }
+
+    if (action === 'delete') {
+      if (!input.id) throw new Error('id_required');
+      const state = await client.fetchState(input.sessionId);
+      const nodes = state?.nodes ?? [];
+      const node = nodes.find((n) => n.id === input.id);
+      const edges = state?.edges ?? [];
+      const edgesById = new Map(edges.map((edge) => [edge.id, edge]));
+      const edgeIds = edges.filter((e) => e.source === input.id || e.target === input.id).map((e) => e.id);
+      const patch = emptyPatch();
+      const now = nowTs();
+      patch.tombstones.nodes[input.id] = tombstoneFor(now, node?.updatedAt);
+      for (const edgeId of edgeIds) {
+        const edge = edgesById.get(edgeId);
+        patch.tombstones.edges[edgeId] = tombstoneFor(now, edge?.updatedAt);
+      }
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, deletedNodeId: input.id, deletedEdgeIds: edgeIds, ...result });
+    }
+
+    throw new Error('action_not_supported');
   }
 );
 
 registerTool(
-  'list_edges',
+  'edge',
   {
-    title: 'List Edges',
-    description: 'Returns all edges in the session.',
-    inputSchema: { sessionId: z.string().optional() },
-    outputSchema: { edges: z.array(z.any()) },
-  },
-  async ({ sessionId }) => {
-    const state = await client.fetchState(sessionId);
-    return toolResult({ edges: state?.edges ?? [] });
-  }
-);
-
-registerTool(
-  'create_edge',
-  {
-    title: 'Create Edge',
-    description: 'Creates a new edge between nodes.',
+    title: 'Edge',
+    description: 'Creates, reads, updates, or deletes edges based on the action.',
     inputSchema: {
-      sessionId: z.string().optional(),
+      action: CrudAction,
+      limit: z.number().optional(),
       id: z.string().optional(),
-      source: z.string(),
-      target: z.string(),
+      source: z.string().optional(),
+      target: z.string().optional(),
       type: z.enum(['default', 'connection']).optional(),
       energyEnabled: z.boolean().optional(),
+      patch: z.any().optional(),
       authorId: z.string().nullable().optional(),
       authorName: z.string().nullable().optional(),
     },
-    outputSchema: { edge: z.any(), sessionId: z.string(), requestId: z.string() },
+    outputSchema: {
+      action: CrudAction,
+      edge: z.any().optional(),
+      edges: z.array(z.any()).optional(),
+      total: z.number().optional(),
+      limit: z.number().optional(),
+      truncated: z.boolean().optional(),
+      deletedEdgeId: z.string().optional(),
+      sessionId: z.string().optional(),
+      requestId: z.string().optional(),
+    },
   },
   async (input, extra) => {
-    const author = resolveAuthorFromExtra(extra);
-    const now = nowTs();
-    const edge = {
-      id: input.id ?? randomUUID(),
-      source: input.source,
-      target: input.target,
-      type: input.type ?? 'default',
-      energyEnabled: typeof input.energyEnabled === 'boolean' ? input.energyEnabled : undefined,
-      authorId: author.authorId ?? undefined,
-      authorName: author.authorName ?? undefined,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const patch = emptyPatch();
-    patch.edges.push(edge);
-    const result = await client.sendPatch(input.sessionId, patch);
-    return toolResult({ edge, ...result });
+    const action = input.action;
+    if (action === 'read') {
+      const state = await client.fetchState(input.sessionId);
+      if (input.id) {
+        const edge = state?.edges?.find((e) => e.id === input.id) ?? null;
+        return toolResult({ action, edge });
+      }
+      const limited = limitList(state?.edges ?? [], input.limit);
+      return toolResult({
+        action,
+        edges: limited.items,
+        total: limited.total,
+        limit: limited.limit,
+        truncated: limited.truncated,
+      });
+    }
+
+    if (action === 'create') {
+      if (!input.source) throw new Error('source_required');
+      if (!input.target) throw new Error('target_required');
+      const state = await client.fetchState(input.sessionId);
+      const nodes = state?.nodes ?? [];
+      const nodeIds = new Set(nodes.map((node) => node.id));
+      if (!nodeIds.has(input.source)) throw new Error('source_node_not_found');
+      if (!nodeIds.has(input.target)) throw new Error('target_node_not_found');
+      const author = resolveAuthorFromExtra(extra);
+      const now = nowTs();
+      const edge = {
+        id: input.id ?? randomUUID(),
+        source: input.source,
+        target: input.target,
+        type: input.type ?? 'default',
+        energyEnabled: typeof input.energyEnabled === 'boolean' ? input.energyEnabled : undefined,
+        authorId: author.authorId ?? undefined,
+        authorName: author.authorName ?? undefined,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const patch = emptyPatch();
+      patch.edges.push(edge);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, edge, ...result });
+    }
+
+    if (action === 'update') {
+      if (!input.id) throw new Error('id_required');
+      if (!input.patch || typeof input.patch !== 'object') throw new Error('patch_required');
+      const state = await client.fetchState(input.sessionId);
+      const current = state?.edges?.find((e) => e.id === input.id);
+      if (!current) throw new Error('edge_not_found');
+      const nodes = state?.nodes ?? [];
+      if (input.patch.source || input.patch.target) {
+        const nodeIds = new Set(nodes.map((node) => node.id));
+        if (input.patch.source && !nodeIds.has(input.patch.source)) throw new Error('source_node_not_found');
+        if (input.patch.target && !nodeIds.has(input.patch.target)) throw new Error('target_node_not_found');
+      }
+      const next = { ...current, ...input.patch, id: input.id, updatedAt: nowTs() };
+      const updatePatch = emptyPatch();
+      updatePatch.edges.push(next);
+      const result = await client.sendPatch(input.sessionId, updatePatch);
+      return toolResult({ action, edge: next, ...result });
+    }
+
+    if (action === 'delete') {
+      if (!input.id) throw new Error('id_required');
+      const patch = emptyPatch();
+      const state = await client.fetchState(input.sessionId);
+      const edge = state?.edges?.find((e) => e.id === input.id);
+      const now = nowTs();
+      patch.tombstones.edges[input.id] = tombstoneFor(now, edge?.updatedAt);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, deletedEdgeId: input.id, ...result });
+    }
+
+    throw new Error('action_not_supported');
   }
 );
 
 registerTool(
-  'update_edge',
+  'textbox',
   {
-    title: 'Update Edge',
-    description: 'Updates an existing edge by id.',
-    inputSchema: { sessionId: z.string().optional(), id: z.string(), patch: z.any() },
-    outputSchema: { edge: z.any(), sessionId: z.string(), requestId: z.string() },
-  },
-  async ({ sessionId, id, patch }) => {
-    if (!patch || typeof patch !== 'object') throw new Error('patch_required');
-    const state = await client.fetchState(sessionId);
-    const current = state?.edges?.find((e) => e.id === id);
-    if (!current) throw new Error('edge_not_found');
-    const next = { ...current, ...patch, id, updatedAt: nowTs() };
-    const updatePatch = emptyPatch();
-    updatePatch.edges.push(next);
-    const result = await client.sendPatch(sessionId, updatePatch);
-    return toolResult({ edge: next, ...result });
-  }
-);
-
-registerTool(
-  'delete_edge',
-  {
-    title: 'Delete Edge',
-    description: 'Deletes an edge.',
-    inputSchema: { sessionId: z.string().optional(), id: z.string() },
-    outputSchema: { deletedEdgeId: z.string(), sessionId: z.string(), requestId: z.string() },
-  },
-  async ({ sessionId, id }) => {
-    const patch = emptyPatch();
-    const state = await client.fetchState(sessionId);
-    const edge = state?.edges?.find((e) => e.id === id);
-    const now = nowTs();
-    patch.tombstones.edges[id] = tombstoneFor(now, edge?.updatedAt);
-    const result = await client.sendPatch(sessionId, patch);
-    return toolResult({ deletedEdgeId: id, ...result });
-  }
-);
-
-registerTool(
-  'list_textboxes',
-  {
-    title: 'List Text Boxes',
-    description: 'Returns all text boxes in the session.',
-    inputSchema: { sessionId: z.string().optional() },
-    outputSchema: { textBoxes: z.array(z.any()) },
-  },
-  async ({ sessionId }) => {
-    const state = await client.fetchState(sessionId);
-    return toolResult({ textBoxes: state?.textBoxes ?? [] });
-  }
-);
-
-registerTool(
-  'create_textbox',
-  {
-    title: 'Create Text Box',
-    description: 'Creates a new text box.',
+    title: 'Text Box',
+    description: 'Creates, reads, updates, or deletes text boxes based on the action.',
     inputSchema: {
-      sessionId: z.string().optional(),
+      action: CrudAction,
+      limit: z.number().optional(),
       id: z.string().optional(),
-      x: z.number(),
-      y: z.number(),
-      width: z.number(),
-      height: z.number(),
-      text: z.string(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      text: z.string().optional(),
       kind: z.enum(['text', 'image']).optional(),
       src: z.string().optional(),
+      patch: z.any().optional(),
       authorId: z.string().nullable().optional(),
       authorName: z.string().nullable().optional(),
     },
-    outputSchema: { textBox: z.any(), sessionId: z.string(), requestId: z.string() },
+    outputSchema: {
+      action: CrudAction,
+      textBox: z.any().optional(),
+      textBoxes: z.array(z.any()).optional(),
+      total: z.number().optional(),
+      limit: z.number().optional(),
+      truncated: z.boolean().optional(),
+      deletedTextBoxId: z.string().optional(),
+      sessionId: z.string().optional(),
+      requestId: z.string().optional(),
+    },
   },
   async (input, extra) => {
-    const author = resolveAuthorFromExtra(extra);
-    const now = nowTs();
-    const textBox = {
-      id: input.id ?? randomUUID(),
-      x: input.x,
-      y: input.y,
-      width: input.width,
-      height: input.height,
-      text: input.text,
-      kind: input.kind,
-      src: input.src,
-      authorId: author.authorId ?? undefined,
-      authorName: author.authorName ?? undefined,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const patch = emptyPatch();
-    patch.textBoxes.push(textBox);
-    const result = await client.sendPatch(input.sessionId, patch);
-    return toolResult({ textBox, ...result });
+    const action = input.action;
+    if (action === 'read') {
+      const state = await client.fetchState(input.sessionId);
+      if (input.id) {
+        const textBox = state?.textBoxes?.find((tb) => tb.id === input.id) ?? null;
+        return toolResult({ action, textBox: sanitizeTextBox(textBox) });
+      }
+      const limited = limitList(state?.textBoxes ?? [], input.limit);
+      return toolResult({
+        action,
+        textBoxes: limited.items.map(sanitizeTextBox),
+        total: limited.total,
+        limit: limited.limit,
+        truncated: limited.truncated,
+      });
+    }
+
+    if (action === 'create') {
+      if (!Number.isFinite(input.x)) throw new Error('x_required');
+      if (!Number.isFinite(input.y)) throw new Error('y_required');
+      if (!Number.isFinite(input.width)) throw new Error('width_required');
+      if (!Number.isFinite(input.height)) throw new Error('height_required');
+      if (typeof input.text !== 'string') throw new Error('text_required');
+      const author = resolveAuthorFromExtra(extra);
+      const now = nowTs();
+      const textBox = {
+        id: input.id ?? randomUUID(),
+        x: input.x,
+        y: input.y,
+        width: input.width,
+        height: input.height,
+        text: input.text,
+        kind: input.kind,
+        src: input.src,
+        authorId: author.authorId ?? undefined,
+        authorName: author.authorName ?? undefined,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const patch = emptyPatch();
+      patch.textBoxes.push(textBox);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, textBox: sanitizeTextBox(textBox), ...result });
+    }
+
+    if (action === 'update') {
+      if (!input.id) throw new Error('id_required');
+      if (!input.patch || typeof input.patch !== 'object') throw new Error('patch_required');
+      const state = await client.fetchState(input.sessionId);
+      const current = state?.textBoxes?.find((tb) => tb.id === input.id);
+      if (!current) throw new Error('textbox_not_found');
+      const next = { ...current, ...input.patch, id: input.id, updatedAt: nowTs() };
+      const updatePatch = emptyPatch();
+      updatePatch.textBoxes.push(next);
+      const result = await client.sendPatch(input.sessionId, updatePatch);
+      return toolResult({ action, textBox: sanitizeTextBox(next), ...result });
+    }
+
+    if (action === 'delete') {
+      if (!input.id) throw new Error('id_required');
+      const patch = emptyPatch();
+      const state = await client.fetchState(input.sessionId);
+      const textBox = state?.textBoxes?.find((t) => t.id === input.id);
+      const now = nowTs();
+      patch.tombstones.textBoxes[input.id] = tombstoneFor(now, textBox?.updatedAt);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, deletedTextBoxId: input.id, ...result });
+    }
+
+    throw new Error('action_not_supported');
   }
 );
 
 registerTool(
-  'update_textbox',
+  'comment',
   {
-    title: 'Update Text Box',
-    description: 'Updates an existing text box by id.',
-    inputSchema: { sessionId: z.string().optional(), id: z.string(), patch: z.any() },
-    outputSchema: { textBox: z.any(), sessionId: z.string(), requestId: z.string() },
-  },
-  async ({ sessionId, id, patch }) => {
-    if (!patch || typeof patch !== 'object') throw new Error('patch_required');
-    const state = await client.fetchState(sessionId);
-    const current = state?.textBoxes?.find((tb) => tb.id === id);
-    if (!current) throw new Error('textbox_not_found');
-    const next = { ...current, ...patch, id, updatedAt: nowTs() };
-    const updatePatch = emptyPatch();
-    updatePatch.textBoxes.push(next);
-    const result = await client.sendPatch(sessionId, updatePatch);
-    return toolResult({ textBox: next, ...result });
-  }
-);
-
-registerTool(
-  'delete_textbox',
-  {
-    title: 'Delete Text Box',
-    description: 'Deletes a text box.',
-    inputSchema: { sessionId: z.string().optional(), id: z.string() },
-    outputSchema: { deletedTextBoxId: z.string(), sessionId: z.string(), requestId: z.string() },
-  },
-  async ({ sessionId, id }) => {
-    const patch = emptyPatch();
-    const state = await client.fetchState(sessionId);
-    const textBox = state?.textBoxes?.find((t) => t.id === id);
-    const now = nowTs();
-    patch.tombstones.textBoxes[id] = tombstoneFor(now, textBox?.updatedAt);
-    const result = await client.sendPatch(sessionId, patch);
-    return toolResult({ deletedTextBoxId: id, ...result });
-  }
-);
-
-registerTool(
-  'list_comments',
-  {
-    title: 'List Comments',
-    description: 'Returns all comments in the session.',
-    inputSchema: { sessionId: z.string().optional() },
-    outputSchema: { comments: z.array(z.any()) },
-  },
-  async ({ sessionId }) => {
-    const state = await client.fetchState(sessionId);
-    return toolResult({ comments: state?.comments ?? [] });
-  }
-);
-
-registerTool(
-  'create_comment',
-  {
-    title: 'Create Comment',
-    description: 'Creates a new comment on the canvas or an object.',
+    title: 'Comment',
+    description: 'Creates, reads, updates, or deletes comments based on the action.',
     inputSchema: {
-      sessionId: z.string().optional(),
+      action: CrudAction,
+      limit: z.number().optional(),
       id: z.string().optional(),
-      targetKind: TargetKind,
+      targetKind: TargetKind.optional(),
       targetId: z.string().nullable().optional(),
       parentId: z.string().nullable().optional(),
       x: z.number().optional(),
       y: z.number().optional(),
-      text: z.string(),
+      text: z.string().optional(),
       attachments: z.array(z.object({
         id: z.string(),
         kind: AttachmentKind,
@@ -840,245 +1128,219 @@ registerTool(
         mime: z.string(),
         dataUrl: z.string(),
       })).optional(),
+      patch: z.any().optional(),
       authorId: z.string().nullable().optional(),
       authorName: z.string().nullable().optional(),
-      avatarUrl: z.string().nullable().optional(),
-      avatarAnimal: z.number().nullable().optional(),
-      avatarColor: z.number().nullable().optional(),
     },
-    outputSchema: { comment: z.any(), sessionId: z.string(), requestId: z.string() },
-  },
-  async (input, extra) => {
-    const author = resolveAuthorFromExtra(extra);
-    const now = nowTs();
-    const comment = {
-      id: input.id ?? randomUUID(),
-      targetKind: input.targetKind,
-      targetId: input.targetId ?? undefined,
-      parentId: input.parentId ?? undefined,
-      x: input.x,
-      y: input.y,
-      text: input.text,
-      attachments: input.attachments,
-      authorId: author.authorId ?? undefined,
-      authorName: author.authorName ?? undefined,
-      avatarUrl: author.avatarUrl ?? undefined,
-      avatarAnimal: author.avatarAnimal ?? undefined,
-      avatarColor: author.avatarColor ?? undefined,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const patch = emptyPatch();
-    patch.comments.push(comment);
-    const result = await client.sendPatch(input.sessionId, patch);
-    return toolResult({ comment, ...result });
-  }
-);
-
-registerTool(
-  'update_comment',
-  {
-    title: 'Update Comment',
-    description: 'Updates an existing comment by id.',
-    inputSchema: { sessionId: z.string().optional(), id: z.string(), patch: z.any() },
-    outputSchema: { comment: z.any(), sessionId: z.string(), requestId: z.string() },
-  },
-  async ({ sessionId, id, patch }) => {
-    if (!patch || typeof patch !== 'object') throw new Error('patch_required');
-    const state = await client.fetchState(sessionId);
-    const current = state?.comments?.find((c) => c.id === id);
-    if (!current) throw new Error('comment_not_found');
-    const next = { ...current, ...patch, id, updatedAt: nowTs() };
-    const updatePatch = emptyPatch();
-    updatePatch.comments.push(next);
-    const result = await client.sendPatch(sessionId, updatePatch);
-    return toolResult({ comment: next, ...result });
-  }
-);
-
-registerTool(
-  'delete_comment',
-  {
-    title: 'Delete Comment',
-    description: 'Deletes a comment and its replies.',
-    inputSchema: { sessionId: z.string().optional(), id: z.string() },
-    outputSchema: { deletedCommentIds: z.array(z.string()), sessionId: z.string(), requestId: z.string() },
-  },
-  async ({ sessionId, id }) => {
-    const state = await client.fetchState(sessionId);
-    const comments = state?.comments ?? [];
-    const commentById = new Map();
-    const childrenByParent = new Map();
-    for (const comment of comments) {
-      if (comment?.id) commentById.set(comment.id, comment);
-      const parentId = comment.parentId ?? null;
-      if (!parentId) continue;
-      const list = childrenByParent.get(parentId) ?? [];
-      list.push(comment.id);
-      childrenByParent.set(parentId, list);
-    }
-
-    const toDelete = new Set();
-    const stack = [id];
-    while (stack.length) {
-      const next = stack.pop();
-      if (!next || toDelete.has(next)) continue;
-      toDelete.add(next);
-      const children = childrenByParent.get(next) ?? [];
-      for (const child of children) stack.push(child);
-    }
-
-    const patch = emptyPatch();
-    const now = nowTs();
-    for (const commentId of toDelete) {
-      const comment = commentById.get(commentId);
-      patch.tombstones.comments[commentId] = tombstoneFor(now, comment?.updatedAt);
-    }
-
-    const result = await client.sendPatch(sessionId, patch);
-    return toolResult({ deletedCommentIds: Array.from(toDelete), ...result });
-  }
-);
-
-registerTool(
-  'list_drawings',
-  {
-    title: 'List Drawings',
-    description: 'Returns all drawings in the session.',
-    inputSchema: { sessionId: z.string().optional() },
-    outputSchema: { drawings: z.array(z.any()) },
-  },
-  async ({ sessionId }) => {
-    const state = await client.fetchState(sessionId);
-    return toolResult({ drawings: state?.drawings ?? [] });
-  }
-);
-
-registerTool(
-  'create_drawing',
-  {
-    title: 'Create Drawing',
-    description: 'Creates a new drawing path.',
-    inputSchema: {
+    outputSchema: {
+      action: CrudAction,
+      comment: z.any().optional(),
+      comments: z.array(z.any()).optional(),
+      total: z.number().optional(),
+      limit: z.number().optional(),
+      truncated: z.boolean().optional(),
+      deletedCommentIds: z.array(z.string()).optional(),
       sessionId: z.string().optional(),
+      requestId: z.string().optional(),
+    },
+  },
+  async (input, extra) => {
+    const action = input.action;
+    if (action === 'read') {
+      const state = await client.fetchState(input.sessionId);
+      if (input.id) {
+        const comment = state?.comments?.find((c) => c.id === input.id) ?? null;
+        return toolResult({ action, comment: sanitizeComment(comment) });
+      }
+      const limited = limitList(state?.comments ?? [], input.limit);
+      return toolResult({
+        action,
+        comments: limited.items.map(sanitizeComment),
+        total: limited.total,
+        limit: limited.limit,
+        truncated: limited.truncated,
+      });
+    }
+
+    if (action === 'create') {
+      if (!input.targetKind) throw new Error('target_kind_required');
+      if (typeof input.text !== 'string' || !input.text.trim()) throw new Error('text_required');
+      const author = resolveAuthorFromExtra(extra);
+      const now = nowTs();
+      const comment = {
+        id: input.id ?? randomUUID(),
+        targetKind: input.targetKind,
+        targetId: input.targetId ?? undefined,
+        parentId: input.parentId ?? undefined,
+        x: input.x,
+        y: input.y,
+        text: input.text,
+        attachments: input.attachments,
+        authorId: author.authorId ?? undefined,
+        authorName: author.authorName ?? undefined,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const patch = emptyPatch();
+      patch.comments.push(comment);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, comment: sanitizeComment(comment), ...result });
+    }
+
+    if (action === 'update') {
+      if (!input.id) throw new Error('id_required');
+      if (!input.patch || typeof input.patch !== 'object') throw new Error('patch_required');
+      const state = await client.fetchState(input.sessionId);
+      const current = state?.comments?.find((c) => c.id === input.id);
+      if (!current) throw new Error('comment_not_found');
+      const next = { ...current, ...input.patch, id: input.id, updatedAt: nowTs() };
+      const updatePatch = emptyPatch();
+      updatePatch.comments.push(next);
+      const result = await client.sendPatch(input.sessionId, updatePatch);
+      return toolResult({ action, comment: sanitizeComment(next), ...result });
+    }
+
+    if (action === 'delete') {
+      if (!input.id) throw new Error('id_required');
+      const state = await client.fetchState(input.sessionId);
+      const comments = state?.comments ?? [];
+      const commentById = new Map();
+      const childrenByParent = new Map();
+      for (const comment of comments) {
+        if (comment?.id) commentById.set(comment.id, comment);
+        const parentId = comment.parentId ?? null;
+        if (!parentId) continue;
+        const list = childrenByParent.get(parentId) ?? [];
+        list.push(comment.id);
+        childrenByParent.set(parentId, list);
+      }
+
+      const toDelete = new Set();
+      const stack = [input.id];
+      while (stack.length) {
+        const next = stack.pop();
+        if (!next || toDelete.has(next)) continue;
+        toDelete.add(next);
+        const children = childrenByParent.get(next) ?? [];
+        for (const child of children) stack.push(child);
+      }
+
+      const patch = emptyPatch();
+      const now = nowTs();
+      for (const commentId of toDelete) {
+        const comment = commentById.get(commentId);
+        patch.tombstones.comments[commentId] = tombstoneFor(now, comment?.updatedAt);
+      }
+
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, deletedCommentIds: Array.from(toDelete), ...result });
+    }
+
+    throw new Error('action_not_supported');
+  }
+);
+
+registerTool(
+  'drawing',
+  {
+    title: 'Drawing',
+    description: 'Creates, reads, updates, or deletes drawings based on the action.',
+    inputSchema: {
+      action: CrudAction,
+      limit: z.number().optional(),
       id: z.string().optional(),
-      points: z.array(z.object({ x: z.number(), y: z.number() })),
+      points: z.array(z.object({ x: z.number(), y: z.number() })).optional(),
       path: z.string().optional(),
-      color: z.string(),
-      width: z.number(),
-      opacity: z.number(),
-      tool: PenTool,
+      color: z.string().optional(),
+      width: z.number().optional(),
+      opacity: z.number().optional(),
+      tool: PenTool.optional(),
+      patch: z.any().optional(),
       authorId: z.string().nullable().optional(),
       authorName: z.string().nullable().optional(),
     },
-    outputSchema: { drawing: z.any(), sessionId: z.string(), requestId: z.string() },
+    outputSchema: {
+      action: CrudAction,
+      drawing: z.any().optional(),
+      drawings: z.array(z.any()).optional(),
+      total: z.number().optional(),
+      limit: z.number().optional(),
+      truncated: z.boolean().optional(),
+      deletedDrawingId: z.string().optional(),
+      sessionId: z.string().optional(),
+      requestId: z.string().optional(),
+    },
   },
   async (input, extra) => {
-    const author = resolveAuthorFromExtra(extra);
-    const now = nowTs();
-    const drawing = {
-      id: input.id ?? randomUUID(),
-      points: input.points,
-      path: input.path,
-      color: input.color,
-      width: input.width,
-      opacity: input.opacity,
-      tool: input.tool,
-      authorId: author.authorId ?? undefined,
-      authorName: author.authorName ?? undefined,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const patch = emptyPatch();
-    patch.drawings.push(drawing);
-    const result = await client.sendPatch(input.sessionId, patch);
-    return toolResult({ drawing, ...result });
-  }
-);
-
-registerTool(
-  'update_drawing',
-  {
-    title: 'Update Drawing',
-    description: 'Updates an existing drawing by id.',
-    inputSchema: { sessionId: z.string().optional(), id: z.string(), patch: z.any() },
-    outputSchema: { drawing: z.any(), sessionId: z.string(), requestId: z.string() },
-  },
-  async ({ sessionId, id, patch }) => {
-    if (!patch || typeof patch !== 'object') throw new Error('patch_required');
-    const state = await client.fetchState(sessionId);
-    const current = state?.drawings?.find((d) => d.id === id);
-    if (!current) throw new Error('drawing_not_found');
-    const next = { ...current, ...patch, id, updatedAt: nowTs() };
-    const updatePatch = emptyPatch();
-    updatePatch.drawings.push(next);
-    const result = await client.sendPatch(sessionId, updatePatch);
-    return toolResult({ drawing: next, ...result });
-  }
-);
-
-registerTool(
-  'delete_drawing',
-  {
-    title: 'Delete Drawing',
-    description: 'Deletes a drawing by id.',
-    inputSchema: { sessionId: z.string().optional(), id: z.string() },
-    outputSchema: { deletedDrawingId: z.string(), sessionId: z.string(), requestId: z.string() },
-  },
-  async ({ sessionId, id }) => {
-    const patch = emptyPatch();
-    const state = await client.fetchState(sessionId);
-    const drawing = state?.drawings?.find((d) => d.id === id);
-    const now = nowTs();
-    patch.tombstones.drawings[id] = tombstoneFor(now, drawing?.updatedAt);
-    const result = await client.sendPatch(sessionId, patch);
-    return toolResult({ deletedDrawingId: id, ...result });
-  }
-);
-
-registerTool(
-  'clear_canvas',
-  {
-    title: 'Clear Canvas',
-    description: 'Deletes all nodes, edges, drawings, text boxes, and comments.',
-    inputSchema: { sessionId: z.string().optional() },
-    outputSchema: { deleted: z.any(), sessionId: z.string(), requestId: z.string() },
-  },
-  async ({ sessionId }) => {
-    const state = await client.fetchState(sessionId);
-    const patch = emptyPatch();
-    const now = nowTs();
-    const deleted = {
-      nodes: [],
-      edges: [],
-      drawings: [],
-      textBoxes: [],
-      comments: [],
-    };
-
-    for (const node of state?.nodes ?? []) {
-      patch.tombstones.nodes[node.id] = tombstoneFor(now, node.updatedAt);
-      deleted.nodes.push(node.id);
-    }
-    for (const edge of state?.edges ?? []) {
-      patch.tombstones.edges[edge.id] = tombstoneFor(now, edge.updatedAt);
-      deleted.edges.push(edge.id);
-    }
-    for (const drawing of state?.drawings ?? []) {
-      patch.tombstones.drawings[drawing.id] = tombstoneFor(now, drawing.updatedAt);
-      deleted.drawings.push(drawing.id);
-    }
-    for (const textBox of state?.textBoxes ?? []) {
-      patch.tombstones.textBoxes[textBox.id] = tombstoneFor(now, textBox.updatedAt);
-      deleted.textBoxes.push(textBox.id);
-    }
-    for (const comment of state?.comments ?? []) {
-      patch.tombstones.comments[comment.id] = tombstoneFor(now, comment.updatedAt);
-      deleted.comments.push(comment.id);
+    const action = input.action;
+    if (action === 'read') {
+      const state = await client.fetchState(input.sessionId);
+      if (input.id) {
+        const drawing = state?.drawings?.find((d) => d.id === input.id) ?? null;
+        return toolResult({ action, drawing });
+      }
+      const limited = limitList(state?.drawings ?? [], input.limit);
+      return toolResult({
+        action,
+        drawings: limited.items,
+        total: limited.total,
+        limit: limited.limit,
+        truncated: limited.truncated,
+      });
     }
 
-    const result = await client.sendPatch(sessionId, patch);
-    return toolResult({ deleted, ...result });
+    if (action === 'create') {
+      if (!Array.isArray(input.points) || !input.points.length) throw new Error('points_required');
+      if (typeof input.color !== 'string' || !input.color) throw new Error('color_required');
+      if (!Number.isFinite(input.width)) throw new Error('width_required');
+      if (!Number.isFinite(input.opacity)) throw new Error('opacity_required');
+      if (!input.tool) throw new Error('tool_required');
+      const author = resolveAuthorFromExtra(extra);
+      const now = nowTs();
+      const drawing = {
+        id: input.id ?? randomUUID(),
+        points: input.points,
+        path: input.path,
+        color: input.color,
+        width: input.width,
+        opacity: input.opacity,
+        tool: input.tool,
+        authorId: author.authorId ?? undefined,
+        authorName: author.authorName ?? undefined,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const patch = emptyPatch();
+      patch.drawings.push(drawing);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, drawing, ...result });
+    }
+
+    if (action === 'update') {
+      if (!input.id) throw new Error('id_required');
+      if (!input.patch || typeof input.patch !== 'object') throw new Error('patch_required');
+      const state = await client.fetchState(input.sessionId);
+      const current = state?.drawings?.find((d) => d.id === input.id);
+      if (!current) throw new Error('drawing_not_found');
+      const next = { ...current, ...input.patch, id: input.id, updatedAt: nowTs() };
+      const updatePatch = emptyPatch();
+      updatePatch.drawings.push(next);
+      const result = await client.sendPatch(input.sessionId, updatePatch);
+      return toolResult({ action, drawing: next, ...result });
+    }
+
+    if (action === 'delete') {
+      if (!input.id) throw new Error('id_required');
+      const patch = emptyPatch();
+      const state = await client.fetchState(input.sessionId);
+      const drawing = state?.drawings?.find((d) => d.id === input.id);
+      const now = nowTs();
+      patch.tombstones.drawings[input.id] = tombstoneFor(now, drawing?.updatedAt);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, deletedDrawingId: input.id, ...result });
+    }
+
+    throw new Error('action_not_supported');
   }
 );
 
@@ -1087,7 +1349,7 @@ registerTool(
   {
     title: 'Focus Node',
     description: 'Centers the view on a node for the authenticated MCP user.',
-    inputSchema: { sessionId: z.string().optional(), id: z.string() },
+    inputSchema: { id: z.string() },
     outputSchema: { ok: z.boolean().optional(), delivered: z.number().optional(), sessionId: z.string() },
   },
   async ({ sessionId, id }, extra) => {
@@ -1097,43 +1359,39 @@ registerTool(
 );
 
 registerTool(
-  'zoom_to_cards',
+  'zoom',
   {
-    title: 'Zoom To Cards',
-    description: 'Zooms the view to the detailed card scale for the authenticated MCP user.',
-    inputSchema: { sessionId: z.string().optional() },
+    title: 'Zoom',
+    description: 'Zooms the view for the authenticated MCP user.',
+    inputSchema: { target: ZoomTarget },
     outputSchema: { ok: z.boolean().optional(), delivered: z.number().optional(), sessionId: z.string() },
   },
-  async ({ sessionId }, extra) => {
-    const result = await sendCanvasView({ sessionId, action: 'zoom_to_cards' }, extra);
+  async ({ sessionId, target }, extra) => {
+    const action = target === 'to_cards'
+      ? 'zoom_to_cards'
+      : target === 'to_graph'
+        ? 'zoom_to_graph'
+        : 'zoom_to_fit';
+    const result = await sendCanvasView({ sessionId, action }, extra);
     return toolResult(result);
   }
 );
 
 registerTool(
-  'zoom_to_graph',
+  'pan',
   {
-    title: 'Zoom To Graph',
-    description: 'Zooms the view to the graph scale for the authenticated MCP user.',
-    inputSchema: { sessionId: z.string().optional() },
+    title: 'Pan',
+    description: 'Centers the view on the provided canvas coordinates for the authenticated MCP user.',
+    inputSchema: {
+      x: z.number(),
+      y: z.number(),
+      scale: z.number().optional(),
+    },
     outputSchema: { ok: z.boolean().optional(), delivered: z.number().optional(), sessionId: z.string() },
   },
-  async ({ sessionId }, extra) => {
-    const result = await sendCanvasView({ sessionId, action: 'zoom_to_graph' }, extra);
-    return toolResult(result);
-  }
-);
-
-registerTool(
-  'zoom_to_fit',
-  {
-    title: 'Zoom To Fit',
-    description: 'Zooms the view to fit visible content for the authenticated MCP user.',
-    inputSchema: { sessionId: z.string().optional() },
-    outputSchema: { ok: z.boolean().optional(), delivered: z.number().optional(), sessionId: z.string() },
-  },
-  async ({ sessionId }, extra) => {
-    const result = await sendCanvasView({ sessionId, action: 'zoom_to_fit' }, extra);
+  async ({ sessionId, x, y, scale }, extra) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('coords_required');
+    const result = await sendCanvasView({ sessionId, action: 'pan', x, y, scale }, extra);
     return toolResult(result);
   }
 );
@@ -1142,47 +1400,29 @@ registerTool(
   'get_active_canvas_snapshot',
   {
     title: 'Get Active Canvas Snapshot',
-    description: 'Captures a PNG snapshot of the active canvas area (all objects) for the authenticated MCP user.',
-    inputSchema: { sessionId: z.string().optional(), timeoutMs: z.number().optional() },
+    description: 'Captures a snapshot of the active canvas area and returns only metadata (no image payloads).',
+    inputSchema: { timeoutMs: z.number().optional() },
     outputSchema: {
       ok: z.boolean().optional(),
       sessionId: z.string().optional(),
       image: z.object({
-        dataUrl: z.string().nullable().optional(),
         width: z.number().nullable().optional(),
         height: z.number().nullable().optional(),
-        mimeType: z.string().nullable().optional(),
       }).optional(),
     },
   },
   async ({ sessionId, timeoutMs }, extra) => {
     const result = await requestCanvasSnapshot({ sessionId, timeoutMs }, extra);
     const image = result?.image ?? null;
-    const dataUrl = image?.dataUrl ?? null;
-    const parsed = parseImageDataUrl(dataUrl);
     const meta = {
       ok: true,
       sessionId: result?.sessionId ?? sessionId ?? null,
       image: {
-        dataUrl: dataUrl ?? null,
         width: image?.width ?? null,
         height: image?.height ?? null,
-        mimeType: parsed?.mimeType ?? null,
       },
     };
-    if (!parsed) {
-      return {
-        content: [{ type: 'text', text: JSON.stringify(meta) }],
-        structuredContent: meta,
-      };
-    }
-    return {
-      content: [
-        { type: 'text', text: JSON.stringify({ ok: true, sessionId: meta.sessionId, image: { width: meta.image.width, height: meta.image.height } }) },
-        { type: 'image', data: parsed.data, mimeType: parsed.mimeType },
-      ],
-      structuredContent: meta,
-    };
+    return toolResult(meta);
   }
 );
 
@@ -1320,15 +1560,9 @@ if (transportMode === 'http') {
       </header>
       <div class="grid">
         <div class="panel stack">
-          <div class="row">
-            <div>
-              <label for="session">Session ID (optional)</label>
-              <input id="session" placeholder="leave empty to use default" />
-            </div>
-            <div>
-              <label for="tool">Tool</label>
-              <select id="tool"></select>
-            </div>
+          <div>
+            <label for="tool">Tool</label>
+            <select id="tool"></select>
           </div>
           <div>
             <label for="input">Input JSON</label>
@@ -1352,16 +1586,12 @@ if (transportMode === 'http') {
         tools: [],
         selected: null,
       };
-      const sessionField = document.getElementById('session');
       const toolSelect = document.getElementById('tool');
       const inputField = document.getElementById('input');
       const outputField = document.getElementById('output');
       const runBtn = document.getElementById('run');
       const metaField = document.getElementById('toolMeta');
       const specField = document.getElementById('specOutput');
-
-      const defaultSession = ${JSON.stringify(client.sessionId ?? '')};
-      if (defaultSession) sessionField.value = defaultSession;
 
       function renderMeta() {
         if (!state.selected) {
@@ -1415,10 +1645,6 @@ if (transportMode === 'http') {
         } catch (err) {
           outputField.textContent = 'Invalid JSON: ' + err.message;
           return;
-        }
-        const sessionId = sessionField.value.trim();
-        if (sessionId && typeof input === 'object' && input !== null && !Array.isArray(input)) {
-          input.sessionId = sessionId;
         }
         runBtn.disabled = true;
         outputField.textContent = 'Running...';
@@ -1481,10 +1707,17 @@ if (transportMode === 'http') {
 
   app.post('/mcp', async (req, res) => {
     const token = getAuthTokenFromRequest(req);
+    const sessionIdFromHeader = getSessionIdFromRequest(req);
+    const userIdFromHeader = getUserIdFromRequest(req);
+    logEvent('mcp_request', {
+      hasToken: !!token,
+      sessionId: sessionIdFromHeader ?? null,
+    });
     if (token) {
       try {
         const authInfo = await resolveMcpAuth(token);
         if (!authInfo) {
+          logEvent('mcp_auth_failed', { reason: 'invalid_token', sessionId: sessionIdFromHeader ?? null });
           res.status(401).json({ error: 'invalid_token' });
           return;
         }
@@ -1492,11 +1725,19 @@ if (transportMode === 'http') {
           mcpUser: authInfo.user,
           mcpToken: token,
           mcpTokenExpiresAt: authInfo.expiresAt,
+          sessionId: sessionIdFromHeader ?? undefined,
+          actingUserId: userIdFromHeader ?? undefined,
         };
       } catch {
+        logEvent('mcp_auth_failed', { reason: 'auth_unavailable', sessionId: sessionIdFromHeader ?? null });
         res.status(503).json({ error: 'auth_unavailable' });
         return;
       }
+    } else if (sessionIdFromHeader) {
+      req.auth = {
+        sessionId: sessionIdFromHeader,
+        actingUserId: userIdFromHeader ?? undefined,
+      };
     }
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

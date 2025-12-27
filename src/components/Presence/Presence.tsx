@@ -820,6 +820,14 @@ export const Presence: React.FC = () => {
   }, [settingsOpen, me]);
 
   useEffect(() => {
+    const modalOpen = settingsOpen || integrationsOpen || (open && !me);
+    document.body.classList.toggle('modal-open', modalOpen);
+    return () => {
+      document.body.classList.remove('modal-open');
+    };
+  }, [integrationsOpen, me, open, settingsOpen]);
+
+  useEffect(() => {
     if (!integrationsOpen) return;
     setMcpTokenValue(null);
     if (integrationsTab === 'mcp') {
@@ -1434,7 +1442,7 @@ export const Presence: React.FC = () => {
           style={{
             position: 'fixed',
             inset: 0,
-            zIndex: 2000,
+            zIndex: 12000,
             background: 'rgba(0,0,0,0.45)',
             display: 'grid',
             placeItems: isCompactAuth ? 'end center' : 'center',
@@ -1848,7 +1856,7 @@ export const Presence: React.FC = () => {
           style={{
             position: 'fixed',
             inset: 0,
-            zIndex: 2000,
+            zIndex: 12000,
             background: 'rgba(0,0,0,0.45)',
             display: 'grid',
             placeItems: isCompactAuth ? 'end center' : 'center',
@@ -1910,6 +1918,9 @@ export const Presence: React.FC = () => {
                         color: 'var(--text-primary)',
                         padding: '6px 12px',
                         fontSize: 12,
+                        minWidth: 48,
+                        display: 'inline-flex',
+                        justifyContent: 'center',
                         cursor: 'pointer',
                       }}
                     >
@@ -2226,7 +2237,7 @@ export const Presence: React.FC = () => {
           style={{
             position: 'fixed',
             inset: 0,
-            zIndex: 2000,
+            zIndex: 12000,
             background: 'rgba(0,0,0,0.45)',
             display: 'grid',
             placeItems: isCompactAuth ? 'end center' : 'center',

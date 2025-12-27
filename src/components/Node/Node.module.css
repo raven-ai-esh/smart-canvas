@@ -722,6 +722,7 @@
     gap: 10px;
     width: 100%;
     box-sizing: border-box;
+    position: relative;
 }
 
 .editorPreview {
@@ -844,6 +845,8 @@
     padding: 10px 12px;
     width: 100%;
     flex: 1;
+    height: 100%;
+    min-height: 0;
     resize: none;
     overflow: auto;
     outline: none;
@@ -852,6 +855,140 @@
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
     touch-action: pan-y;
+}
+
+.editorInputWrap {
+    position: relative;
+    width: 100%;
+    flex: 1;
+    min-height: 120px;
+    display: flex;
+}
+
+.mentionMenu {
+    position: absolute;
+    left: 10px;
+    top: 10px;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 220px;
+    max-width: 320px;
+    max-height: 220px;
+    overflow: auto;
+    padding: 6px;
+    border-radius: 12px;
+    border: 1px solid var(--border-strong);
+    background: rgba(10, 12, 18, 0.92);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(12px);
+}
+
+.mentionItem {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-primary);
+    padding: 6px 8px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.mentionItemActive {
+    border-color: var(--border-strong);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.mentionAvatar {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.08);
+    flex-shrink: 0;
+}
+
+.mentionText {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.mentionName {
+    font-size: 12px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mentionMeta {
+    font-size: 10px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mentionEmpty {
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 6px 8px;
+}
+
+.peopleRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    margin: 6px 0 4px;
+}
+
+.personPill {
+    max-width: 160px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-secondary);
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.authorPill {
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.participantPill {
+    color: var(--text-primary);
+    border-color: rgba(94, 129, 172, 0.6);
+    box-shadow: 0 0 8px rgba(94, 129, 172, 0.25);
+    animation: participantGlow 2.4s ease-in-out infinite;
+}
+
+@keyframes participantGlow {
+    0%,
+    100% {
+        box-shadow: 0 0 6px rgba(94, 129, 172, 0.2);
+    }
+    50% {
+        box-shadow: 0 0 12px rgba(94, 129, 172, 0.4);
+    }
 }
 
 .noteContentInput:focus {

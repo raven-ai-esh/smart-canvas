@@ -86,6 +86,7 @@ export function useSessionSync() {
   const clientId = useMemo(() => getOrCreateClientId(), []);
   const setSessionIdInStore = useStore((s) => s.setSessionId);
   const setSessionMeta = useStore((s) => s.setSessionMeta);
+  const setSessionSavers = useStore((s) => s.setSessionSavers);
 
   const wsRef = useRef<WebSocket | null>(null);
   const applyingRemoteRef = useRef(false);
@@ -107,6 +108,52 @@ export function useSessionSync() {
   }, [sessionId, setSessionIdInStore]);
 
   useEffect(() => {
+    if (!sessionId) {
+      setSessionSavers([]);
+      return;
+    }
+    let cancelled = false;
+    setSessionSavers([]);
+
+    const loadSavers = async () => {
+      try {
+        const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/savers`);
+        if (!res.ok) {
+          if (!cancelled) setSessionSavers([]);
+          return;
+        }
+        const data = await res.json();
+        const items: unknown[] = Array.isArray(data?.savers) ? data.savers : [];
+        const normalized = items
+          .map((item: any) => ({
+            id: typeof item?.id === 'string' ? item.id : '',
+            name: typeof item?.name === 'string' ? item.name : '',
+            email: typeof item?.email === 'string' ? item.email : '',
+            avatarSeed: typeof item?.avatarSeed === 'string' ? item.avatarSeed : '',
+            avatarUrl: typeof item?.avatarUrl === 'string' ? item.avatarUrl : null,
+            avatarAnimal: Number.isFinite(item?.avatarAnimal) ? Number(item.avatarAnimal) : null,
+            avatarColor: Number.isFinite(item?.avatarColor) ? Number(item.avatarColor) : null,
+            savedAt: item?.savedAt ? String(item.savedAt) : null,
+          }))
+          .filter((item: any) => item.id);
+        if (!cancelled) setSessionSavers(normalized);
+      } catch {
+        if (!cancelled) setSessionSavers([]);
+      }
+    };
+
+    loadSavers();
+    const onAuthChanged = () => {
+      loadSavers();
+    };
+    window.addEventListener('auth-changed', onAuthChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('auth-changed', onAuthChanged);
+    };
+  }, [sessionId, setSessionSavers]);
+
+  useEffect(() => {
     const onPopState = () => {
       setSessionId(getSessionIdFromUrl());
       setResetRequested(getResetFromUrl());
@@ -120,12 +167,15 @@ export function useSessionSync() {
 
     let cancelled = false;
     (async () => {
-      const res = await fetch('/api/settings/default-session');
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ state: {} }),
+      });
       if (!res.ok) return;
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       const id = typeof data?.id === 'string' ? data.id : null;
-      if (!id) return;
-      if (cancelled) return;
+      if (!id || cancelled) return;
 
       const url = new URL(window.location.href);
       url.searchParams.set('session', id);
@@ -182,7 +232,10 @@ export function useSessionSync() {
       reconnectTimer.current = null;
     };
 
-    const applyCanvasViewAction = (action: string, nodeId: string | null) => {
+    const applyCanvasViewAction = (
+      action: string,
+      payload: { nodeId?: string | null; x?: number | null; y?: number | null; scale?: number | null } = {},
+    ) => {
       if (typeof window === 'undefined' || typeof document === 'undefined') return false;
       const MIN_SCALE = 0.1;
       const MAX_SCALE = 5;
@@ -294,9 +347,21 @@ export function useSessionSync() {
         applyZoomToFit();
         return true;
       }
+      if (action === 'pan') {
+        const x = Number.isFinite(payload.x) ? Number(payload.x) : null;
+        const y = Number.isFinite(payload.y) ? Number(payload.y) : null;
+        if (x !== null && y !== null) {
+          const targetScale = Number.isFinite(payload.scale)
+            ? Number(payload.scale)
+            : useStore.getState().canvas.scale;
+          centerOnWorldPoint(x, y, targetScale);
+          return true;
+        }
+        return false;
+      }
       if (action === 'focus_node') {
-        if (nodeId) {
-          const node = useStore.getState().nodes.find((candidate) => candidate.id === nodeId);
+        if (payload.nodeId) {
+          const node = useStore.getState().nodes.find((candidate) => candidate.id === payload.nodeId);
           if (node) {
             centerOnWorldPoint(node.x, node.y, ZOOM_DETAIL);
             return true;
@@ -577,11 +642,14 @@ export function useSessionSync() {
           const action = typeof msg?.action === 'string' ? msg.action : null;
           if (action) {
             const nodeId = typeof msg?.nodeId === 'string' ? msg.nodeId : null;
+            const x = Number.isFinite(msg?.x) ? Number(msg.x) : null;
+            const y = Number.isFinite(msg?.y) ? Number(msg.y) : null;
+            const scale = Number.isFinite(msg?.scale) ? Number(msg.scale) : null;
             const id = typeof crypto?.randomUUID === 'function'
               ? crypto.randomUUID()
               : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            useStore.getState().setCanvasViewCommand({ id, action, nodeId });
-            applyCanvasViewAction(action, nodeId);
+            useStore.getState().setCanvasViewCommand({ id, action, nodeId, x, y, scale });
+            applyCanvasViewAction(action, { nodeId, x, y, scale });
           }
           return;
         }

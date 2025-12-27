@@ -1,9 +1,9 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Bold, Italic, Strikethrough, Code, List, ListOrdered, Quote, Paperclip, Trash2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/useStore';
-import type { Attachment, NodeData } from '../../types';
+import type { Attachment, NodeData, MentionToken, SessionSaver } from '../../types';
 import styles from './Node.module.css';
 import { numberLines, prefixLines, wrapSelection } from '../../utils/textEditing';
 import { clampEnergy, energyToColor } from '../../utils/energy';
@@ -39,6 +39,130 @@ const getDeltaToCenter = (x: number, y: number, canvas: { x: number, y: number, 
     return { dx: x - worldCX, dy: y - worldCY };
 };
 
+type MentionOption = {
+    id: string;
+    label: string;
+    name: string;
+    email: string;
+    avatarSeed: string;
+    avatarUrl?: string | null;
+    avatarAnimal?: number | null;
+    avatarColor?: number | null;
+};
+
+type MentionParticipant = {
+    id: string;
+    label: string;
+    avatarSeed: string;
+    avatarUrl?: string | null;
+    avatarAnimal?: number | null;
+    avatarColor?: number | null;
+};
+
+const mentionLabelFor = (saver: SessionSaver) => {
+    const name = String(saver.name ?? '').trim();
+    if (name) return name;
+    const email = String(saver.email ?? '').trim();
+    if (email) return email;
+    return 'User';
+};
+
+const hasAllMention = (text: string) => /(^|[^\p{L}\p{N}])@all(?![\p{L}\p{N}])/iu.test(text);
+
+const normalizeMentionables = (savers: SessionSaver[] | undefined) => {
+    if (!Array.isArray(savers)) return [];
+    const seen = new Set<string>();
+    const people = savers
+        .map((saver) => ({
+            id: String(saver.id ?? ''),
+            label: mentionLabelFor(saver),
+            name: String(saver.name ?? ''),
+            email: String(saver.email ?? ''),
+            avatarSeed: String(saver.avatarSeed ?? ''),
+            avatarUrl: saver.avatarUrl ?? null,
+            avatarAnimal: Number.isFinite(saver.avatarAnimal) ? saver.avatarAnimal ?? null : null,
+            avatarColor: Number.isFinite(saver.avatarColor) ? saver.avatarColor ?? null : null,
+        }))
+        .filter((item) => {
+            if (!item.id || seen.has(item.id)) return false;
+            seen.add(item.id);
+            return true;
+        });
+    if (!people.length) return people;
+    return [
+        {
+            id: 'all',
+            label: 'all',
+            name: 'All participants',
+            email: '',
+            avatarSeed: '',
+            avatarUrl: null,
+            avatarAnimal: null,
+            avatarColor: null,
+        },
+        ...people,
+    ];
+};
+
+const normalizeMentions = (mentions: MentionToken[] | undefined) => {
+    if (!Array.isArray(mentions)) return [];
+    return mentions.filter((mention) => mention && typeof mention.id === 'string' && mention.id && typeof mention.label === 'string' && mention.label.trim());
+};
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const pruneMentions = (text: string, mentions: MentionToken[]) => {
+    return mentions.filter((mention) => {
+        const label = mention.label.trim();
+        if (!label) return false;
+        const pattern = new RegExp(`(^|[^\\p{L}\\p{N}])@${escapeRegExp(label)}(?![\\p{L}\\p{N}])`, 'iu');
+        return pattern.test(text);
+    });
+};
+
+const resolveMentionParticipants = (mentions: MentionToken[] | undefined, savers: SessionSaver[] | undefined) => {
+    const normalized = normalizeMentions(mentions);
+    if (!normalized.length && (!savers || !savers.length)) return [];
+    const byId = new Map<string, SessionSaver>();
+    (savers ?? []).forEach((saver) => {
+        if (!saver?.id) return;
+        byId.set(saver.id, saver);
+    });
+    const seen = new Set<string>();
+    const out: MentionParticipant[] = [];
+    const allMentioned = normalized.some((mention) => mention.id === 'all' || mention.label.trim().toLowerCase() === 'all');
+    if (allMentioned) {
+        (savers ?? []).forEach((saver) => {
+            if (!saver?.id || seen.has(saver.id)) return;
+            seen.add(saver.id);
+            out.push({
+                id: saver.id,
+                label: mentionLabelFor(saver),
+                avatarSeed: saver.avatarSeed ?? '',
+                avatarUrl: saver.avatarUrl ?? null,
+                avatarAnimal: Number.isFinite(saver.avatarAnimal) ? saver.avatarAnimal ?? null : null,
+                avatarColor: Number.isFinite(saver.avatarColor) ? saver.avatarColor ?? null : null,
+            });
+        });
+    }
+    for (const mention of normalized) {
+        if (seen.has(mention.id)) continue;
+        if (mention.id === 'all' || mention.label.trim().toLowerCase() === 'all') continue;
+        seen.add(mention.id);
+        const saver = byId.get(mention.id);
+        const fallback = saver ? mentionLabelFor(saver) : mention.label.trim();
+        out.push({
+            id: mention.id,
+            label: mention.label.trim() || fallback,
+            avatarSeed: saver?.avatarSeed ?? '',
+            avatarUrl: saver?.avatarUrl ?? null,
+            avatarAnimal: Number.isFinite(saver?.avatarAnimal) ? saver?.avatarAnimal ?? null : null,
+            avatarColor: Number.isFinite(saver?.avatarColor) ? saver?.avatarColor ?? null : null,
+        });
+    }
+    return out;
+};
+
 type TextSel = { start: number; end: number };
 const clampProgress = (value: number) => Math.min(100, Math.max(0, value));
 const statusFromProgress = (progress: number) => {
@@ -60,6 +184,9 @@ type MarkdownEditorProps = {
     attachments?: Attachment[];
     onAddAttachments?: (attachments: Attachment[]) => void;
     onRemoveAttachment?: (id: string) => void;
+    mentionables?: SessionSaver[];
+    mentions?: MentionToken[];
+    onMentionsChange?: (next: MentionToken[]) => void;
 };
 
 const AttachmentList: React.FC<{
@@ -126,12 +253,74 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
     attachments,
     onAddAttachments,
     onRemoveAttachment,
+    mentionables,
+    mentions,
+    onMentionsChange,
 }) => {
+    const safeValue = typeof value === 'string' ? value : '';
     const [editing, setEditing] = useState(alwaysEditing);
     const [attachNotice, setAttachNotice] = useState<string | null>(null);
     const rootRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const [mentionOpen, setMentionOpen] = useState(false);
+    const [mentionQuery, setMentionQuery] = useState('');
+    const [mentionIndex, setMentionIndex] = useState(0);
+    const [mentionAnchor, setMentionAnchor] = useState<{ start: number; end: number } | null>(null);
+    const mentionOptions = useMemo(() => normalizeMentionables(mentionables), [mentionables]);
+    const mentionMatches = useMemo(() => {
+        if (!mentionOpen) return [];
+        const q = mentionQuery.trim().toLowerCase();
+        if (!q) return mentionOptions.slice(0, 6);
+        return mentionOptions
+            .filter((item) => {
+                const name = item.name.toLowerCase();
+                const email = item.email.toLowerCase();
+                const label = item.label.toLowerCase();
+                return name.includes(q) || email.includes(q) || label.includes(q);
+            })
+            .slice(0, 6);
+    }, [mentionOpen, mentionOptions, mentionQuery]);
+    const normalizedMentions = useMemo(() => normalizeMentions(mentions), [mentions]);
+
+    const closeMentions = useCallback(() => {
+        setMentionOpen(false);
+        setMentionQuery('');
+        setMentionAnchor(null);
+        setMentionIndex(0);
+    }, []);
+
+    const syncMentions = useCallback((nextText: string) => {
+        if (!onMentionsChange) return;
+        let nextMentions = pruneMentions(nextText, normalizedMentions);
+        const allMentioned = hasAllMention(nextText);
+        if (allMentioned && !nextMentions.some((m) => m.id === 'all' || m.label.trim().toLowerCase() === 'all')) {
+            nextMentions = [...nextMentions, { id: 'all', label: 'all' }];
+        }
+        if (!allMentioned && nextMentions.some((m) => m.id === 'all' || m.label.trim().toLowerCase() === 'all')) {
+            nextMentions = nextMentions.filter((m) => m.id !== 'all' && m.label.trim().toLowerCase() !== 'all');
+        }
+        if (nextMentions.length !== normalizedMentions.length) onMentionsChange(nextMentions);
+    }, [normalizedMentions, onMentionsChange]);
+
+    const trackMentionTrigger = useCallback((text: string, cursor: number | null) => {
+        if (cursor === null || cursor === undefined) {
+            closeMentions();
+            return;
+        }
+        const before = text.slice(0, cursor);
+        const match = before.match(/(^|[^\p{L}\p{N}])@([\p{L}\p{N}._-]*)$/u);
+        if (!match) {
+            closeMentions();
+            return;
+        }
+        const query = match[2] ?? '';
+        const start = cursor - query.length - 1;
+        setMentionOpen(true);
+        setMentionQuery(query);
+        setMentionAnchor({ start, end: cursor });
+        setMentionIndex(0);
+    }, [closeMentions]);
 
     React.useEffect(() => {
         if (alwaysEditing) setEditing(true);
@@ -142,23 +331,58 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
     }, [editing, onEditingChange]);
 
     React.useEffect(() => {
+        if (!editing) closeMentions();
+    }, [closeMentions, editing]);
+
+    React.useEffect(() => {
         if (!attachNotice) return;
         const t = window.setTimeout(() => setAttachNotice(null), 2000);
         return () => window.clearTimeout(t);
     }, [attachNotice]);
+
+    React.useEffect(() => {
+        if (mentionIndex >= mentionMatches.length && mentionMatches.length > 0) {
+            setMentionIndex(0);
+        }
+    }, [mentionIndex, mentionMatches.length]);
 
     const apply = useCallback((fn: (text: string, sel: TextSel) => { nextText: string; nextSelection: TextSel }) => {
         const el = textareaRef.current;
         if (!el) return;
         const { nextText, nextSelection } = fn(el.value, { start: el.selectionStart, end: el.selectionEnd });
         onChange(nextText);
+        syncMentions(nextText);
+        trackMentionTrigger(nextText, nextSelection.end);
         requestAnimationFrame(() => {
             const t = textareaRef.current;
             if (!t) return;
             t.focus();
             t.setSelectionRange(nextSelection.start, nextSelection.end);
         });
-    }, [onChange]);
+    }, [onChange, syncMentions, trackMentionTrigger]);
+
+    const applyMention = useCallback((option: MentionOption) => {
+        const el = textareaRef.current;
+        if (!el || !mentionAnchor) return;
+        const current = el.value;
+        const mentionText = `@${option.label}`;
+        const suffix = current.slice(mentionAnchor.end);
+        const spacer = suffix.startsWith(' ') || suffix.startsWith('\n') || suffix === '' ? '' : ' ';
+        const nextText = `${current.slice(0, mentionAnchor.start)}${mentionText}${spacer}${suffix}`;
+        onChange(nextText);
+        if (onMentionsChange) {
+            const merged = normalizedMentions.some((m) => m.id === option.id)
+                ? normalizedMentions
+                : [...normalizedMentions, { id: option.id, label: option.label }];
+            onMentionsChange(pruneMentions(nextText, merged));
+        }
+        closeMentions();
+        requestAnimationFrame(() => {
+            const nextPos = mentionAnchor.start + mentionText.length + spacer.length;
+            el.focus();
+            el.setSelectionRange(nextPos, nextPos);
+        });
+    }, [closeMentions, mentionAnchor, normalizedMentions, onChange, onMentionsChange]);
 
     const keepTextFocus = (e: React.PointerEvent) => {
         e.preventDefault();
@@ -166,6 +390,28 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        if (mentionOpen) {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                const dir = e.key === 'ArrowDown' ? 1 : -1;
+                const count = mentionMatches.length;
+                if (count > 0) {
+                    setMentionIndex((prev) => (prev + dir + count) % count);
+                }
+                return;
+            }
+            if (e.key === 'Enter' && mentionMatches.length > 0) {
+                e.preventDefault();
+                const picked = mentionMatches[Math.min(mentionIndex, mentionMatches.length - 1)];
+                if (picked) applyMention(picked);
+                return;
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closeMentions();
+                return;
+            }
+        }
         if (e.key === 'Enter') {
             if ((e.metaKey || e.ctrlKey) && onSubmit) {
                 e.preventDefault();
@@ -215,6 +461,7 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
 
     const handleBlur = () => {
         if (alwaysEditing) return;
+        closeMentions();
         requestAnimationFrame(() => {
             const root = rootRef.current;
             if (!root) {
@@ -236,6 +483,13 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
         }
     };
 
+    const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+        const next = e.target.value;
+        onChange(next);
+        trackMentionTrigger(next, e.target.selectionStart);
+        syncMentions(next);
+    };
+
     const showPreview = !editing && !alwaysEditing;
     const resolvedPlaceholder = placeholder ?? 'Double click to edit…';
 
@@ -251,10 +505,10 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
                         requestAnimationFrame(() => textareaRef.current?.focus());
                     }}
                 >
-                    {value.trim().length === 0 ? (
+                    {safeValue.trim().length === 0 ? (
                         <div className={styles.editorPlaceholder}>{resolvedPlaceholder}</div>
                     ) : (
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{value}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{safeValue}</ReactMarkdown>
                     )}
                     <AttachmentList attachments={attachments ?? []} compact />
                 </div>
@@ -342,16 +596,61 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
                             </>
                         )}
                     </div>
-                    <textarea
-                        ref={textareaRef}
-                        className={styles.noteContentInput}
-                        value={value}
-                        onChange={(e) => onChange(e.target.value)}
-                        onBlur={handleBlur}
-                        onKeyDown={handleKeyDown}
-                        onPointerDown={(e) => e.stopPropagation()}
-                        placeholder={resolvedPlaceholder}
-                    />
+                    <div className={styles.editorInputWrap}>
+                        <textarea
+                            ref={textareaRef}
+                            className={styles.noteContentInput}
+                            value={safeValue}
+                            onChange={handleChange}
+                            onBlur={handleBlur}
+                            onKeyDown={handleKeyDown}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            placeholder={resolvedPlaceholder}
+                        />
+                        {mentionOpen && (
+                            <div
+                                className={styles.mentionMenu}
+                                data-interactive="true"
+                                onPointerDown={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                }}
+                            >
+                                            {mentionMatches.length === 0 ? (
+                                                <div className={styles.mentionEmpty}>No saved people yet</div>
+                                            ) : (
+                                                mentionMatches.map((item, idx) => (
+                                                    <button
+                                                        key={item.id}
+                                                        type="button"
+                                            className={`${styles.mentionItem} ${idx === mentionIndex ? styles.mentionItemActive : ''}`}
+                                            onPointerDown={(e) => {
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                            }}
+                                            onClick={() => applyMention(item)}
+                                        >
+                                            <span className={styles.mentionAvatar}>
+                                                {(item.id === 'all' ? 'A' : item.label).slice(0, 1).toUpperCase()}
+                                            </span>
+                                            <span className={styles.mentionText}>
+                                                <span className={styles.mentionName}>
+                                                    {item.id === 'all' ? 'All participants' : item.label}
+                                                </span>
+                                                {item.id === 'all' ? (
+                                                    <span className={styles.mentionMeta}>Tag everyone who saved this canvas</span>
+                                                ) : (
+                                                    item.email && item.email !== item.label && (
+                                                        <span className={styles.mentionMeta}>{item.email}</span>
+                                                    )
+                                                )}
+                                            </span>
+                                                    </button>
+                                                ))
+                                            )}
+                            </div>
+                        )}
+                    </div>
                     <AttachmentList
                         attachments={attachments ?? []}
                         onRemoveAttachment={onRemoveAttachment}
@@ -393,8 +692,10 @@ const NoteContentEditor: React.FC<{
     nodeId: string;
     value: string;
     attachments: Attachment[];
-}> = ({ nodeId, value, attachments }) => {
+    mentions: MentionToken[];
+}> = ({ nodeId, value, attachments, mentions }) => {
     const updateNode = useStore((state) => state.updateNode);
+    const mentionables = useStore((state) => state.sessionSavers);
     const historyPushedRef = useRef(false);
 
     const ensureHistory = useCallback(() => {
@@ -410,6 +711,11 @@ const NoteContentEditor: React.FC<{
     const updateContent = (next: string) => {
         ensureHistory();
         updateNode(nodeId, { content: next });
+    };
+
+    const updateMentions = (next: MentionToken[]) => {
+        ensureHistory();
+        updateNode(nodeId, { mentions: next });
     };
 
     const addAttachments = (incoming: Attachment[]) => {
@@ -433,6 +739,9 @@ const NoteContentEditor: React.FC<{
             attachments={attachments}
             onAddAttachments={addAttachments}
             onRemoveAttachment={removeAttachment}
+            mentionables={mentionables}
+            mentions={mentions}
+            onMentionsChange={updateMentions}
         />
     );
 };
@@ -441,6 +750,7 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
     const updateNode = useStore((state) => state.updateNode);
     const [showEnergySelector, setShowEnergySelector] = React.useState(false);
     const monitoringMode = useStore((state) => state.monitoringMode);
+    const sessionSavers = useStore((state) => state.sessionSavers);
     const [energyInputOpen, setEnergyInputOpen] = React.useState(false);
     const [energyInputValue, setEnergyInputValue] = React.useState('');
     const [energyToast, setEnergyToast] = React.useState<string | null>(null);
@@ -576,6 +886,8 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
     const shouldPulse = monitoringMode && isTask && status === 'in_progress';
     const cardClassName = `${isTask ? styles.taskNode : styles.cardNode}${shouldPulse ? ` ${styles.monitorPulse}` : ''}${isTask ? ` ${styles.cardProgressRing}` : ''}`;
     const cardStyle = isTask ? ({ '--card-progress': progress, '--progress-color': energyColor } as React.CSSProperties) : undefined;
+    const mentionParticipants = resolveMentionParticipants(data.mentions, sessionSavers);
+    const authorLabel = typeof data.authorName === 'string' ? data.authorName.trim() : '';
 
     return (
         <div className={cardClassName} style={cardStyle}>
@@ -756,6 +1068,21 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
                 </div>
             </div>
 
+            {mentionParticipants.length > 0 && (
+                <div className={styles.peopleRow}>
+                    {authorLabel && (
+                        <span className={`${styles.personPill} ${styles.authorPill}`} title="Author">
+                            {authorLabel}
+                        </span>
+                    )}
+                    {mentionParticipants.map((person) => (
+                        <span key={person.id} className={`${styles.personPill} ${styles.participantPill}`} title="Participant">
+                            {person.label}
+                        </span>
+                    ))}
+                </div>
+            )}
+
             <div className={styles.cardMeta}>
                 <span className={styles.type}>{data.type}</span>
                 {isTask && (data.startDate || data.endDate) && (
@@ -780,6 +1107,7 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
 const NoteView = React.memo(({ data }: { data: NodeData }) => {
     const updateNode = useStore((state) => state.updateNode);
     const monitoringMode = useStore((state) => state.monitoringMode);
+    const sessionSavers = useStore((state) => state.sessionSavers);
     // NoteView is explicitly for "Dive in", so maybe we allow direct editing?
     // User requested "Double click for renaming".
     // Let's keep NoteView title as double-click, but Content as direct?
@@ -826,6 +1154,8 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
     const status = statusFromProgress(progress);
     const shouldPulse = monitoringMode && isTask && status === 'in_progress';
     const nodeAttachments = Array.isArray(data.attachments) ? data.attachments : [];
+    const mentionParticipants = resolveMentionParticipants(data.mentions, sessionSavers);
+    const authorLabel = typeof data.authorName === 'string' ? data.authorName.trim() : '';
 
     React.useEffect(() => {
         if (!showEnergyPanel) return;
@@ -1085,6 +1415,21 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
                     </div>
                 </div>
 
+                {mentionParticipants.length > 0 && (
+                    <div className={styles.peopleRow}>
+                        {authorLabel && (
+                            <span className={`${styles.personPill} ${styles.authorPill}`} title="Author">
+                                {authorLabel}
+                            </span>
+                        )}
+                        {mentionParticipants.map((person) => (
+                            <span key={person.id} className={`${styles.personPill} ${styles.participantPill}`} title="Participant">
+                                {person.label}
+                            </span>
+                        ))}
+                    </div>
+                )}
+
                 <div className={styles.noteStack}>
                     {isTask && (
                         <>
@@ -1171,7 +1516,7 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
                         </div>
                     )}
 
-                    <NoteContentEditor nodeId={data.id} value={data.content} attachments={nodeAttachments} />
+                    <NoteContentEditor nodeId={data.id} value={data.content} attachments={nodeAttachments} mentions={normalizeMentions(data.mentions)} />
                 </div>
                 </div>
 

@@ -62,6 +62,10 @@ body {
   user-select: none;
 }
 
+body.modal-open [data-canvas-root="true"] {
+  pointer-events: none;
+}
+
 #root {
   width: 100%;
   height: 100%;

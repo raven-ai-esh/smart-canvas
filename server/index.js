@@ -10,8 +10,6 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
 import OpenAI from 'openai';
-import { Agent, MCPServerStreamableHttp, run } from '@openai/agents';
-import { OpenAIResponsesModel } from '@openai/agents-openai';
 import Redis from 'ioredis';
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -39,21 +37,36 @@ const MCP_TOKEN_DEFAULT_TTL_DAYS = Number(process.env.MCP_TOKEN_DEFAULT_TTL_DAYS
 const MCP_TOKEN_MAX_TTL_DAYS = Number(process.env.MCP_TOKEN_MAX_TTL_DAYS ?? 365);
 const MCP_SNAPSHOT_TIMEOUT_MS = Number(process.env.MCP_SNAPSHOT_TIMEOUT_MS ?? 12000);
 const MCP_SERVER_URL = process.env.MCP_SERVER_URL ?? 'http://localhost:7010/mcp';
+const MCP_AGENT_ALLOWED_TOOLS = process.env.MCP_AGENT_ALLOWED_TOOLS ?? '';
+const MCP_TECH_TOKEN = process.env.MCP_TECH_TOKEN ?? '';
+const MCP_TECH_USER_ID = process.env.MCP_TECH_USER_ID ?? 'raven-bot';
+const MCP_TECH_USER_NAME = process.env.MCP_TECH_USER_NAME ?? 'Raven';
+const MCP_TECH_AVATAR_SEED = process.env.MCP_TECH_AVATAR_SEED ?? 'raven-bot';
+const MCP_TECH_AVATAR_URL = process.env.MCP_TECH_AVATAR_URL ?? '';
+const MCP_TECH_AVATAR_ANIMAL = process.env.MCP_TECH_AVATAR_ANIMAL ?? '';
+const MCP_TECH_AVATAR_COLOR = process.env.MCP_TECH_AVATAR_COLOR ?? '';
+const AGENT_SERVICE_URL = process.env.AGENT_SERVICE_URL ?? 'http://agent:8001/run';
+const AGENT_SERVICE_TIMEOUT_MS = Number(process.env.AGENT_SERVICE_TIMEOUT_MS ?? 60000);
 const OPENAI_API_BASE_URL = process.env.OPENAI_API_BASE_URL ?? 'https://api.openai.com/v1';
 const OPENAI_MODEL = process.env.OPENAI_MODEL ?? 'gpt-5.2';
 const OPENAI_SUMMARY_MODEL = process.env.OPENAI_SUMMARY_MODEL ?? OPENAI_MODEL;
 const OPENAI_EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL ?? 'text-embedding-3-small';
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS ?? 30000);
-const OPENAI_MAX_TURNS = Number(process.env.OPENAI_MAX_TURNS ?? 6);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? null;
 const ASSISTANT_CONTEXT_LIMIT = Number(process.env.ASSISTANT_CONTEXT_LIMIT ?? 20);
 const ASSISTANT_MEMORY_K = Number(process.env.ASSISTANT_MEMORY_K ?? 5);
 const ASSISTANT_MEMORY_MAX_CHARS = Number(process.env.ASSISTANT_MEMORY_MAX_CHARS ?? 1200);
-const ASSISTANT_SUMMARY_THRESHOLD = Number(process.env.ASSISTANT_SUMMARY_THRESHOLD ?? 14);
-const ASSISTANT_SUMMARY_MAX_CHARS = Number(process.env.ASSISTANT_SUMMARY_MAX_CHARS ?? 1400);
+const ASSISTANT_SUMMARY_REMAINING_RATIO = Number(process.env.ASSISTANT_SUMMARY_REMAINING_RATIO ?? 0.15);
+const ASSISTANT_MAX_TURNS = Number(process.env.ASSISTANT_MAX_TURNS ?? 0);
 const ASSISTANT_CACHE_TTL_MS = Number(process.env.ASSISTANT_CACHE_TTL_MS ?? 60000);
+const ASSISTANT_MODEL_CONTEXT_TOKENS = Number(process.env.ASSISTANT_MODEL_CONTEXT_TOKENS ?? 0);
+const ASSISTANT_TOKEN_ESTIMATE_CHARS = Number(process.env.ASSISTANT_TOKEN_ESTIMATE_CHARS ?? 4);
+const ASSISTANT_OUTPUT_RESERVE_TOKENS = Number(process.env.ASSISTANT_OUTPUT_RESERVE_TOKENS ?? 0);
 const REDIS_URL = process.env.REDIS_URL ?? '';
 const EMBEDDING_DIM = Number(process.env.OPENAI_EMBEDDING_DIM ?? 1536);
+const MODEL_CONTEXT_TOKENS = {
+  'gpt-5.2': 400000,
+};
 const parseCorsOrigin = (v) => {
   if (v === undefined) return true;
   if (v === 'true') return true;
@@ -174,6 +187,36 @@ async function initDb() {
   }
   try {
     await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_color INTEGER');
+  } catch {
+    // ignore
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS session_savers (
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (session_id, user_id)
+    );
+  `);
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS session_savers_user_idx ON session_savers (user_id)');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS session_savers_session_idx ON session_savers (session_id)');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query(`
+      INSERT INTO session_savers (session_id, user_id, saved_at)
+      SELECT id, owner_id, COALESCE(saved_at, NOW())
+      FROM sessions
+      WHERE owner_id IS NOT NULL
+      ON CONFLICT (session_id, user_id) DO NOTHING
+    `);
   } catch {
     // ignore
   }
@@ -613,6 +656,55 @@ async function touchMcpToken(tokenHash) {
   await pool.query('UPDATE mcp_tokens SET last_used_at = NOW() WHERE token_hash = $1', [tokenHash]);
 }
 
+const normalizeTechNumber = (value) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+const getTechMcpUser = () => ({
+  id: MCP_TECH_USER_ID,
+  name: MCP_TECH_USER_NAME,
+  avatarSeed: MCP_TECH_AVATAR_SEED,
+  avatarUrl: MCP_TECH_AVATAR_URL ? MCP_TECH_AVATAR_URL : null,
+  avatarAnimal: normalizeTechNumber(MCP_TECH_AVATAR_ANIMAL),
+  avatarColor: normalizeTechNumber(MCP_TECH_AVATAR_COLOR),
+});
+
+const isTechMcpToken = (rawToken) => !!(MCP_TECH_TOKEN && rawToken === MCP_TECH_TOKEN);
+
+async function resolveMcpTokenInfo(rawToken) {
+  if (isTechMcpToken(rawToken)) {
+    return {
+      kind: 'tech',
+      user: getTechMcpUser(),
+      userId: MCP_TECH_USER_ID,
+      tokenHash: null,
+    };
+  }
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const row = await getMcpTokenByHash(tokenHash);
+  if (!row) return { error: 'invalid' };
+  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+    await deleteMcpToken(row.user_id);
+    return { error: 'expired' };
+  }
+  await touchMcpToken(tokenHash);
+  return {
+    kind: 'user',
+    tokenHash,
+    userId: row.user_id,
+    expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+    user: {
+      id: row.user_id,
+      name: row.name,
+      avatarSeed: row.avatar_seed,
+      avatarUrl: row.avatar_url,
+      avatarAnimal: row.avatar_animal,
+      avatarColor: row.avatar_color,
+    },
+  };
+}
+
 function maskOpenAiKey(key) {
   const raw = typeof key === 'string' ? key.trim() : '';
   if (!raw) return '';
@@ -678,7 +770,11 @@ async function setSetting(key, value) {
   );
 }
 
-const MAX_MESSAGE_CHARS = 4000;
+async function deleteSetting(key) {
+  await pool.query('DELETE FROM app_settings WHERE key = $1', [key]);
+}
+
+const MAX_MESSAGE_CHARS = Number(process.env.ASSISTANT_MESSAGE_MAX_CHARS ?? 0);
 
 const readLocalCache = (key) => {
   const entry = memoryCache.get(key);
@@ -728,21 +824,8 @@ const normalizeMessageContent = (value) => {
   if (typeof value !== 'string') return '';
   const trimmed = value.trim();
   if (!trimmed) return '';
+  if (!Number.isFinite(MAX_MESSAGE_CHARS) || MAX_MESSAGE_CHARS <= 0) return trimmed;
   return trimmed.slice(0, MAX_MESSAGE_CHARS);
-};
-
-const buildAgentSystemPrompt = ({ sessionId, userName }) => {
-  const base = [
-    'You are Raven, the Smart Tracker AI assistant.',
-    'You can use MCP tools to read and update the canvas.',
-    'Use tools when a user asks to inspect or change the canvas.',
-    'For destructive actions (delete/clear), ask for explicit confirmation first.',
-    'If a tool fails, explain what happened and ask how to proceed.',
-    'Keep responses concise and actionable.',
-  ];
-  if (userName) base.push(`The user name is "${userName}".`);
-  if (sessionId) base.push(`The active sessionId is "${sessionId}".`);
-  return base.join(' ');
 };
 
 const createOpenAiClient = (apiKey) => new OpenAI({
@@ -750,6 +833,90 @@ const createOpenAiClient = (apiKey) => new OpenAI({
   baseURL: OPENAI_API_BASE_URL,
   timeout: OPENAI_TIMEOUT_MS,
 });
+
+const getAgentContextUrl = () => {
+  if (AGENT_SERVICE_URL.endsWith('/context')) return AGENT_SERVICE_URL;
+  if (AGENT_SERVICE_URL.endsWith('/run')) return AGENT_SERVICE_URL.replace(/\/run$/, '/context');
+  return `${AGENT_SERVICE_URL.replace(/\/+$/, '')}/context`;
+};
+
+const callAgentService = async ({ apiKey, sessionId, userName, userId, inputItems }) => {
+  const allowedTools = (MCP_AGENT_ALLOWED_TOOLS || '')
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+  const payload = {
+    apiKey,
+    model: OPENAI_MODEL,
+    userName,
+    input: inputItems,
+    temperature: 0.3,
+    openaiBaseUrl: OPENAI_API_BASE_URL,
+    openaiTimeoutMs: OPENAI_TIMEOUT_MS,
+    mcp: MCP_SERVER_URL
+      ? {
+          url: MCP_SERVER_URL,
+          token: MCP_TECH_TOKEN || null,
+          sessionId: sessionId || null,
+          userId: userId || null,
+          allowedTools,
+        }
+      : null,
+  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AGENT_SERVICE_TIMEOUT_MS);
+  try {
+    const res = await fetch(AGENT_SERVICE_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = body?.detail ?? body ?? {};
+      const err = new Error(detail?.message ?? detail?.error ?? res.statusText ?? 'agent_failed');
+      err.status = res.status;
+      err.code = detail?.error ?? null;
+      throw err;
+    }
+    return {
+      output: typeof body?.output === 'string' ? body.output : '',
+      context: body?.context ?? null,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const callAgentContext = async ({ model, input, userName }) => {
+  const payload = {
+    model,
+    input,
+    userName,
+  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AGENT_SERVICE_TIMEOUT_MS);
+  try {
+    const res = await fetch(getAgentContextUrl(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = body?.detail ?? body ?? {};
+      const err = new Error(detail?.message ?? detail?.error ?? res.statusText ?? 'agent_context_failed');
+      err.status = res.status;
+      err.code = detail?.error ?? null;
+      throw err;
+    }
+    return body?.context ?? null;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
 
 const hashText = (value) => createHash('sha256').update(value).digest('hex');
 
@@ -811,6 +978,52 @@ async function countAssistantMessages(threadId) {
   const raw = res.rows[0]?.count;
   const count = typeof raw === 'string' ? Number(raw) : Number(raw ?? 0);
   return Number.isFinite(count) ? count : 0;
+}
+
+async function getAssistantMessageStats(threadId) {
+  const res = await pool.query(
+    `SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(content)), 0) AS total_chars
+       FROM assistant_messages
+      WHERE thread_id = $1`,
+    [threadId],
+  );
+  const row = res.rows[0] ?? {};
+  const rawCount = row.count;
+  const rawChars = row.total_chars;
+  const count = typeof rawCount === 'string' ? Number(rawCount) : Number(rawCount ?? 0);
+  const totalChars = typeof rawChars === 'string' ? Number(rawChars) : Number(rawChars ?? 0);
+  return {
+    count: Number.isFinite(count) ? count : 0,
+    totalChars: Number.isFinite(totalChars) ? totalChars : 0,
+  };
+}
+
+async function listAssistantMessagesPage(threadId, limit, offset) {
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(500, Math.floor(limit)) : 200;
+  const safeOffset = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
+  const res = await pool.query(
+    `SELECT id, role, content, created_at
+       FROM assistant_messages
+      WHERE thread_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3`,
+    [threadId, safeLimit, safeOffset],
+  );
+  return res.rows.map(serializeAssistantMessageRow);
+}
+
+async function getLastUserMessage(threadId) {
+  const res = await pool.query(
+    `SELECT content
+       FROM assistant_messages
+      WHERE thread_id = $1
+        AND role = 'user'
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [threadId],
+  );
+  const content = res.rows[0]?.content;
+  return typeof content === 'string' ? content : '';
 }
 
 async function insertAssistantMessage({ threadId, role, content }) {
@@ -934,55 +1147,188 @@ const buildMemoryBlock = (memories) => {
   return `Relevant memory:\n${lines.join('\n')}`;
 };
 
-const buildAssistantContext = async ({ threadId, userId, apiKey }) => {
+const estimateTokensFromChars = (chars) => {
+  const perToken = Math.max(1, Math.floor(ASSISTANT_TOKEN_ESTIMATE_CHARS));
+  const safeChars = Number.isFinite(chars) && chars > 0 ? chars : 0;
+  return Math.ceil(safeChars / perToken);
+};
+
+const trimTextToTokens = (text, maxTokens) => {
+  if (!text || !Number.isFinite(maxTokens) || maxTokens <= 0) return '';
+  const maxChars = Math.floor(maxTokens * Math.max(1, Math.floor(ASSISTANT_TOKEN_ESTIMATE_CHARS)));
+  if (text.length <= maxChars) return text;
+  return text.slice(0, maxChars);
+};
+
+const normalizeModelName = (value) => {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase();
+};
+
+const resolveModelContextTokens = (modelName) => {
+  if (Number.isFinite(ASSISTANT_MODEL_CONTEXT_TOKENS) && ASSISTANT_MODEL_CONTEXT_TOKENS > 0) {
+    return Math.floor(ASSISTANT_MODEL_CONTEXT_TOKENS);
+  }
+  const normalized = normalizeModelName(modelName);
+  if (!normalized) return 0;
+  if (MODEL_CONTEXT_TOKENS[normalized]) return MODEL_CONTEXT_TOKENS[normalized];
+  if (normalized.startsWith('gpt-5.2')) return MODEL_CONTEXT_TOKENS['gpt-5.2'] ?? 0;
+  return 0;
+};
+
+const getContextBudgetTokens = (modelName = OPENAI_MODEL) => resolveModelContextTokens(modelName);
+
+const getSummaryRemainingRatio = () => (Number.isFinite(ASSISTANT_SUMMARY_REMAINING_RATIO)
+  ? Math.min(Math.max(ASSISTANT_SUMMARY_REMAINING_RATIO, 0.05), 0.9)
+  : 0.15);
+
+const getMaxInputTokens = (modelName = OPENAI_MODEL) => {
+  const budgetTokens = getContextBudgetTokens(modelName);
+  if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return 0;
+  const reserve = Number.isFinite(ASSISTANT_OUTPUT_RESERVE_TOKENS)
+    ? Math.max(0, Math.floor(ASSISTANT_OUTPUT_RESERVE_TOKENS))
+    : 0;
+  return Math.max(1, budgetTokens - reserve);
+};
+
+const shouldRefreshSummary = ({ summaryChars, messageChars }) => {
+  const budgetTokens = getContextBudgetTokens(OPENAI_MODEL);
+  if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return false;
+  const usedTokens = estimateTokensFromChars((summaryChars ?? 0) + (messageChars ?? 0));
+  const remainingRatio = (budgetTokens - usedTokens) / budgetTokens;
+  return remainingRatio <= getSummaryRemainingRatio();
+};
+
+const loadAssistantMessagesForBudget = async ({ threadId, maxTokens }) => {
+  if (maxTokens === 0) return [];
+  const targetTokens = Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : null;
+  const pageSize = 200;
+  let offset = 0;
+  let usedTokens = 0;
+  const collected = [];
+  while (true) {
+    const page = await listAssistantMessagesPage(threadId, pageSize, offset);
+    if (!page.length) break;
+    for (const message of page) {
+      const tokens = estimateTokensFromChars((message?.content ?? '').length);
+      if (targetTokens !== null && usedTokens + tokens > targetTokens) {
+        return collected;
+      }
+      collected.push(message);
+      usedTokens += tokens;
+    }
+    offset += page.length;
+  }
+  return collected;
+};
+
+const buildSummaryTranscript = async ({ threadId, maxTokens }) => {
+  if (maxTokens === 0) return '';
+  const targetTokens = Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : null;
+  const pageSize = 200;
+  let offset = 0;
+  let usedTokens = 0;
+  const lines = [];
+  while (true) {
+    const page = await listAssistantMessagesPage(threadId, pageSize, offset);
+    if (!page.length) break;
+    for (const message of page) {
+      const prefix = message.role === 'user' ? 'User' : 'Assistant';
+      const line = `${prefix}: ${message.content}`;
+      const tokens = estimateTokensFromChars(line.length);
+      if (targetTokens !== null && usedTokens + tokens > targetTokens) {
+        return lines.reverse().join('\n');
+      }
+      lines.push(line);
+      usedTokens += tokens;
+    }
+    offset += page.length;
+  }
+  return lines.reverse().join('\n');
+};
+
+const buildAssistantContext = async ({ threadId, userId, apiKey, includeMemories = true }) => {
   const summaryRow = await getAssistantSummary(threadId);
   const summary = summaryRow?.summary ? summaryRow.summary.trim() : '';
-  const messages = await listAssistantMessages(threadId, ASSISTANT_CONTEXT_LIMIT);
-  const lastUserMessage = [...messages].reverse().find((msg) => msg.role === 'user')?.content ?? '';
-  const embedding = await embedText(apiKey, lastUserMessage);
-  const memories = embedding ? await findAssistantMemories({
-    userId,
-    threadId,
-    embedding,
-    limit: ASSISTANT_MEMORY_K,
-  }) : [];
+  const lastUserMessage = await getLastUserMessage(threadId);
+  let memories = [];
+  if (includeMemories && apiKey) {
+    const embedding = await embedText(apiKey, lastUserMessage);
+    if (embedding) {
+      memories = await findAssistantMemories({
+        userId,
+        threadId,
+        embedding,
+        limit: ASSISTANT_MEMORY_K,
+      });
+    }
+  }
+
+  let summaryText = summary ? `Conversation summary:\n${summary}` : '';
+  let memoryBlock = buildMemoryBlock(memories);
+  const maxInputTokens = getMaxInputTokens(OPENAI_MODEL);
+
+  if (maxInputTokens > 0) {
+    const summaryTokens = estimateTokensFromChars(summaryText.length);
+    let memoryTokens = estimateTokensFromChars(memoryBlock.length);
+    if (summaryTokens + memoryTokens > maxInputTokens) {
+      const remainingForMemory = Math.max(0, maxInputTokens - summaryTokens);
+      memoryBlock = trimTextToTokens(memoryBlock, remainingForMemory);
+      memoryTokens = estimateTokensFromChars(memoryBlock.length);
+      if (summaryTokens + memoryTokens > maxInputTokens) {
+        summaryText = trimTextToTokens(summaryText, Math.max(0, maxInputTokens - memoryTokens));
+      }
+    }
+  }
 
   const items = [];
-  if (summary) {
-    items.push({ role: 'system', content: `Conversation summary:\n${summary}` });
-  }
-  const memoryBlock = buildMemoryBlock(memories);
-  if (memoryBlock) {
-    items.push({ role: 'system', content: memoryBlock });
-  }
-  for (const message of messages) {
+  if (summaryText) items.push({ role: 'system', content: summaryText });
+  if (memoryBlock) items.push({ role: 'system', content: memoryBlock });
+
+  const systemTokens = estimateTokensFromChars(summaryText.length + memoryBlock.length);
+  const remainingTokens = maxInputTokens > 0 ? Math.max(0, maxInputTokens - systemTokens) : null;
+  const messages = await loadAssistantMessagesForBudget({ threadId, maxTokens: remainingTokens });
+  for (const message of messages.slice().reverse()) {
     if (message.role === 'assistant') {
       items.push({
         role: 'assistant',
-        content: [{ type: 'output_text', text: message.content }],
+        content: message.content,
       });
       continue;
     }
     items.push({ role: message.role, content: message.content });
   }
-  return items;
+  return { items };
 };
 
-const refreshAssistantSummary = async ({ threadId, apiKey }) => {
-  const messageCount = await countAssistantMessages(threadId);
-  if (messageCount < ASSISTANT_SUMMARY_THRESHOLD) return;
+const refreshAssistantSummary = async ({ threadId, apiKey, remainingRatio }) => {
   const summaryRow = await getAssistantSummary(threadId);
   const existing = summaryRow?.summary ? summaryRow.summary.trim() : '';
-  const messages = await listAssistantMessages(threadId, Math.max(ASSISTANT_CONTEXT_LIMIT * 2, 40));
-  if (!messages.length) return;
+  const stats = await getAssistantMessageStats(threadId);
+  if (!stats.count) return;
+  if (Number.isFinite(remainingRatio) && remainingRatio > getSummaryRemainingRatio()) return;
+  if (!Number.isFinite(remainingRatio)) {
+    const summaryChars = (existing ? `Conversation summary:\n${existing}` : '').length;
+    const messageChars = stats.totalChars;
+    if (!shouldRefreshSummary({ summaryChars, messageChars })) return;
+  }
 
-  const transcript = messages.map((msg) => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n');
-  const prompt = [
+  const maxInputTokens = getMaxInputTokens(OPENAI_SUMMARY_MODEL);
+  const summaryPrefix = existing ? `Previous summary:\n${existing}` : '';
+
+  const basePrompt = [
     'You are summarizing a user/assistant conversation for future context.',
     'Keep the summary concise and actionable: goals, decisions, preferences, open tasks, and unresolved questions.',
-    existing ? `Previous summary:\n${existing}` : '',
+    summaryPrefix,
+  ].filter(Boolean).join('\n\n');
+  const baseTokens = estimateTokensFromChars(basePrompt.length);
+  const availableTokens = maxInputTokens > 0 ? Math.max(0, maxInputTokens - baseTokens) : null;
+  const transcript = await buildSummaryTranscript({ threadId, maxTokens: availableTokens });
+  if (!transcript) return;
+
+  const prompt = [
+    basePrompt,
     `New conversation:\n${transcript}`,
-    `Return a summary under ${ASSISTANT_SUMMARY_MAX_CHARS} characters.`,
   ].filter(Boolean).join('\n\n');
 
   const client = createOpenAiClient(apiKey);
@@ -993,13 +1339,13 @@ const refreshAssistantSummary = async ({ threadId, apiKey }) => {
   });
   const summary = normalizeMessageContent(extractResponseText(response));
   if (summary) {
-    await upsertAssistantSummary(threadId, summary.slice(0, ASSISTANT_SUMMARY_MAX_CHARS));
+    await upsertAssistantSummary(threadId, summary);
   }
 };
 
-const scheduleSummaryRefresh = ({ threadId, apiKey }) => {
+const scheduleSummaryRefresh = ({ threadId, apiKey, remainingRatio }) => {
   setTimeout(() => {
-    refreshAssistantSummary({ threadId, apiKey }).catch((err) => {
+    refreshAssistantSummary({ threadId, apiKey, remainingRatio }).catch((err) => {
       console.warn('[assistant] summary refresh failed', err?.message ?? err);
     });
   }, 0);
@@ -1017,30 +1363,28 @@ const addAssistantMemory = async ({ threadId, userId, apiKey, userText, assistan
   });
 };
 
-const runAssistantTurn = async ({ apiKey, sessionId, userName, inputItems }) => {
-  const client = createOpenAiClient(apiKey);
-  const model = new OpenAIResponsesModel(client, OPENAI_MODEL);
-  const mcpServer = new MCPServerStreamableHttp({
-    url: MCP_SERVER_URL,
-    name: 'Smart Tracker MCP',
-    cacheToolsList: true,
-  });
-  const agent = new Agent({
-    name: 'Smart Tracker Assistant',
-    instructions: buildAgentSystemPrompt({ sessionId, userName }),
-    model,
-    modelSettings: { temperature: 0.3 },
-    mcpServers: [mcpServer],
-  });
-  await mcpServer.connect();
+const runAssistantTurn = async ({ apiKey, sessionId, userName, userId, inputItems }) => {
   try {
-    const result = await run(agent, inputItems, { maxTurns: OPENAI_MAX_TURNS });
-    const output = typeof result.finalOutput === 'string'
-      ? result.finalOutput
-      : JSON.stringify(result.finalOutput ?? '');
-    return normalizeMessageContent(output) || '';
-  } finally {
-    await mcpServer.close();
+    const result = await callAgentService({
+      apiKey,
+      sessionId,
+      userName,
+      userId,
+      inputItems,
+    });
+    return {
+      output: normalizeMessageContent(result?.output ?? '') || '',
+      context: result?.context ?? null,
+    };
+  } catch (err) {
+    logAssistantEvent('agent_response_error', {
+      sessionId: sessionId ?? null,
+      status: err?.status ?? err?.statusCode ?? null,
+      code: err?.code ?? err?.error?.code ?? err?.code ?? null,
+      detail: err?.message ?? null,
+      error: err?.message ?? String(err),
+    });
+    throw err;
   }
 };
 
@@ -1328,6 +1672,23 @@ function authUserFromRequest(req) {
   }
 }
 
+app.use('/api/assistant', (req, res, next) => {
+  const startedAt = Date.now();
+  const auth = authUserFromRequest(req);
+  res.on('finish', () => {
+    const client = req.headers?.['x-assistant-client'];
+    console.log('[assistant-http]', JSON.stringify({
+      method: req.method,
+      path: req.originalUrl,
+      status: res.statusCode,
+      userId: auth?.userId ?? null,
+      client: typeof client === 'string' ? client : null,
+      durationMs: Date.now() - startedAt,
+    }));
+  });
+  next();
+});
+
 app.get('/api/auth/me', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (!auth) return res.json({ user: null });
@@ -1558,12 +1919,13 @@ app.post('/api/assistant/chat', async (req, res) => {
 app.post('/api/assistant/threads', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
-  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : null;
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+  if (!sessionId) return res.status(400).json({ error: 'session_required' });
   const rawTitle = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
   const title = rawTitle ? rawTitle.slice(0, 120) : null;
   const thread = await createAssistantThread({
     userId: auth.userId,
-    sessionId: sessionId || null,
+    sessionId,
     title,
   });
   logAssistantEvent('thread_create', {
@@ -1592,17 +1954,33 @@ app.get('/api/assistant/threads/:id/messages', async (req, res) => {
   if (!threadId) return res.status(400).json({ error: 'thread_required' });
   const thread = await getAssistantThread(auth.userId, threadId);
   if (!thread) return res.status(404).json({ error: 'thread_not_found' });
+  const querySessionId = typeof req.query?.sessionId === 'string' ? req.query.sessionId.trim() : '';
+  if (querySessionId && thread.sessionId && querySessionId !== thread.sessionId) {
+    return res.status(409).json({ error: 'thread_session_mismatch' });
+  }
   const rawLimit = req.query?.limit;
   const parsedLimit = typeof rawLimit === 'string' ? Number(rawLimit) : Number(rawLimit ?? NaN);
   const limit = Number.isFinite(parsedLimit) ? parsedLimit : ASSISTANT_CONTEXT_LIMIT;
   const messages = await listAssistantMessages(threadId, limit);
+  const user = await getUserById(auth.userId);
+  const { items } = await buildAssistantContext({
+    threadId,
+    userId: auth.userId,
+    apiKey: null,
+    includeMemories: false,
+  });
+  const context = await callAgentContext({
+    model: OPENAI_MODEL,
+    input: items,
+    userName: user?.name ?? null,
+  }).catch(() => null);
   logAssistantEvent('thread_messages', {
     userId: auth.userId,
     threadId,
     limit,
     count: messages.length,
   });
-  res.json({ messages });
+  res.json({ messages, context });
 });
 
 app.post('/api/assistant/threads/:id/messages', async (req, res) => {
@@ -1612,6 +1990,21 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
   if (!threadId) return res.status(400).json({ error: 'thread_required' });
   const thread = await getAssistantThread(auth.userId, threadId);
   if (!thread) return res.status(404).json({ error: 'thread_not_found' });
+
+  const incomingSessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+  if (!incomingSessionId) return res.status(400).json({ error: 'session_required' });
+  const session = await getSession(incomingSessionId);
+  if (!session) return res.status(404).json({ error: 'session_not_found' });
+  if (thread.sessionId && thread.sessionId !== incomingSessionId) {
+    return res.status(409).json({ error: 'thread_session_mismatch' });
+  }
+  if (!thread.sessionId || thread.sessionId !== incomingSessionId) {
+    await pool.query(
+      'UPDATE assistant_threads SET session_id = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3',
+      [incomingSessionId, threadId, auth.userId],
+    );
+    thread.sessionId = incomingSessionId;
+  }
 
   const userText = normalizeMessageContent(req.body?.content);
   if (!userText) return res.status(400).json({ error: 'content_required' });
@@ -1633,24 +2026,38 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
       role: 'user',
       content: userText,
     });
-    const inputItems = await buildAssistantContext({
+    const { items: inputItems } = await buildAssistantContext({
       threadId,
       userId: auth.userId,
       apiKey,
     });
-    const assistantText = await runAssistantTurn({
+    const assistantResult = await runAssistantTurn({
       apiKey,
       sessionId: thread.sessionId,
       userName: user?.name ?? null,
+      userId: auth.userId,
       inputItems,
     });
+    const assistantText = assistantResult?.output ?? '';
     const reply = assistantText || 'No response returned.';
     const assistantMessage = await insertAssistantMessage({
       threadId,
       role: 'assistant',
       content: reply,
     });
-    scheduleSummaryRefresh({ threadId, apiKey });
+    let context = assistantResult?.context ?? null;
+    if (!context) {
+      const contextItems = inputItems.concat({ role: 'assistant', content: reply });
+      context = await callAgentContext({
+        model: OPENAI_MODEL,
+        input: contextItems,
+        userName: user?.name ?? null,
+      }).catch(() => null);
+    }
+    const remainingRatio = Number.isFinite(context?.remainingRatio) ? context.remainingRatio : null;
+    if (remainingRatio !== null && remainingRatio <= getSummaryRemainingRatio()) {
+      scheduleSummaryRefresh({ threadId, apiKey, remainingRatio });
+    }
     if (userText && reply) {
       await addAssistantMemory({
         threadId,
@@ -1672,6 +2079,7 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
       message: reply,
       userMessage,
       assistantMessage,
+      context,
     });
   } catch (err) {
     const status = err?.statusCode ?? err?.status;
@@ -1679,6 +2087,9 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
       userId: auth.userId,
       threadId,
       status: status ?? null,
+      code: err?.code ?? err?.error?.code ?? null,
+      type: err?.error?.type ?? null,
+      detail: err?.error?.message ?? null,
       error: err?.message ?? String(err),
     });
     if (status === 401) return res.status(401).json({ error: 'invalid_openai_key' });
@@ -1692,31 +2103,66 @@ app.post('/api/integrations/mcp/verify', async (req, res) => {
   const bodyToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
   const rawToken = headerToken || bodyToken;
   if (!rawToken) return res.status(400).json({ error: 'token_required' });
-  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
-  const row = await getMcpTokenByHash(tokenHash);
-  if (!row) return res.status(401).json({ error: 'invalid_token' });
-  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
-    await deleteMcpToken(row.user_id);
-    return res.status(401).json({ error: 'token_expired' });
-  }
-  await touchMcpToken(tokenHash);
+  const info = await resolveMcpTokenInfo(rawToken);
+  if (info?.error === 'invalid') return res.status(401).json({ error: 'invalid_token' });
+  if (info?.error === 'expired') return res.status(401).json({ error: 'token_expired' });
+  if (!info?.user) return res.status(401).json({ error: 'invalid_token' });
   res.json({
     ok: true,
     token: {
-      expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+      expiresAt: info.kind === 'user' ? info.expiresAt ?? null : null,
     },
     user: {
-      id: row.user_id,
-      name: row.name,
-      avatarSeed: row.avatar_seed,
-      avatarUrl: row.avatar_url,
-      avatarAnimal: row.avatar_animal,
-      avatarColor: row.avatar_color,
+      id: info.user.id,
+      name: info.user.name,
+      avatarSeed: info.user.avatarSeed ?? '',
+      avatarUrl: info.user.avatarUrl ?? null,
+      avatarAnimal: info.user.avatarAnimal ?? null,
+      avatarColor: info.user.avatarColor ?? null,
     },
   });
 });
 
-const MCP_VIEW_ACTIONS = new Set(['focus_node', 'zoom_to_cards', 'zoom_to_graph', 'zoom_to_fit']);
+app.post('/api/integrations/mcp/participants', async (req, res) => {
+  const headerToken = getBearerToken(req);
+  const bodyToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  const rawToken = headerToken || bodyToken;
+  if (!rawToken) return res.status(400).json({ error: 'token_required' });
+  const info = await resolveMcpTokenInfo(rawToken);
+  if (info?.error === 'invalid') return res.status(401).json({ error: 'invalid_token' });
+  if (info?.error === 'expired') return res.status(401).json({ error: 'token_expired' });
+
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+  if (!sessionId) return res.status(400).json({ error: 'session_id_required' });
+  const session = await getSession(sessionId);
+  if (!session) return res.status(404).json({ error: 'session_not_found' });
+
+  const rows = await pool.query(
+    `SELECT u.id, u.name, u.email, u.avatar_seed, u.avatar_url, u.avatar_animal, u.avatar_color, ss.saved_at
+       FROM session_savers ss
+       JOIN users u ON u.id = ss.user_id
+      WHERE ss.session_id = $1
+      ORDER BY ss.saved_at ASC`,
+    [sessionId],
+  );
+
+  res.json({
+    ok: true,
+    sessionId,
+    participants: rows.rows.map((item) => ({
+      id: item.id,
+      name: item.name ?? '',
+      email: item.email ?? '',
+      avatarSeed: item.avatar_seed ?? '',
+      avatarUrl: item.avatar_url ?? null,
+      avatarAnimal: Number.isFinite(item.avatar_animal) ? item.avatar_animal : null,
+      avatarColor: Number.isFinite(item.avatar_color) ? item.avatar_color : null,
+      savedAt: item.saved_at ?? null,
+    })),
+  });
+});
+
+const MCP_VIEW_ACTIONS = new Set(['focus_node', 'zoom_to_cards', 'zoom_to_graph', 'zoom_to_fit', 'pan']);
 
 app.post('/api/integrations/mcp/view', async (req, res) => {
   const headerToken = getBearerToken(req);
@@ -1724,14 +2170,15 @@ app.post('/api/integrations/mcp/view', async (req, res) => {
   const rawToken = headerToken || bodyToken;
   if (!rawToken) return res.status(400).json({ error: 'token_required' });
 
-  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
-  const row = await getMcpTokenByHash(tokenHash);
-  if (!row) return res.status(401).json({ error: 'invalid_token' });
-  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
-    await deleteMcpToken(row.user_id);
-    return res.status(401).json({ error: 'token_expired' });
+  const info = await resolveMcpTokenInfo(rawToken);
+  if (info?.error === 'invalid') return res.status(401).json({ error: 'invalid_token' });
+  if (info?.error === 'expired') return res.status(401).json({ error: 'token_expired' });
+  const requestedTargetUserId = typeof req.body?.targetUserId === 'string' ? req.body.targetUserId.trim() : '';
+  if (requestedTargetUserId && info?.kind !== 'tech') {
+    return res.status(403).json({ error: 'target_user_forbidden' });
   }
-  await touchMcpToken(tokenHash);
+  const infoUserId = info && typeof info.userId === 'string' ? info.userId : null;
+  const userId = requestedTargetUserId || infoUserId;
 
   const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
   if (!sessionId) return res.status(400).json({ error: 'session_id_required' });
@@ -1753,19 +2200,29 @@ app.post('/api/integrations/mcp/view', async (req, res) => {
     if (!nodeId) return res.status(400).json({ error: 'node_id_required' });
     payload.nodeId = nodeId;
   }
+  if (action === 'pan') {
+    const x = Number(req.body?.x);
+    const y = Number(req.body?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return res.status(400).json({ error: 'coords_required' });
+    payload.x = x;
+    payload.y = y;
+  }
 
   if (Number.isFinite(req.body?.scale)) {
     payload.scale = Number(req.body.scale);
   }
 
-  const delivered = sendCanvasViewToUser(sessionId, row.user_id, payload);
+  const delivered = userId ? sendCanvasViewToUser(sessionId, userId, payload) : 0;
   console.log('[mcp-view]', JSON.stringify({
     action,
     sessionId,
-    userId: row.user_id,
+    userId,
+    targetUserId: requestedTargetUserId || null,
     delivered,
     nodeId: payload.nodeId ?? null,
     scale: payload.scale ?? null,
+    x: Number.isFinite(payload.x) ? payload.x : null,
+    y: Number.isFinite(payload.y) ? payload.y : null,
   }));
   res.json({ ok: true, delivered, sessionId });
 });
@@ -1776,14 +2233,10 @@ app.post('/api/integrations/mcp/snapshot', async (req, res) => {
   const rawToken = headerToken || bodyToken;
   if (!rawToken) return res.status(400).json({ error: 'token_required' });
 
-  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
-  const row = await getMcpTokenByHash(tokenHash);
-  if (!row) return res.status(401).json({ error: 'invalid_token' });
-  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
-    await deleteMcpToken(row.user_id);
-    return res.status(401).json({ error: 'token_expired' });
-  }
-  await touchMcpToken(tokenHash);
+  const info = await resolveMcpTokenInfo(rawToken);
+  if (info?.error === 'invalid') return res.status(401).json({ error: 'invalid_token' });
+  if (info?.error === 'expired') return res.status(401).json({ error: 'token_expired' });
+  const userId = info?.userId ?? null;
 
   const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
   if (!sessionId) return res.status(400).json({ error: 'session_id_required' });
@@ -1796,7 +2249,8 @@ app.post('/api/integrations/mcp/snapshot', async (req, res) => {
     const timeoutMs = Number.isFinite(rawTimeout)
       ? Number(rawTimeout)
       : (typeof rawTimeout === 'string' && rawTimeout.trim() ? Number(rawTimeout) : undefined);
-    const result = await requestCanvasSnapshot(sessionId, row.user_id, { timeoutMs });
+    if (!userId) return res.status(409).json({ error: 'client_not_connected' });
+    const result = await requestCanvasSnapshot(sessionId, userId, { timeoutMs });
     res.json({
       ok: true,
       sessionId,
@@ -2275,10 +2729,11 @@ app.get('/api/sessions/mine', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
   const rows = await pool.query(
-    `SELECT id, name, saved_at, updated_at
-       FROM sessions
-      WHERE owner_id = $1 AND saved_at IS NOT NULL
-      ORDER BY updated_at DESC`,
+    `SELECT s.id, s.name, s.saved_at, s.updated_at
+       FROM sessions s
+       JOIN session_savers ss ON ss.session_id = s.id
+      WHERE ss.user_id = $1
+      ORDER BY s.updated_at DESC`,
     [auth.userId],
   );
   res.json({
@@ -2304,6 +2759,32 @@ app.get('/api/sessions/:id', async (req, res) => {
   const session = await getSession(req.params.id);
   if (!session) return res.status(404).json({ error: 'not_found' });
   res.json(serializeSession(session));
+});
+
+app.get('/api/sessions/:id/savers', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const sessionId = req.params.id;
+  const rows = await pool.query(
+    `SELECT u.id, u.name, u.email, u.avatar_seed, u.avatar_url, u.avatar_animal, u.avatar_color, ss.saved_at
+       FROM session_savers ss
+       JOIN users u ON u.id = ss.user_id
+      WHERE ss.session_id = $1
+      ORDER BY ss.saved_at ASC`,
+    [sessionId],
+  );
+  res.json({
+    savers: rows.rows.map((row) => ({
+      id: row.id,
+      name: row.name ?? '',
+      email: row.email ?? '',
+      avatarSeed: row.avatar_seed ?? '',
+      avatarUrl: row.avatar_url ?? null,
+      avatarAnimal: Number.isFinite(row.avatar_animal) ? row.avatar_animal : null,
+      avatarColor: Number.isFinite(row.avatar_color) ? row.avatar_color : null,
+      savedAt: row.saved_at ?? null,
+    })),
+  });
 });
 
 app.put('/api/sessions/:id', async (req, res) => {
@@ -2334,8 +2815,7 @@ app.post('/api/sessions/:id/save', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
   const rawName = String(req.body?.name ?? '').trim();
-  if (!rawName) return res.status(400).json({ error: 'name_required' });
-  const name = rawName.slice(0, 120);
+  const incomingName = rawName ? rawName.slice(0, 120) : null;
 
   const client = await pool.connect();
   try {
@@ -2349,16 +2829,33 @@ app.post('/api/sessions/:id/save', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'not_found' });
     }
-    if (row.owner_id && row.owner_id !== auth.userId) {
+    const canRename = !row.owner_id || row.owner_id === auth.userId;
+    if (!row.name && !incomingName) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'name_required' });
+    }
+    if (!canRename && !row.name) {
       await client.query('ROLLBACK');
       return res.status(403).json({ error: 'forbidden' });
     }
+    if (!canRename && incomingName && row.name && incomingName !== row.name) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'forbidden' });
+    }
+    const nextName = canRename && incomingName ? incomingName : (row.name ?? incomingName);
+    const nextOwnerId = row.owner_id ?? auth.userId;
     const updated = await client.query(
       `UPDATE sessions
-         SET name = $1, owner_id = $2, saved_at = NOW(), expires_at = NULL, updated_at = NOW()
+         SET name = $1, owner_id = $2, saved_at = COALESCE(saved_at, NOW()), expires_at = NULL, updated_at = NOW()
        WHERE id = $3
        RETURNING id, state, version, name, owner_id, saved_at, expires_at`,
-      [name, auth.userId, req.params.id],
+      [nextName, nextOwnerId, req.params.id],
+    );
+    await client.query(
+      `INSERT INTO session_savers (session_id, user_id)
+       VALUES ($1, $2)
+       ON CONFLICT (session_id, user_id) DO UPDATE SET saved_at = NOW()`,
+      [req.params.id, auth.userId],
     );
     await client.query('COMMIT');
     const payload = serializeSession(updated.rows[0]);
@@ -2617,7 +3114,7 @@ wss.on('connection', async (ws, req) => {
     broadcast(sessionId, { type: 'update', ...payload, sourceClientId: clientId, requestId });
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
     const clients = rooms.get(sessionId);
     if (!clients) return;
     clients.delete(ws);
@@ -2629,6 +3126,8 @@ wss.on('connection', async (ws, req) => {
       userId: meta?.userId ?? null,
       clientId: meta?.clientId ?? null,
       connId: meta?.connId ?? null,
+      code: typeof code === 'number' ? code : null,
+      reason: reason ? String(reason) : null,
     }));
   });
 });
@@ -2661,21 +3160,13 @@ setInterval(() => {
   cleanupExpiredSessions().catch(() => undefined);
 }, 1000 * 60 * 60);
 
-// Ensure there is a default session for "landing" opens (no ?session=...).
-// If DEFAULT_SESSION_ID is provided, it becomes the default (and is created if missing).
+// Default session is optional; if not configured, clear the setting to avoid forced redirects.
 try {
   if (DEFAULT_SESSION_ID) {
     await ensurePinnedSession(DEFAULT_SESSION_ID);
     await setSetting('default_session_id', DEFAULT_SESSION_ID);
   } else {
-    const current = await getSetting('default_session_id');
-    if (current) {
-      await ensurePinnedSession(current);
-    } else {
-      const id = randomUUID();
-      await ensurePinnedSession(id);
-      await setSetting('default_session_id', id);
-    }
+    await deleteSetting('default_session_id');
   }
 } catch {
   // ignore startup default initialization errors

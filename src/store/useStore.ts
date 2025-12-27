@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { Comment, NodeData, EdgeData, CanvasState, Drawing, PenToolType, Tombstones, TextBox } from '../types';
+import type { Comment, NodeData, EdgeData, CanvasState, Drawing, PenToolType, Tombstones, TextBox, SessionSaver } from '../types';
 import { clampEnergy, computeEffectiveEnergy, relu } from '../utils/energy';
 import { debugLog } from '../utils/debug';
 import { getGuestIdentity } from '../utils/guestIdentity';
@@ -87,8 +87,10 @@ interface AppState {
     sessionSaved: boolean;
     sessionOwnerId: string | null;
     sessionExpiresAt: string | null;
+    sessionSavers: SessionSaver[];
     setSessionId: (id: string | null) => void;
     setSessionMeta: (meta: { name?: string | null; saved?: boolean; ownerId?: string | null; expiresAt?: string | null }) => void;
+    setSessionSavers: (savers: SessionSaver[]) => void;
     canvasViewCommand: CanvasViewCommand | null;
     setCanvasViewCommand: (command: CanvasViewCommand | null) => void;
     textBoxes: TextBox[];
@@ -194,11 +196,14 @@ interface AppState {
     toggleSnow: () => void;
 }
 
-type CanvasViewAction = 'focus_node' | 'zoom_to_cards' | 'zoom_to_graph' | 'zoom_to_fit';
+type CanvasViewAction = 'focus_node' | 'zoom_to_cards' | 'zoom_to_graph' | 'zoom_to_fit' | 'pan';
 type CanvasViewCommand = {
     id: string;
     action: CanvasViewAction;
     nodeId?: string | null;
+    x?: number | null;
+    y?: number | null;
+    scale?: number | null;
 };
 
 const snapshotOf = (state: Pick<AppState, 'nodes' | 'edges' | 'drawings' | 'textBoxes' | 'tombstones'>): UndoSnapshot => ({
@@ -274,6 +279,7 @@ export const useStore = create<AppState>()(
             sessionSaved: false,
             sessionOwnerId: null,
             sessionExpiresAt: null,
+            sessionSavers: [],
             setSessionId: (id) => set({ sessionId: id }),
             setSessionMeta: (meta) => set((state) => ({
                 sessionName: Object.prototype.hasOwnProperty.call(meta, 'name') ? meta.name ?? null : state.sessionName,
@@ -281,6 +287,7 @@ export const useStore = create<AppState>()(
                 sessionOwnerId: Object.prototype.hasOwnProperty.call(meta, 'ownerId') ? meta.ownerId ?? null : state.sessionOwnerId,
                 sessionExpiresAt: Object.prototype.hasOwnProperty.call(meta, 'expiresAt') ? meta.expiresAt ?? null : state.sessionExpiresAt,
             })),
+            setSessionSavers: (savers) => set({ sessionSavers: Array.isArray(savers) ? savers : [] }),
             canvasViewCommand: null,
             setCanvasViewCommand: (command) => set({ canvasViewCommand: command }),
             textBoxes: [],

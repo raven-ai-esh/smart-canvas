@@ -20,11 +20,18 @@ const PANEL_MIN_HEIGHT = 320;
 const PANEL_MAX_WIDTH = 560;
 const PANEL_MAX_HEIGHT = 760;
 const RESIZE_FROM_TOP_LEFT = true;
+const NETWORK_ERROR_MESSAGE = 'Network error: failed to reach the assistant backend. Please check your connection and try again.';
 
 const trimMessages = (messages: ChatMessage[], max = MAX_VISIBLE_MESSAGES) => {
   if (messages.length <= max) return messages;
   return messages.slice(messages.length - max);
 };
+
+  const isNetworkError = (err: unknown) => {
+    if (err instanceof TypeError) return true;
+    const message = String((err as Error | null)?.message ?? '').toLowerCase();
+    return message.includes('failed to fetch') || message.includes('load failed') || message.includes('network');
+  };
 
 const mapErrorMessage = (code?: string) => {
   if (code === 'openai_key_required') {
@@ -45,6 +52,12 @@ const mapErrorMessage = (code?: string) => {
   if (code === 'content_required') {
     return 'Message is empty. Please type something.';
   }
+  if (code === 'session_required') {
+    return 'Session is not ready yet. Please wait a moment and try again.';
+  }
+  if (code === 'thread_session_mismatch') {
+    return 'Chat session does not match the current canvas. Reopening the assistant should fix it.';
+  }
   if (code === 'assistant_chat_deprecated') {
     return 'Assistant is outdated. Please hard refresh the page.';
   }
@@ -62,6 +75,7 @@ export const AgentWidget: React.FC = () => {
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [contextInfo, setContextInfo] = useState<{ remainingRatio?: number | null } | null>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [loadingThread, setLoadingThread] = useState(false);
   const [panelSize, setPanelSize] = useState({ width: PANEL_DEFAULT_WIDTH, height: PANEL_DEFAULT_HEIGHT });
@@ -77,10 +91,10 @@ export const AgentWidget: React.FC = () => {
   } | null>(null);
   const panelSizeRef = useRef(panelSize);
   const threadKey = useMemo(() => {
-    if (!me?.id) return null;
-    const sessionKey = sessionId ?? 'default';
-    return `assistantThread:${me.id}:${sessionKey}`;
+    if (!me?.id || !sessionId) return null;
+    return `assistantThread:${me.id}:${sessionId}`;
   }, [me?.id, sessionId]);
+  const sessionReady = Boolean(sessionId);
   const sizeKey = useMemo(() => (me?.id ? `assistantPanelSize:${me.id}` : null), [me?.id]);
   const lastSessionKey = useMemo(() => (
     me?.id ? `assistantLastSession:${me.id}` : null
@@ -155,6 +169,7 @@ export const AgentWidget: React.FC = () => {
     if (!threadKey || !lastSessionKey) {
       setThreadId(null);
       setMessages([]);
+      setContextInfo(null);
       return;
     }
     const sessionKey = sessionId ?? 'default';
@@ -168,6 +183,7 @@ export const AgentWidget: React.FC = () => {
     const stored = window.localStorage?.getItem(threadKey);
     setThreadId(stored);
     setMessages([]);
+    setContextInfo(null);
   }, [lastSessionKey, sessionId, threadKey]);
 
   const persistPanelSize = useCallback((size: { width: number; height: number }) => {
@@ -216,6 +232,9 @@ export const AgentWidget: React.FC = () => {
   }, [threadKey]);
 
   const createThread = useCallback(async () => {
+    if (!sessionReady || !sessionId) {
+      throw new Error('Session is not ready yet. Please wait a moment and try again.');
+    }
     const res = await fetch('/api/assistant/threads', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-assistant-client': 'widget-v2' },
@@ -239,10 +258,11 @@ export const AgentWidget: React.FC = () => {
     }
     persistThreadId(id);
     return id;
-  }, [persistThreadId, sessionId]);
+  }, [persistThreadId, sessionId, sessionReady]);
 
   const loadMessages = useCallback(async (id: string) => {
-    const res = await fetch(`/api/assistant/threads/${id}/messages?limit=120`, {
+    const query = sessionId ? `?limit=120&sessionId=${encodeURIComponent(sessionId)}` : '?limit=120';
+    const res = await fetch(`/api/assistant/threads/${id}/messages${query}`, {
       headers: { 'x-assistant-client': 'widget-v2' },
     });
     const raw = await res.text();
@@ -255,19 +275,25 @@ export const AgentWidget: React.FC = () => {
       }
     }
     if (res.status === 404) return null;
+    if (res.status === 409) return null;
     if (!res.ok) {
       throw new Error(mapErrorMessage(data?.error));
     }
     const loaded = Array.isArray(data?.messages) ? data.messages : [];
-    return loaded.map((msg: ChatMessage) => ({
+    const mapped = loaded.map((msg: ChatMessage) => ({
       id: msg.id,
       role: msg.role,
       content: msg.content,
       createdAt: msg.createdAt ?? null,
     }));
-  }, []);
+    const context = data?.context && typeof data.context === 'object' ? data.context : null;
+    return { messages: mapped, context };
+  }, [sessionId]);
 
   const ensureThread = useCallback(async () => {
+    if (!sessionReady) {
+      throw new Error('Session is not ready yet. Please wait a moment and try again.');
+    }
     let id = threadId;
     if (!id && threadKey) {
       const stored = window.localStorage?.getItem(threadKey);
@@ -280,7 +306,15 @@ export const AgentWidget: React.FC = () => {
       id = await createThread();
     }
     return id;
-  }, [createThread, threadId, threadKey]);
+  }, [createThread, sessionReady, threadId, threadKey]);
+
+  const clearThread = useCallback(() => {
+    if (threadKey) {
+      window.localStorage?.removeItem(threadKey);
+    }
+    setThreadId(null);
+    setContextInfo(null);
+  }, [threadKey]);
 
   useEffect(() => {
     if (!open || !me || !threadKey) return;
@@ -290,18 +324,39 @@ export const AgentWidget: React.FC = () => {
       setError(null);
       try {
         let id = await ensureThread();
-        let history = await loadMessages(id);
-        if (!history) {
+        let result = await loadMessages(id);
+        if (!result) {
           id = await createThread();
-          history = [];
+          result = { messages: [], context: null };
         }
         if (!cancelled) {
-          setMessages(trimMessages(history));
+          setMessages(trimMessages(result.messages));
+          setContextInfo(result.context);
         }
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Failed to load assistant chat.');
+        if (cancelled) return;
+        if (isNetworkError(err)) {
+          try {
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            let id = await ensureThread();
+            let result = await loadMessages(id);
+            if (!result) {
+              id = await createThread();
+              result = { messages: [], context: null };
+            }
+            if (!cancelled) {
+              setMessages(trimMessages(result.messages));
+              setContextInfo(result.context);
+            }
+            return;
+          } catch (retryErr) {
+            if (!cancelled) {
+              setError(NETWORK_ERROR_MESSAGE);
+            }
+            return;
+          }
         }
+        setError(err instanceof Error ? err.message : 'Failed to load assistant chat.');
       } finally {
         if (!cancelled) {
           setLoadingThread(false);
@@ -316,7 +371,7 @@ export const AgentWidget: React.FC = () => {
 
   const sendMessage = async () => {
     const text = input.trim();
-    if (!text || pending || loadingThread || !me) return;
+    if (!text || pending || loadingThread || !me || !sessionReady) return;
     const nextMessages = trimMessages([...messages, { role: 'user', content: text }]);
     setMessages(nextMessages);
     setInput('');
@@ -324,36 +379,53 @@ export const AgentWidget: React.FC = () => {
     setError(null);
 
     try {
-      const id = await ensureThread();
-      const res = await fetch(`/api/assistant/threads/${id}/messages`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-assistant-client': 'widget-v2' },
-        body: JSON.stringify({
-          content: text,
-        }),
-      });
-      const raw = await res.text();
-      let data: any = {};
-      if (raw) {
-        try {
-          data = JSON.parse(raw);
-        } catch {
-          data = {};
+      const attempt = async () => {
+        const id = await ensureThread();
+        const res = await fetch(`/api/assistant/threads/${id}/messages`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-assistant-client': 'widget-v2' },
+          body: JSON.stringify({
+            content: text,
+            sessionId,
+          }),
+        });
+        const raw = await res.text();
+        let data: any = {};
+        if (raw) {
+          try {
+            data = JSON.parse(raw);
+          } catch {
+            data = {};
+          }
         }
+        if (!res.ok) {
+          const fallbackError = data?.error ?? (res.status ? `http_${res.status}` : undefined);
+          if (fallbackError === 'thread_session_mismatch' || fallbackError === 'thread_not_found') {
+            clearThread();
+            return { retry: true };
+          }
+          const msg = mapErrorMessage(fallbackError);
+          setError(msg);
+          setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: msg }]));
+          return { retry: false };
+        }
+        const reply = typeof data?.message === 'string' && data.message.trim()
+          ? data.message.trim()
+          : 'No response returned.';
+        setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: reply }]));
+        if (data?.context && typeof data.context === 'object') {
+          setContextInfo(data.context);
+        }
+        return { retry: false };
+      };
+      const first = await attempt();
+      if (first?.retry) {
+        await attempt();
       }
-      if (!res.ok) {
-        const fallbackError = data?.error ?? (res.status ? `http_${res.status}` : undefined);
-        const msg = mapErrorMessage(fallbackError);
-        setError(msg);
-        setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: msg }]));
-        return;
-      }
-      const reply = typeof data?.message === 'string' && data.message.trim()
-        ? data.message.trim()
-        : 'No response returned.';
-      setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: reply }]));
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Assistant request failed. Please try again.';
+      const msg = isNetworkError(err)
+        ? NETWORK_ERROR_MESSAGE
+        : (err instanceof Error ? err.message : 'Assistant request failed. Please try again.');
       setError(msg);
       setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: msg }]));
     } finally {
@@ -383,6 +455,13 @@ export const AgentWidget: React.FC = () => {
       pointerEvents: open ? 'auto' : 'none',
     } as React.CSSProperties;
   }, [isNarrow, open, panelSize]);
+
+  const contextPercent = useMemo(() => {
+    const ratio = contextInfo?.remainingRatio;
+    if (typeof ratio !== 'number' || !Number.isFinite(ratio)) return null;
+    const clamped = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+    return clamped;
+  }, [contextInfo]);
 
   const markdownComponents = useMemo(() => ({
     p: ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
@@ -489,224 +568,240 @@ export const AgentWidget: React.FC = () => {
       }}
     >
       {styleTag}
-      <div style={panelStyle} aria-hidden={!open}>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            padding: '12px 14px',
-            borderBottom: '1px solid var(--border-strong)',
-            background: 'rgba(20, 24, 34, 0.95)',
-          }}
-        >
+      {open && (
+        <div style={panelStyle} aria-hidden={!open}>
           <div
             style={{
-              width: 34,
-              height: 34,
-              borderRadius: 12,
-              background: 'linear-gradient(135deg, rgba(94,129,172,0.5), rgba(163,190,140,0.4))',
-              display: 'grid',
-              placeItems: 'center',
-              color: '#fff',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '12px 14px',
+              borderBottom: '1px solid var(--border-strong)',
+              background: 'rgba(20, 24, 34, 0.95)',
             }}
           >
-            <Bot size={18} />
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Raven</div>
-            <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-              {me ? 'Connected to your canvas' : 'Sign in to use the assistant'}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setOpen(false)}
-            style={{
-              border: 'none',
-              background: 'transparent',
-              color: 'var(--text-secondary)',
-              cursor: 'pointer',
-              padding: 4,
-            }}
-            aria-label="Close assistant"
-          >
-            <X size={16} />
-          </button>
-        </div>
-
-        <div
-          style={{
-            flex: 1,
-            overflowY: 'auto',
-            padding: '14px 12px 8px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 10,
-            minHeight: 0,
-            boxSizing: 'border-box',
-          }}
-        >
-          {messages.length === 0 && (
             <div
               style={{
-                padding: '10px 12px',
+                width: 34,
+                height: 34,
                 borderRadius: 12,
-                border: '1px dashed var(--border-strong)',
-                color: 'var(--text-secondary)',
-                fontSize: 12,
-                lineHeight: 1.5,
+                background: 'linear-gradient(135deg, rgba(94,129,172,0.5), rgba(163,190,140,0.4))',
+                display: 'grid',
+                placeItems: 'center',
+                color: '#fff',
               }}
             >
-              {loadingThread ? 'Loading chat history...' : 'Ask me to summarize the canvas, create nodes, or find connections.'}
+              <Bot size={18} />
             </div>
-          )}
-
-          {messages.map((msg, idx) => {
-            const isUser = msg.role === 'user';
-            return (
-              <div
-                key={`${msg.role}-${idx}`}
-                style={{
-                  alignSelf: isUser ? 'flex-end' : 'flex-start',
-                  background: isUser ? 'rgba(94,129,172,0.22)' : 'rgba(255,255,255,0.04)',
-                  color: 'var(--text-primary)',
-                  border: '1px solid var(--border-strong)',
-                  borderRadius: 14,
-                  padding: '8px 10px',
-                  fontSize: 13,
-                  maxWidth: '85%',
-                  whiteSpace: isUser ? 'pre-wrap' : 'normal',
-                  overflowWrap: 'anywhere',
-                  wordBreak: 'break-word',
-                  lineHeight: 1.45,
-                }}
-              >
-                {isUser ? (
-                  msg.content
-                ) : (
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                    {msg.content}
-                  </ReactMarkdown>
-                )}
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Raven</div>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                {me ? 'Connected to your canvas' : 'Sign in to use the assistant'}
               </div>
-            );
-          })}
-
-          {pending && (
-            <div
-              style={{
-                alignSelf: 'flex-start',
-                background: 'rgba(255,255,255,0.04)',
-                border: '1px solid var(--border-strong)',
-                borderRadius: 14,
-                padding: '8px 10px',
-                fontSize: 12,
-                color: 'var(--text-secondary)',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                animation: 'ravenPulse 1.4s ease-in-out infinite',
-              }}
-            >
-              <span>Thinking</span>
-              <span style={{ display: 'inline-flex', gap: 2 }}>
-                {[0, 1, 2].map((idx) => (
-                  <span
-                    key={idx}
-                    style={{
-                      width: 4,
-                      height: 4,
-                      borderRadius: '50%',
-                      background: 'currentColor',
-                      display: 'inline-block',
-                      animation: 'ravenDot 1.1s ease-in-out infinite',
-                      animationDelay: `${idx * 0.2}s`,
-                    }}
-                  />
-                ))}
-              </span>
-            </div>
-          )}
-          <div ref={bottomRef} />
-        </div>
-
-        <div
-          style={{
-            borderTop: '1px solid var(--border-strong)',
-            padding: '10px 12px 12px',
-            display: 'grid',
-            gap: 8,
-            background: 'rgba(12, 14, 20, 0.9)',
-          }}
-        >
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask Raven..."
-            disabled={pending || !me}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                void sendMessage();
-              }
-            }}
-            style={{
-              width: '100%',
-              borderRadius: 12,
-              border: '1px solid var(--border-strong)',
-              background: 'rgba(15, 20, 28, 0.7)',
-              color: 'var(--text-primary)',
-              padding: '8px 10px',
-              fontSize: 13,
-              minHeight: 54,
-              maxHeight: 140,
-              resize: 'none',
-              fontFamily: 'inherit',
-              boxSizing: 'border-box',
-            }}
-          />
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-            <div style={{ fontSize: 11, color: error ? '#EBCB8B' : 'var(--text-secondary)' }}>
-              {error ? error : 'Enter to send, Shift+Enter for newline'}
             </div>
             <button
               type="button"
-              onClick={() => void sendMessage()}
-              disabled={!input.trim() || pending || loadingThread || !me}
+              onClick={() => setOpen(false)}
               style={{
-                borderRadius: 10,
-                border: '1px solid var(--border-strong)',
-                background: pending ? 'rgba(94,129,172,0.4)' : 'var(--accent-primary)',
-                color: '#fff',
-                padding: '6px 12px',
-                fontSize: 12,
-                cursor: pending || loadingThread || !me ? 'not-allowed' : 'pointer',
+                border: 'none',
+                background: 'transparent',
+                color: 'var(--text-secondary)',
+                cursor: 'pointer',
+                padding: 4,
               }}
+              aria-label="Close assistant"
             >
-              Send
+              <X size={16} />
             </button>
           </div>
-        </div>
 
-        {!isNarrow && (
           <div
-            role="presentation"
-            onPointerDown={onResizeStart}
             style={{
-              position: 'absolute',
-              left: 8,
-              top: 8,
-              width: 18,
-              height: 18,
-              borderRadius: 6,
-              border: '1px solid rgba(255,255,255,0.12)',
-              background: 'rgba(255,255,255,0.04)',
-              cursor: RESIZE_FROM_TOP_LEFT ? 'nwse-resize' : 'se-resize',
+              flex: 1,
+              overflowY: 'auto',
+              padding: '14px 12px 8px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+              minHeight: 0,
+              boxSizing: 'border-box',
             }}
-          />
-        )}
-      </div>
+          >
+            {messages.length === 0 && (
+              <div
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: 12,
+                  border: '1px dashed var(--border-strong)',
+                  color: 'var(--text-secondary)',
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                }}
+              >
+                {loadingThread ? 'Loading chat history...' : 'Ask me to summarize the canvas, create nodes, or find connections.'}
+              </div>
+            )}
+
+            {messages.map((msg, idx) => {
+              const isUser = msg.role === 'user';
+              return (
+                <div
+                  key={`${msg.role}-${idx}`}
+                  style={{
+                    alignSelf: isUser ? 'flex-end' : 'flex-start',
+                    background: isUser ? 'rgba(94,129,172,0.22)' : 'rgba(255,255,255,0.04)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border-strong)',
+                    borderRadius: 14,
+                    padding: '8px 10px',
+                    fontSize: 13,
+                    maxWidth: '85%',
+                    whiteSpace: isUser ? 'pre-wrap' : 'normal',
+                    overflowWrap: 'anywhere',
+                    wordBreak: 'break-word',
+                    lineHeight: 1.45,
+                  }}
+                >
+                  {isUser ? (
+                    msg.content
+                  ) : (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                      {msg.content}
+                    </ReactMarkdown>
+                  )}
+                </div>
+              );
+            })}
+
+            {pending && (
+              <div
+                style={{
+                  alignSelf: 'flex-start',
+                  background: 'rgba(255,255,255,0.04)',
+                  border: '1px solid var(--border-strong)',
+                  borderRadius: 14,
+                  padding: '8px 10px',
+                  fontSize: 12,
+                  color: 'var(--text-secondary)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  animation: 'ravenPulse 1.4s ease-in-out infinite',
+                }}
+              >
+                <span>Thinking</span>
+                <span style={{ display: 'inline-flex', gap: 2 }}>
+                  {[0, 1, 2].map((idx) => (
+                    <span
+                      key={idx}
+                      style={{
+                        width: 4,
+                        height: 4,
+                        borderRadius: '50%',
+                        background: 'currentColor',
+                        display: 'inline-block',
+                        animation: 'ravenDot 1.1s ease-in-out infinite',
+                        animationDelay: `${idx * 0.2}s`,
+                      }}
+                    />
+                  ))}
+                </span>
+              </div>
+            )}
+            <div ref={bottomRef} />
+          </div>
+
+          <div
+            style={{
+              borderTop: '1px solid var(--border-strong)',
+              padding: '10px 12px 12px',
+              display: 'grid',
+              gap: 8,
+              background: 'rgba(12, 14, 20, 0.9)',
+            }}
+          >
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Ask Raven..."
+              disabled={pending || !me || !sessionReady}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  void sendMessage();
+                }
+              }}
+              style={{
+                width: '100%',
+                borderRadius: 12,
+                border: '1px solid var(--border-strong)',
+                background: 'rgba(15, 20, 28, 0.7)',
+                color: 'var(--text-primary)',
+                padding: '8px 10px',
+                fontSize: 13,
+                minHeight: 54,
+                maxHeight: 140,
+                resize: 'none',
+                fontFamily: 'inherit',
+                boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: contextPercent !== null && contextPercent <= 15 ? '#EBCB8B' : 'var(--text-secondary)',
+                    minWidth: 44,
+                  }}
+                >
+                  {contextPercent !== null ? `${contextPercent}%` : '--%'}
+                </div>
+                <div style={{ fontSize: 11, color: error ? '#EBCB8B' : 'var(--text-secondary)' }}>
+                  {error
+                    ? error
+                    : (sessionReady ? 'Enter to send, Shift+Enter for newline' : 'Waiting for session...')}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void sendMessage()}
+                disabled={!input.trim() || pending || loadingThread || !me || !sessionReady}
+                style={{
+                  borderRadius: 10,
+                  border: '1px solid var(--border-strong)',
+                  background: pending ? 'rgba(94,129,172,0.4)' : 'var(--accent-primary)',
+                  color: '#fff',
+                  padding: '6px 12px',
+                  fontSize: 12,
+                  cursor: pending || loadingThread || !me ? 'not-allowed' : 'pointer',
+                }}
+              >
+                Send
+              </button>
+            </div>
+          </div>
+
+          {!isNarrow && (
+            <div
+              role="presentation"
+              onPointerDown={onResizeStart}
+              style={{
+                position: 'absolute',
+                left: 8,
+                top: 8,
+                width: 18,
+                height: 18,
+                borderRadius: 6,
+                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'rgba(255,255,255,0.04)',
+                cursor: RESIZE_FROM_TOP_LEFT ? 'nwse-resize' : 'se-resize',
+              }}
+            />
+          )}
+        </div>
+      )}
 
       <button
         type="button"
