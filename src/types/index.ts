@@ -29,6 +29,7 @@ export interface NodeData {
   status?: 'queued' | 'in_progress' | 'done';
   progress?: number;
   attachments?: Attachment[];
+  mentions?: MentionToken[];
 }
 
 export interface EdgeData {
@@ -104,4 +105,20 @@ export interface CanvasState {
   x: number;
   y: number;
   scale: number;
+}
+
+export interface MentionToken {
+  id: string;
+  label: string;
+}
+
+export interface SessionSaver {
+  id: string;
+  name: string;
+  email: string;
+  avatarSeed: string;
+  avatarUrl?: string | null;
+  avatarAnimal?: number | null;
+  avatarColor?: number | null;
+  savedAt?: string | null;
 }

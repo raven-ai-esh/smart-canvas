@@ -499,6 +499,18 @@ export const Canvas: React.FC = () => {
             setCanvasViewCommand(null);
             return;
         }
+        if (action === 'pan') {
+            const x = Number.isFinite(canvasViewCommand.x) ? Number(canvasViewCommand.x) : null;
+            const y = Number.isFinite(canvasViewCommand.y) ? Number(canvasViewCommand.y) : null;
+            if (x !== null && y !== null) {
+                const targetScale = Number.isFinite(canvasViewCommand.scale)
+                    ? Number(canvasViewCommand.scale)
+                    : useStore.getState().canvas.scale;
+                centerOnWorldPoint(x, y, targetScale);
+            }
+            setCanvasViewCommand(null);
+            return;
+        }
         if (action === 'focus_node') {
             const id = canvasViewCommand.nodeId ?? null;
             if (id) {

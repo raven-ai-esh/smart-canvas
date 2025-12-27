@@ -16,7 +16,9 @@ export const SessionBar: React.FC = () => {
     const sessionSaved = useStore((s) => s.sessionSaved);
     const sessionOwnerId = useStore((s) => s.sessionOwnerId);
     const sessionExpiresAt = useStore((s) => s.sessionExpiresAt);
+    const sessionSavers = useStore((s) => s.sessionSavers);
     const setSessionMeta = useStore((s) => s.setSessionMeta);
+    const setSessionSavers = useStore((s) => s.setSessionSavers);
     const me = useStore((s) => s.me);
 
     const [showPrompt, setShowPrompt] = useState(false);
@@ -33,7 +35,6 @@ export const SessionBar: React.FC = () => {
     const [sessions, setSessions] = useState<SessionListItem[]>([]);
     const [sessionActionBusy, setSessionActionBusy] = useState<string | null>(null);
     const [currentNameDraft, setCurrentNameDraft] = useState('');
-    const [defaultSessionId, setDefaultSessionId] = useState<string | null>(null);
 
     useEffect(() => {
         if (!showPrompt) return;
@@ -144,10 +145,102 @@ export const SessionBar: React.FC = () => {
                         : item,
                 ),
             );
+            if (me?.id) {
+                const currentSavers = useStore.getState().sessionSavers;
+                if (!currentSavers.some((item) => item.id === me.id)) {
+                    setSessionSavers([
+                        ...currentSavers,
+                        {
+                            id: me.id,
+                            name: me.name ?? '',
+                            email: me.email ?? '',
+                            avatarSeed: me.avatarSeed ?? '',
+                            avatarUrl: me.avatarUrl ?? null,
+                            avatarAnimal: me.avatarAnimal ?? null,
+                            avatarColor: me.avatarColor ?? null,
+                            savedAt: new Date().toISOString(),
+                        },
+                    ]);
+                }
+            }
         } finally {
             setBusy(false);
         }
-    }, [me, nameInput, requestAuth, sessionId, setSessionMeta]);
+    }, [me, nameInput, requestAuth, sessionId, setSessionMeta, setSessionSavers]);
+
+    const saveForMe = useCallback(async () => {
+        if (!sessionId) return;
+        if (!me) {
+            requestAuth();
+            return;
+        }
+        setBusy(true);
+        const name = (sessionName ?? '').trim() || 'Untitled session';
+        try {
+            const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/save`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ name }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                if (res.status === 401) {
+                    requestAuth();
+                    return;
+                }
+                setToast(String(data?.error ?? 'Не удалось сохранить'));
+                return;
+            }
+            const meta = data?.meta;
+            if (meta && typeof meta === 'object') {
+                setSessionMeta({
+                    name: typeof meta.name === 'string' ? meta.name : name,
+                    saved: !!meta.saved || !!meta.savedAt,
+                    ownerId: typeof meta.ownerId === 'string' ? meta.ownerId : sessionOwnerId ?? null,
+                    expiresAt: meta.expiresAt ? String(meta.expiresAt) : null,
+                });
+            }
+            const nowIso = new Date().toISOString();
+            setSessions((prev) => {
+                const existing = prev.find((item) => item.id === sessionId);
+                if (existing) {
+                    return prev.map((item) =>
+                        item.id === sessionId
+                            ? {
+                                  ...item,
+                                  name: typeof meta?.name === 'string' ? meta.name : name,
+                                  savedAt: item.savedAt ?? nowIso,
+                                  updatedAt: nowIso,
+                              }
+                            : item,
+                    );
+                }
+                return [
+                    { id: sessionId, name: typeof meta?.name === 'string' ? meta.name : name, savedAt: nowIso, updatedAt: nowIso },
+                    ...prev,
+                ];
+            });
+            const currentSavers = useStore.getState().sessionSavers;
+            if (!currentSavers.some((item) => item.id === me.id)) {
+                setSessionSavers([
+                    ...currentSavers,
+                    {
+                        id: me.id,
+                        name: me.name ?? '',
+                        email: me.email ?? '',
+                        avatarSeed: me.avatarSeed ?? '',
+                        avatarUrl: me.avatarUrl ?? null,
+                        avatarAnimal: me.avatarAnimal ?? null,
+                        avatarColor: me.avatarColor ?? null,
+                        savedAt: nowIso,
+                    },
+                ]);
+            }
+            setToast('Сессия сохранена');
+        } finally {
+            setBusy(false);
+        }
+    }, [me, requestAuth, sessionId, sessionName, setSessionMeta, setSessionSavers, sessionOwnerId]);
 
     const onPromptKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
         if (e.key === 'Enter') {
@@ -172,6 +265,11 @@ export const SessionBar: React.FC = () => {
         if (sessionName && sessionName.trim()) return sessionName;
         return sessionSaved ? 'Untitled session' : 'Temporary session';
     }, [sessionName, sessionSaved]);
+
+    const savedByMe = useMemo(() => {
+        if (!me?.id) return false;
+        return sessionSavers.some((saver) => saver.id === me.id);
+    }, [me?.id, sessionSavers]);
 
     const canOpenSessions = useMemo(() => {
         if (!sessionId) return false;
@@ -238,21 +336,6 @@ export const SessionBar: React.FC = () => {
 
     useEffect(() => {
         if (!showSessions) return;
-        let cancelled = false;
-        (async () => {
-            const res = await fetch('/api/settings/default-session');
-            if (!res.ok) return;
-            const data = await res.json().catch(() => ({}));
-            if (cancelled) return;
-            setDefaultSessionId(typeof data?.id === 'string' ? data.id : null);
-        })().catch(() => undefined);
-        return () => {
-            cancelled = true;
-        };
-    }, [showSessions]);
-
-    useEffect(() => {
-        if (!showSessions) return;
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === 'Escape') closeSessionsMenu();
         };
@@ -306,39 +389,34 @@ export const SessionBar: React.FC = () => {
     const handleDeleteSession = useCallback(
         async (id: string) => {
             if (sessionActionBusy) return;
-            if (defaultSessionId && id === defaultSessionId) {
-                setToast('Нельзя удалить дефолтную сессию');
-                return;
-            }
             setSessionActionBusy(id);
             try {
                 const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
                 if (!res.ok) {
-                    if (res.status === 409) {
-                        setToast('Нельзя удалить дефолтную сессию');
-                        return;
-                    }
                     setToast('Не удалось удалить сессию');
                     return;
                 }
                 setSessions((prev) => prev.filter((item) => item.id !== id));
                 setToast('Сессия удалена');
                 if (id === sessionId) {
-                    const fallback = await fetch('/api/settings/default-session');
-                    const data = await fallback.json().catch(() => ({}));
+                    const created = await fetch('/api/sessions', {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json' },
+                        body: JSON.stringify({ state: {} }),
+                    });
+                    const data = await created.json().catch(() => ({}));
                     const nextId = typeof data?.id === 'string' ? data.id : null;
-                    if (nextId) {
-                        const url = new URL(window.location.href);
-                        url.searchParams.set('session', nextId);
-                        url.searchParams.delete('reset');
-                        window.location.href = url.toString();
-                    }
+                    if (!nextId) return;
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('session', nextId);
+                    url.searchParams.delete('reset');
+                    window.location.href = url.toString();
                 }
             } finally {
                 setSessionActionBusy(null);
             }
         },
-        [defaultSessionId, sessionActionBusy, sessionId],
+        [sessionActionBusy, sessionId],
     );
 
     const currentSessionItem = useMemo(() => {
@@ -550,6 +628,14 @@ export const SessionBar: React.FC = () => {
                         )}
                     </div>
                 )}
+                {sessionSaved && !savedByMe && (
+                    <div className={styles.saveGroup}>
+                        <button type="button" className={styles.saveButton} onClick={saveForMe} disabled={busy}>
+                            <Save size={14} />
+                            Save to my sessions
+                        </button>
+                    </div>
+                )}
                 {sessionId ? (
                     <button
                         type="button"
@@ -654,7 +740,7 @@ export const SessionBar: React.FC = () => {
                                                     e.stopPropagation();
                                                     handleDeleteSession(currentSessionItem.id);
                                                 }}
-                                                disabled={sessionActionBusy === currentSessionItem.id || currentSessionItem.id === defaultSessionId}
+                                                disabled={sessionActionBusy === currentSessionItem.id}
                                             >
                                                 <Trash2 size={14} />
                                             </button>
@@ -726,7 +812,7 @@ export const SessionBar: React.FC = () => {
                                                         e.stopPropagation();
                                                         handleDeleteSession(item.id);
                                                     }}
-                                                    disabled={sessionActionBusy === item.id || item.id === defaultSessionId}
+                                                    disabled={sessionActionBusy === item.id}
                                                 >
                                                     <Trash2 size={14} />
                                                 </button>

@@ -40,4 +40,4 @@ If no session is set, the server tries `/api/settings/default-session`.
 
 - Updates are sent over WebSocket so connected clients update immediately.
 - Deletions are applied using tombstones and `updatedAt` timestamps.
-- `get_active_canvas_snapshot` returns a PNG snapshot of the active canvas area and requires the user session to be open in a browser.
+- `get_active_canvas_snapshot` returns only snapshot metadata (no image payloads) and requires the user session to be open in a browser.

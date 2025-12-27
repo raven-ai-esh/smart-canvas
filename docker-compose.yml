@@ -16,7 +16,6 @@ services:
       PORT: "8787"
       DATABASE_URL: "postgres://postgres:postgres@db:5432/smart_tracker"
       CORS_ORIGIN: "true"
-      DEFAULT_SESSION_ID: "28873812-4985-4867-b6e1-8748a24fa1b4"
       JWT_SECRET: "${JWT_SECRET:-dev-jwt-secret}"
       AUTH_COOKIE_NAME: "${AUTH_COOKIE_NAME:-auth_token}"
       COOKIE_SECURE: "${COOKIE_SECURE:-false}"
@@ -34,10 +33,33 @@ services:
       TEST_USER_PASSWORD: "${TEST_USER_PASSWORD:-test1234}"
       TEST_USER_NAME: "${TEST_USER_NAME:-Test User}"
       MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp:7010/mcp}"
+      MCP_TECH_TOKEN: "${MCP_TECH_TOKEN:-raven_tech_token}"
+      MCP_TECH_USER_ID: "${MCP_TECH_USER_ID:-raven-bot}"
+      MCP_TECH_USER_NAME: "${MCP_TECH_USER_NAME:-Raven}"
+      MCP_TECH_AVATAR_SEED: "${MCP_TECH_AVATAR_SEED:-raven-bot}"
+      MCP_AGENT_ALLOWED_TOOLS: "${MCP_AGENT_ALLOWED_TOOLS:-get_state,node,edge,textbox,comment,drawing,list_canvas_participants,focus_node,zoom,pan}"
+      OPENAI_TIMEOUT_MS: "${OPENAI_TIMEOUT_MS:-600000}"
+      AGENT_SERVICE_TIMEOUT_MS: "${AGENT_SERVICE_TIMEOUT_MS:-600000}"
+      AGENT_SERVICE_URL: "${AGENT_SERVICE_URL:-http://agent:8001/run}"
       REDIS_URL: "redis://redis:6379"
     depends_on:
       - db
       - redis
+      - agent
+    restart: always
+
+  agent:
+    build:
+      context: .
+      dockerfile: agent-service/Dockerfile
+    environment:
+      AGENT_LOG_LEVEL: "${AGENT_LOG_LEVEL:-DEBUG}"
+      AGENT_LOG_TRUNCATE: "${AGENT_LOG_TRUNCATE:-5000}"
+      AGENT_PROMPT_PATH: "/app/data/prompt.txt"
+    ports:
+      - "8001:8001"
+    volumes:
+      - agent-data:/app/data
     restart: always
 
   mcp:
@@ -50,6 +72,7 @@ services:
       MCP_HTTP_PORT: "7010"
       CANVAS_BASE_URL: "http://api:8787"
       CANVAS_WS_URL: "ws://api:8787/ws"
+      MCP_TECH_USER_ID: "${MCP_TECH_USER_ID:-raven-bot}"
     depends_on:
       - api
     ports:
@@ -75,3 +98,4 @@ services:
 volumes:
   db-data:
   redis-data:
+  agent-data:
