@@ -31,6 +31,27 @@ type AiKeyInfo = {
   updatedAt: string | null;
   lastUsedAt: string | null;
 };
+type AlertingSettings = {
+  channels: {
+    email: { enabled: boolean };
+    telegram: { enabled: boolean; chatId: string | null };
+    webhook: { enabled: boolean; url: string | null };
+  };
+  events: {
+    card_changes: boolean;
+    mention_added: boolean;
+    agent_reply: boolean;
+  };
+};
+type AlertingMeta = {
+  email: string | null;
+  emailVerified: boolean;
+  telegramLinkedId: string | null;
+  telegramConfigured: boolean;
+  telegramBotUsername: string | null;
+  telegramBotLink: string | null;
+  telegramPending: { token: string; requestedAt: string | null; expiresAt: string | null } | null;
+};
 
 const mcpExpiryOptions = [
   { value: '30', label: '30 days' },
@@ -39,6 +60,19 @@ const mcpExpiryOptions = [
   { value: '365', label: '1 year' },
   { value: 'never', label: 'Never' },
 ];
+
+const defaultAlertingSettings: AlertingSettings = {
+  channels: {
+    email: { enabled: false },
+    telegram: { enabled: false, chatId: null },
+    webhook: { enabled: false, url: null },
+  },
+  events: {
+    card_changes: false,
+    mention_added: false,
+    agent_reply: false,
+  },
+};
 
 function useIsCompactAuthModal() {
   const [isCompact, setIsCompact] = useState(() => {
@@ -338,6 +372,33 @@ function CircularIconButton({
   );
 }
 
+function InfoIcon({ title }: { title: string }) {
+  if (!title) return null;
+  return (
+    <span
+      title={title}
+      aria-label={title}
+      role="img"
+      style={{
+        width: 16,
+        height: 16,
+        borderRadius: 999,
+        border: '1px solid var(--border-strong)',
+        color: 'var(--text-secondary)',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 10,
+        fontWeight: 700,
+        lineHeight: 1,
+        userSelect: 'none',
+      }}
+    >
+      i
+    </span>
+  );
+}
+
 function TelegramOAuthButton({
   disabled,
   telegramBotUsername,
@@ -548,12 +609,25 @@ export const Presence: React.FC = () => {
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [integrationsBusy, setIntegrationsBusy] = useState(false);
   const [integrationsMessage, setIntegrationsMessage] = useState<string | null>(null);
-  const [integrationsTab, setIntegrationsTab] = useState<'mcp' | 'ai'>('mcp');
+  const [integrationsNoticeVisible, setIntegrationsNoticeVisible] = useState(false);
+  const [integrationsTab, setIntegrationsTab] = useState<'mcp' | 'ai' | 'alerting'>('mcp');
   const [mcpTokenInfo, setMcpTokenInfo] = useState<McpTokenInfo | null>(null);
   const [mcpTokenValue, setMcpTokenValue] = useState<string | null>(null);
   const [mcpExpiryChoice, setMcpExpiryChoice] = useState('90');
   const [aiKeyInfo, setAiKeyInfo] = useState<AiKeyInfo | null>(null);
   const [aiKeyInput, setAiKeyInput] = useState('');
+  const [alertingMeta, setAlertingMeta] = useState<AlertingMeta | null>(null);
+  const [alertingChannels, setAlertingChannels] = useState({
+    email: false,
+    telegram: false,
+    webhook: false,
+  });
+  const [alertingEvents, setAlertingEvents] = useState({
+    card_changes: false,
+    mention_added: false,
+    agent_reply: false,
+  });
+  const [alertingWebhookUrl, setAlertingWebhookUrl] = useState('');
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   const selfId = presence.selfId;
@@ -572,6 +646,26 @@ export const Presence: React.FC = () => {
   const myGuestSeed = !me ? mySeed : '';
   const mcpStatusLabel = mcpTokenInfo ? 'Active' : 'Not generated';
   const aiStatusLabel = aiKeyInfo ? 'Active' : 'Not set';
+  const isTelegramLinked = !!alertingMeta?.telegramLinkedId;
+  const telegramBotLink = alertingMeta?.telegramBotLink
+    || (alertingMeta?.telegramBotUsername ? `https://t.me/${alertingMeta.telegramBotUsername}` : null);
+  const telegramPending = alertingMeta?.telegramPending ?? null;
+  const telegramStatusNote = !alertingMeta
+    ? 'Checking Telegram status...'
+    : alertingMeta.telegramConfigured
+      ? isTelegramLinked
+        ? 'Telegram is connected.'
+        : 'Connect the alert bot to deliver notifications.'
+      : 'Configure the Telegram alert bot to enable this channel.';
+  const emailInfo = [
+    alertingMeta?.email ? `To ${alertingMeta.email}` : 'Add an email in profile to enable',
+    alertingMeta?.email && !alertingMeta.emailVerified ? 'Email is not verified yet' : null,
+  ].filter(Boolean).join('\n');
+  const telegramInfo = [
+    telegramStatusNote,
+    telegramBotLink ? 'Open the bot, choose "Connect notifications", then send your Raven email.' : null,
+  ].filter(Boolean).join('\n');
+  const webhookInfo = 'POST JSON payloads to your endpoint';
 
   const normalizedOthers = useMemo(() => {
     const filtered = myGuestSeed
@@ -639,8 +733,21 @@ export const Presence: React.FC = () => {
     setIntegrationsOpen(false);
     setIntegrationsBusy(false);
     setIntegrationsMessage(null);
+    setIntegrationsNoticeVisible(false);
     setMcpTokenValue(null);
     setAiKeyInput('');
+    setAlertingMeta(null);
+    setAlertingChannels({
+      email: false,
+      telegram: false,
+      webhook: false,
+    });
+    setAlertingEvents({
+      card_changes: false,
+      mention_added: false,
+      agent_reply: false,
+    });
+    setAlertingWebhookUrl('');
   };
 
   const formatDateTime = (value: string | null) => {
@@ -746,6 +853,165 @@ export const Presence: React.FC = () => {
     }
   };
 
+  const loadAlertingSettings = async () => {
+    setIntegrationsBusy(true);
+    setIntegrationsMessage(null);
+    try {
+      const res = await fetch('/api/integrations/alerting');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setIntegrationsMessage('Failed to load alerting settings');
+        return;
+      }
+      const settings: AlertingSettings = data?.settings ?? defaultAlertingSettings;
+      setAlertingChannels({
+        email: !!settings.channels?.email?.enabled,
+        telegram: !!settings.channels?.telegram?.enabled,
+        webhook: !!settings.channels?.webhook?.enabled,
+      });
+      setAlertingEvents({
+        card_changes: !!settings.events?.card_changes,
+        mention_added: !!settings.events?.mention_added,
+        agent_reply: !!settings.events?.agent_reply,
+      });
+      const telegramLinked = typeof data?.meta?.telegramLinkedId === 'string' ? data.meta.telegramLinkedId : null;
+      setAlertingWebhookUrl(settings.channels?.webhook?.url ?? '');
+      setAlertingMeta({
+        email: typeof data?.meta?.email === 'string' ? data.meta.email : null,
+        emailVerified: !!data?.meta?.emailVerified,
+        telegramLinkedId: telegramLinked,
+        telegramConfigured: !!data?.meta?.telegramConfigured,
+        telegramBotUsername: typeof data?.meta?.telegramBotUsername === 'string' ? data.meta.telegramBotUsername : null,
+        telegramBotLink: typeof data?.meta?.telegramBotLink === 'string' ? data.meta.telegramBotLink : null,
+        telegramPending: data?.meta?.telegramPending && typeof data.meta.telegramPending?.token === 'string'
+          ? {
+            token: String(data.meta.telegramPending.token),
+            requestedAt: typeof data.meta.telegramPending.requestedAt === 'string' ? data.meta.telegramPending.requestedAt : null,
+            expiresAt: typeof data.meta.telegramPending.expiresAt === 'string' ? data.meta.telegramPending.expiresAt : null,
+          }
+          : null,
+      });
+    } catch {
+      setIntegrationsMessage('Failed to load alerting settings');
+    } finally {
+      setIntegrationsBusy(false);
+    }
+  };
+
+  const mapAlertingError = (code?: string) => {
+    if (code === 'bad_webhook_url') return 'Enter a valid webhook URL';
+    if (code === 'telegram_not_linked') return 'Connect the alert bot to enable Telegram alerts';
+    if (code === 'email_missing') return 'Add an email to your profile first';
+    return 'Failed to save alerting settings';
+  };
+
+  const saveAlertingSettings = async () => {
+    setIntegrationsBusy(true);
+    setIntegrationsMessage(null);
+    try {
+      const payload = {
+        channels: {
+          email: { enabled: alertingChannels.email },
+          telegram: { enabled: alertingChannels.telegram, chatId: null },
+          webhook: { enabled: alertingChannels.webhook, url: alertingWebhookUrl.trim() || null },
+        },
+        events: {
+          card_changes: alertingEvents.card_changes,
+          mention_added: alertingEvents.mention_added,
+          agent_reply: alertingEvents.agent_reply,
+        },
+      };
+      const res = await fetch('/api/integrations/alerting', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setIntegrationsMessage(mapAlertingError(data?.error));
+        return;
+      }
+      const settings: AlertingSettings = data?.settings ?? defaultAlertingSettings;
+      setAlertingChannels({
+        email: !!settings.channels?.email?.enabled,
+        telegram: !!settings.channels?.telegram?.enabled,
+        webhook: !!settings.channels?.webhook?.enabled,
+      });
+      setAlertingEvents({
+        card_changes: !!settings.events?.card_changes,
+        mention_added: !!settings.events?.mention_added,
+        agent_reply: !!settings.events?.agent_reply,
+      });
+      const telegramLinked = typeof data?.meta?.telegramLinkedId === 'string' ? data.meta.telegramLinkedId : null;
+      setAlertingWebhookUrl(settings.channels?.webhook?.url ?? '');
+      setAlertingMeta({
+        email: typeof data?.meta?.email === 'string' ? data.meta.email : null,
+        emailVerified: !!data?.meta?.emailVerified,
+        telegramLinkedId: telegramLinked,
+        telegramConfigured: !!data?.meta?.telegramConfigured,
+        telegramBotUsername: typeof data?.meta?.telegramBotUsername === 'string' ? data.meta.telegramBotUsername : null,
+        telegramBotLink: typeof data?.meta?.telegramBotLink === 'string' ? data.meta.telegramBotLink : null,
+        telegramPending: data?.meta?.telegramPending && typeof data.meta.telegramPending?.token === 'string'
+          ? {
+            token: String(data.meta.telegramPending.token),
+            requestedAt: typeof data.meta.telegramPending.requestedAt === 'string' ? data.meta.telegramPending.requestedAt : null,
+            expiresAt: typeof data.meta.telegramPending.expiresAt === 'string' ? data.meta.telegramPending.expiresAt : null,
+          }
+          : null,
+      });
+      setIntegrationsMessage('Alerting settings saved');
+    } catch {
+      setIntegrationsMessage('Failed to save alerting settings');
+    } finally {
+      setIntegrationsBusy(false);
+    }
+  };
+
+  const confirmTelegramLink = async () => {
+    if (!telegramPending?.token) return;
+    setIntegrationsBusy(true);
+    setIntegrationsMessage(null);
+    try {
+      const res = await fetch('/api/integrations/alerting/telegram/confirm', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: telegramPending.token }),
+      });
+      if (!res.ok) {
+        setIntegrationsMessage('Failed to confirm Telegram link');
+        return;
+      }
+      await loadAlertingSettings();
+      setIntegrationsMessage('Telegram alerts connected');
+    } catch {
+      setIntegrationsMessage('Failed to confirm Telegram link');
+    } finally {
+      setIntegrationsBusy(false);
+    }
+  };
+
+  const declineTelegramLink = async () => {
+    if (!telegramPending?.token) return;
+    setIntegrationsBusy(true);
+    setIntegrationsMessage(null);
+    try {
+      const res = await fetch('/api/integrations/alerting/telegram/decline', {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        setIntegrationsMessage('Failed to decline Telegram link');
+        return;
+      }
+      await loadAlertingSettings();
+      setIntegrationsMessage('Telegram link declined');
+    } catch {
+      setIntegrationsMessage('Failed to decline Telegram link');
+    } finally {
+      setIntegrationsBusy(false);
+    }
+  };
+
+
   const saveAiKey = async () => {
     const key = aiKeyInput.trim();
     if (!key) return;
@@ -834,6 +1100,8 @@ export const Presence: React.FC = () => {
       loadMcpToken();
     } else if (integrationsTab === 'ai') {
       loadAiKey();
+    } else if (integrationsTab === 'alerting') {
+      loadAlertingSettings();
     }
   }, [integrationsOpen, integrationsTab]);
 
@@ -888,6 +1156,20 @@ export const Presence: React.FC = () => {
       window.clearTimeout(clearTimer);
     };
   }, [settingsNotice]);
+
+  useEffect(() => {
+    if (!integrationsMessage) {
+      setIntegrationsNoticeVisible(false);
+      return;
+    }
+    setIntegrationsNoticeVisible(true);
+    const fadeTimer = window.setTimeout(() => setIntegrationsNoticeVisible(false), 1600);
+    const clearTimer = window.setTimeout(() => setIntegrationsMessage(null), 2000);
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(clearTimer);
+    };
+  }, [integrationsMessage]);
 
   useEffect(() => {
     const handler = (evt: Event) => {
@@ -1483,6 +1765,7 @@ export const Presence: React.FC = () => {
                 boxShadow: '0 20px 70px rgba(0,0,0,0.55)',
                 padding: 16,
                 boxSizing: 'border-box',
+                position: 'relative',
                 maxHeight: isCompactAuth ? 'calc(var(--visual-height, 100vh) - env(safe-area-inset-top, 0px) - 12px)' : undefined,
                 overflowY: isCompactAuth ? 'auto' : undefined,
                 paddingBottom: isCompactAuth ? 'calc(16px + env(safe-area-inset-bottom, 0px))' : 16,
@@ -1899,11 +2182,35 @@ export const Presence: React.FC = () => {
                   Close
                 </button>
               </div>
+              {integrationsMessage && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 48,
+                    left: '50%',
+                    transform: `translate(-50%, ${integrationsNoticeVisible ? 0 : -6}px)`,
+                    padding: '8px 12px',
+                    borderRadius: 999,
+                    border: '1px solid var(--border-strong)',
+                    background: 'var(--bg-node)',
+                    color: 'var(--text-primary)',
+                    fontSize: 12,
+                    boxShadow: '0 10px 24px rgba(0,0,0,0.35)',
+                    opacity: integrationsNoticeVisible ? 0.72 : 0,
+                    transition: 'opacity 220ms ease, transform 220ms ease',
+                    pointerEvents: 'none',
+                    zIndex: 2,
+                  }}
+                >
+                  {integrationsMessage}
+                </div>
+              )}
 
               <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                 {[
                   { key: 'mcp' as const, label: 'MCP' },
                   { key: 'ai' as const, label: 'AI' },
+                  { key: 'alerting' as const, label: 'Alerting' },
                 ].map((tab) => {
                   const active = integrationsTab === tab.key;
                   return (
@@ -2095,10 +2402,6 @@ export const Presence: React.FC = () => {
                       </button>
                     </div>
                   )}
-
-                  {integrationsMessage && (
-                    <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{integrationsMessage}</div>
-                  )}
                 </div>
                 )}
 
@@ -2219,10 +2522,268 @@ export const Presence: React.FC = () => {
                       </button>
                     )}
                   </div>
+                </div>
+                )}
 
-                  {integrationsMessage && (
-                    <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{integrationsMessage}</div>
-                  )}
+                {integrationsTab === 'alerting' && (
+                <div
+                  style={{
+                    borderRadius: 14,
+                    border: '1px solid var(--border-strong)',
+                    background: 'rgba(255,255,255,0.03)',
+                    padding: 12,
+                    display: 'grid',
+                    gap: 10,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Alerting</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>External notifications</div>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-secondary)',
+                      padding: '10px 12px',
+                      borderRadius: 12,
+                      border: '1px solid var(--border-strong)',
+                      background: 'rgba(15, 20, 28, 0.45)',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    Choose when and where Raven should send alerts about card activity and agent replies.
+                  </div>
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                      Channels
+                    </div>
+                    <div style={{ display: 'grid', gap: 10 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Email</div>
+                            <InfoIcon title={emailInfo} />
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAlertingChannels((prev) => ({ ...prev, email: !prev.email }))}
+                          disabled={integrationsBusy}
+                          style={{
+                            borderRadius: 999,
+                            border: '1px solid var(--border-strong)',
+                            background: alertingChannels.email ? 'var(--accent-glow)' : 'transparent',
+                            color: 'var(--text-primary)',
+                            padding: '6px 12px',
+                            fontSize: 12,
+                            cursor: integrationsBusy ? 'not-allowed' : 'pointer',
+                            minWidth: 64,
+                          }}
+                        >
+                          {alertingChannels.email ? 'On' : 'Off'}
+                        </button>
+                      </div>
+
+                      <div style={{ display: 'grid', gap: 6 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Telegram</div>
+                              <InfoIcon title={telegramInfo} />
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setAlertingChannels((prev) => ({ ...prev, telegram: !prev.telegram }))}
+                            disabled={integrationsBusy}
+                            style={{
+                              borderRadius: 999,
+                              border: '1px solid var(--border-strong)',
+                              background: alertingChannels.telegram ? 'var(--accent-glow)' : 'transparent',
+                              color: 'var(--text-primary)',
+                              padding: '6px 12px',
+                              fontSize: 12,
+                              cursor: integrationsBusy ? 'not-allowed' : 'pointer',
+                              minWidth: 64,
+                            }}
+                          >
+                            {alertingChannels.telegram ? 'On' : 'Off'}
+                          </button>
+                        </div>
+                        {telegramBotLink && (
+                          <a
+                            href={telegramBotLink}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{
+                              justifySelf: 'start',
+                              borderRadius: 10,
+                              border: '1px solid var(--border-strong)',
+                              background: 'transparent',
+                              color: 'var(--text-primary)',
+                              padding: '6px 10px',
+                              fontSize: 12,
+                              textDecoration: 'none',
+                            }}
+                          >
+                            Open alert bot
+                          </a>
+                        )}
+                        {telegramPending && (
+                          <div
+                            style={{
+                              borderRadius: 12,
+                              border: '1px solid var(--border-strong)',
+                              padding: 10,
+                              display: 'grid',
+                              gap: 8,
+                              background: 'rgba(15, 20, 28, 0.45)',
+                            }}
+                          >
+                            <div style={{ fontSize: 12, color: 'var(--text-primary)' }}>
+                              Telegram wants to connect alerts to your account.
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                              <button
+                                type="button"
+                                onClick={confirmTelegramLink}
+                                disabled={integrationsBusy}
+                                style={{
+                                  borderRadius: 10,
+                                  border: '1px solid var(--border-strong)',
+                                  background: 'var(--accent-primary)',
+                                  color: '#fff',
+                                  padding: '6px 10px',
+                                  cursor: integrationsBusy ? 'not-allowed' : 'pointer',
+                                  fontSize: 12,
+                                }}
+                              >
+                                Confirm
+                              </button>
+                              <button
+                                type="button"
+                                onClick={declineTelegramLink}
+                                disabled={integrationsBusy}
+                                style={{
+                                  borderRadius: 10,
+                                  border: '1px solid var(--border-strong)',
+                                  background: 'transparent',
+                                  color: 'var(--text-primary)',
+                                  padding: '6px 10px',
+                                  cursor: integrationsBusy ? 'not-allowed' : 'pointer',
+                                  fontSize: 12,
+                                }}
+                              >
+                                Decline
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div style={{ display: 'grid', gap: 6 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Webhook</div>
+                              <InfoIcon title={webhookInfo} />
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setAlertingChannels((prev) => ({ ...prev, webhook: !prev.webhook }))}
+                            disabled={integrationsBusy}
+                            style={{
+                              borderRadius: 999,
+                              border: '1px solid var(--border-strong)',
+                              background: alertingChannels.webhook ? 'var(--accent-glow)' : 'transparent',
+                              color: 'var(--text-primary)',
+                              padding: '6px 12px',
+                              fontSize: 12,
+                              cursor: integrationsBusy ? 'not-allowed' : 'pointer',
+                              minWidth: 64,
+                            }}
+                          >
+                            {alertingChannels.webhook ? 'On' : 'Off'}
+                          </button>
+                        </div>
+                        <input
+                          value={alertingWebhookUrl}
+                          onChange={(e) => setAlertingWebhookUrl(e.target.value)}
+                          placeholder="https://example.com/webhook"
+                          disabled={integrationsBusy}
+                          style={{
+                            width: '100%',
+                            borderRadius: 12,
+                            border: '1px solid var(--border-strong)',
+                            background: 'rgba(15, 20, 28, 0.45)',
+                            color: 'var(--text-primary)',
+                            padding: '8px 10px',
+                            fontSize: 12,
+                            boxSizing: 'border-box',
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                      Events
+                    </div>
+                    <div style={{ display: 'grid', gap: 10 }}>
+                      {[
+                        { key: 'card_changes' as const, label: 'Card updates where you are author or mentioned' },
+                        { key: 'mention_added' as const, label: 'When you are tagged' },
+                        { key: 'agent_reply' as const, label: 'When Raven replies' },
+                      ].map((item) => (
+                        <div key={item.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{item.label}</div>
+                          <button
+                            type="button"
+                            onClick={() => setAlertingEvents((prev) => ({ ...prev, [item.key]: !prev[item.key] }))}
+                            disabled={integrationsBusy}
+                            style={{
+                              borderRadius: 999,
+                              border: '1px solid var(--border-strong)',
+                              background: alertingEvents[item.key] ? 'var(--accent-glow)' : 'transparent',
+                              color: 'var(--text-primary)',
+                              padding: '6px 12px',
+                              fontSize: 12,
+                              cursor: integrationsBusy ? 'not-allowed' : 'pointer',
+                              minWidth: 64,
+                            }}
+                          >
+                            {alertingEvents[item.key] ? 'On' : 'Off'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      onClick={saveAlertingSettings}
+                      disabled={integrationsBusy}
+                      style={{
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'var(--accent-primary)',
+                        color: '#fff',
+                        padding: '8px 12px',
+                        cursor: integrationsBusy ? 'not-allowed' : 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 8,
+                      }}
+                    >
+                      <span>Save</span>
+                      {integrationsBusy && <LoadingSpinner size={12} />}
+                    </button>
+                  </div>
                 </div>
                 )}
               </div>
