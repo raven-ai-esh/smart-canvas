@@ -5,6 +5,7 @@ import express from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createHttpLogger, createMetrics, getLogger } from '../observability.js';
 
 const DEFAULT_BASE_URL = process.env.CANVAS_BASE_URL ?? 'http://localhost:8080';
 const DEFAULT_SESSION_ID = process.env.CANVAS_SESSION_ID ?? process.env.DEFAULT_SESSION_ID ?? null;
@@ -30,6 +31,9 @@ const authCache = new Map();
 const MCP_LOG_ENABLED = process.env.MCP_LOG_ENABLED !== 'false';
 const MCP_LOG_TRUNCATE = Number(process.env.MCP_LOG_TRUNCATE ?? 800);
 const MCP_TOOL_LIST_LIMIT = Number(process.env.MCP_TOOL_LIST_LIMIT ?? 200);
+
+const logger = getLogger('smart-tracker-mcp');
+const metrics = createMetrics({ serviceName: 'smart-tracker-mcp' });
 
 const truncateString = (value) => {
   if (typeof value !== 'string') return value;
@@ -1476,6 +1480,14 @@ const transportMode = process.env.MCP_TRANSPORT ?? (process.env.MCP_HTTP_PORT ? 
 if (transportMode === 'http') {
   const port = Number(process.env.MCP_HTTP_PORT ?? 7010);
   const app = express();
+  if (metrics.enabled) {
+    app.get(metrics.path, metrics.handler);
+  }
+  app.use(createHttpLogger({
+    logger,
+    ignorePaths: metrics.enabled ? [metrics.path] : [],
+  }));
+  app.use(metrics.middleware);
   app.use(express.json({ limit: '2mb' }));
 
   const renderUiPage = () => `<!doctype html>
@@ -1796,8 +1808,7 @@ if (transportMode === 'http') {
   });
 
   app.listen(port, () => {
-    console.log(`[mcp] canvas server listening on :${port}/mcp`);
-    console.log(`[mcp] ui available on :${port}/`);
+    logger.info({ port }, 'mcp_http_listening');
   });
 } else {
   const transport = new StdioServerTransport();

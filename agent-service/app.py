@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import contextvars
 import copy
 import json
 import os
@@ -10,27 +11,146 @@ import html
 
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, Response
 from openai import APIStatusError, AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 import httpx
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 import tiktoken
+from prometheus_client import Counter, Histogram, Gauge, CONTENT_TYPE_LATEST, generate_latest
+from pythonjsonlogger import jsonlogger
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.util._once import Once
 
 import logging
 
-LOG_LEVEL = os.getenv("AGENT_LOG_LEVEL", "DEBUG").upper()
+LOG_LEVEL = os.getenv("AGENT_LOG_LEVEL", os.getenv("LOG_LEVEL", "INFO")).upper()
 LOG_TRUNCATE = int(os.getenv("AGENT_LOG_TRUNCATE", "2000"))
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s %(levelname)s [agent] %(message)s",
+LOG_TRACE = os.getenv("LOG_TRACE", "false").lower() == "true"
+METRICS_ENABLED = os.getenv("METRICS_ENABLED", "true").lower() != "false"
+METRICS_PATH = os.getenv("METRICS_PATH", "/metrics")
+OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+OTEL_SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "smart-tracker-agent")
+OTEL_LOG_LEVEL = os.getenv("OTEL_LOG_LEVEL", "")
+
+request_id_ctx = contextvars.ContextVar("request_id", default=None)
+
+
+class ContextFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_ctx.get() or ""
+        if LOG_TRACE:
+            span = trace.get_current_span()
+            span_context = span.get_span_context() if span else None
+            if span_context and span_context.trace_id:
+                record.trace_id = f"{span_context.trace_id:032x}"
+                record.span_id = f"{span_context.span_id:016x}"
+            else:
+                record.trace_id = ""
+                record.span_id = ""
+        return True
+
+
+handler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter(
+    "%(asctime)s %(levelname)s %(name)s %(message)s %(request_id)s %(trace_id)s %(span_id)s"
 )
+handler.setFormatter(formatter)
+root_logger = logging.getLogger()
+root_logger.handlers = [handler]
+root_logger.setLevel(LOG_LEVEL)
+root_logger.addFilter(ContextFilter())
+if OTEL_LOG_LEVEL:
+    logging.getLogger("opentelemetry").setLevel(OTEL_LOG_LEVEL)
 
 app = FastAPI()
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("agent")
+
+_otel_once = Once()
+
+
+def _init_tracing() -> None:
+    if not OTEL_ENDPOINT:
+        return
+    def _setup() -> None:
+        resource = Resource.create({SERVICE_NAME: OTEL_SERVICE_NAME})
+        provider = TracerProvider(resource=resource)
+        exporter = OTLPSpanExporter(endpoint=OTEL_ENDPOINT)
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+        FastAPIInstrumentor.instrument_app(app)
+        HTTPXClientInstrumentor().instrument()
+        logger.info("otel_ready", extra={"endpoint": OTEL_ENDPOINT, "service": OTEL_SERVICE_NAME})
+    _otel_once.do_once(_setup)
+
+
+REQUEST_COUNT = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "path", "status"],
+)
+REQUEST_LATENCY = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["method", "path", "status"],
+)
+IN_FLIGHT = Gauge("http_in_flight_requests", "In-flight HTTP requests")
+
+
+@app.middleware("http")
+async def observability_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or request.headers.get("x-correlation-id") or str(uuid.uuid4())
+    token = request_id_ctx.set(request_id)
+    start = time.time()
+    if METRICS_ENABLED:
+        IN_FLIGHT.inc()
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        duration = time.time() - start
+        if METRICS_ENABLED:
+            REQUEST_COUNT.labels(request.method, request.url.path, "500").inc()
+            REQUEST_LATENCY.labels(request.method, request.url.path, "500").observe(duration)
+            IN_FLIGHT.dec()
+        logger.exception("http_error", extra={
+            "method": request.method,
+            "path": request.url.path,
+            "status": 500,
+            "duration_ms": int(duration * 1000),
+        })
+        request_id_ctx.reset(token)
+        raise exc
+    duration = time.time() - start
+    if METRICS_ENABLED:
+        REQUEST_COUNT.labels(request.method, request.url.path, str(response.status_code)).inc()
+        REQUEST_LATENCY.labels(request.method, request.url.path, str(response.status_code)).observe(duration)
+        IN_FLIGHT.dec()
+    logger.info("http_request", extra={
+        "method": request.method,
+        "path": request.url.path,
+        "status": response.status_code,
+        "duration_ms": int(duration * 1000),
+    })
+    response.headers["x-request-id"] = request_id
+    request_id_ctx.reset(token)
+    return response
+
+
+if METRICS_ENABLED:
+    @app.get(METRICS_PATH)
+    async def metrics() -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+_init_tracing()
 
 AGENT_MODEL_CONTEXT_TOKENS = int(os.getenv("AGENT_MODEL_CONTEXT_TOKENS", "0"))
 ASSISTANT_MODEL_CONTEXT_TOKENS = int(os.getenv("ASSISTANT_MODEL_CONTEXT_TOKENS", "0"))

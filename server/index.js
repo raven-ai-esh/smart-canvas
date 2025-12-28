@@ -11,6 +11,8 @@ import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
 import OpenAI from 'openai';
 import Redis from 'ioredis';
+import { Gauge } from 'prom-client';
+import { createHttpLogger, createMetrics, getLogger } from './observability.js';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/smart_tracker';
@@ -38,6 +40,12 @@ const TEST_USER_ENABLED = process.env.TEST_USER_ENABLED ?? (process.env.NODE_ENV
 const TEST_USER_EMAIL = process.env.TEST_USER_EMAIL ?? '';
 const TEST_USER_PASSWORD = process.env.TEST_USER_PASSWORD ?? '';
 const TEST_USER_NAME = process.env.TEST_USER_NAME ?? 'Test User';
+const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
+const SESSION_ACCESS_MODE = String(process.env.SESSION_ACCESS_MODE ?? 'auto').trim().toLowerCase();
+const RATE_LIMIT_ENABLED = process.env.RATE_LIMIT_ENABLED !== 'false';
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60000);
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX ?? 1200);
+const RATE_LIMIT_AUTH_MAX = Number(process.env.RATE_LIMIT_AUTH_MAX ?? 30);
 const TEMP_SESSION_TTL_DAYS = Number(process.env.TEMP_SESSION_TTL_DAYS ?? 7);
 const TEMP_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * (Number.isFinite(TEMP_SESSION_TTL_DAYS) && TEMP_SESSION_TTL_DAYS > 0 ? TEMP_SESSION_TTL_DAYS : 7);
 const MCP_TOKEN_DEFAULT_TTL_DAYS = Number(process.env.MCP_TOKEN_DEFAULT_TTL_DAYS ?? 90);
@@ -71,11 +79,31 @@ const ASSISTANT_TOKEN_ESTIMATE_CHARS = Number(process.env.ASSISTANT_TOKEN_ESTIMA
 const ASSISTANT_OUTPUT_RESERVE_TOKENS = Number(process.env.ASSISTANT_OUTPUT_RESERVE_TOKENS ?? 0);
 const ALERT_WEBHOOK_TIMEOUT_MS = Number(process.env.ALERT_WEBHOOK_TIMEOUT_MS ?? 5000);
 const ALERT_PUBLIC_BASE_URL = normalizeEnvValue(process.env.ALERT_PUBLIC_BASE_URL) || APP_ORIGIN || '';
+const ENTITY_COUNT_INTERVAL_MS = Number(process.env.ENTITY_COUNT_INTERVAL_MS ?? 60000);
 const REDIS_URL = process.env.REDIS_URL ?? '';
 const EMBEDDING_DIM = Number(process.env.OPENAI_EMBEDDING_DIM ?? 1536);
 const MODEL_CONTEXT_TOKENS = {
   'gpt-5.2': 400000,
 };
+
+const logger = getLogger('smart-tracker-api');
+const metrics = createMetrics({ serviceName: 'smart-tracker-api' });
+const activeSessionsGauge = metrics.registry ? new Gauge({
+  name: 'active_sessions',
+  help: 'Active sessions with at least one connected client',
+  registers: [metrics.registry],
+}) : null;
+const activeUsersGauge = metrics.registry ? new Gauge({
+  name: 'active_users',
+  help: 'Unique authenticated users connected via WebSocket',
+  registers: [metrics.registry],
+}) : null;
+const entityCountGauge = metrics.registry ? new Gauge({
+  name: 'entity_count',
+  help: 'Row count for core tables',
+  labelNames: ['entity'],
+  registers: [metrics.registry],
+}) : null;
 
 const ALERT_EVENTS = {
   cardChanges: 'card_changes',
@@ -553,6 +581,93 @@ async function getUserByEmail(email) {
   const res = await pool.query('SELECT id, email, password_hash, name, avatar_seed, avatar_url, avatar_animal, avatar_color, verified FROM users WHERE email = $1', [email]);
   return res.rows[0] ?? null;
 }
+
+const normalizeWindowMs = (value, fallback) => {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return fallback;
+  return Math.floor(num);
+};
+
+const normalizeRateLimitMax = (value, fallback) => {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return fallback;
+  return Math.floor(num);
+};
+
+const getClientIp = (req) => {
+  if (TRUST_PROXY) {
+    const forwarded = req.headers?.['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.trim()) {
+      return forwarded.split(',')[0].trim();
+    }
+  }
+  return req.ip || req.connection?.remoteAddress || 'unknown';
+};
+
+const createRateLimiter = ({ windowMs, max, skip }) => {
+  const store = new Map();
+  const windowSize = normalizeWindowMs(windowMs, 60000);
+  const maxHits = normalizeRateLimitMax(max, 1200);
+  return (req, res, next) => {
+    if (!RATE_LIMIT_ENABLED) return next();
+    if (typeof skip === 'function' && skip(req)) return next();
+    const key = `${getClientIp(req)}:${req.path}`;
+    const now = Date.now();
+    let entry = store.get(key);
+    if (!entry || entry.resetAt <= now) {
+      entry = { count: 0, resetAt: now + windowSize };
+      store.set(key, entry);
+    }
+    entry.count += 1;
+    const remaining = Math.max(0, maxHits - entry.count);
+    res.setHeader('x-ratelimit-limit', String(maxHits));
+    res.setHeader('x-ratelimit-remaining', String(remaining));
+    res.setHeader('x-ratelimit-reset', String(Math.ceil(entry.resetAt / 1000)));
+    if (entry.count > maxHits) {
+      return res.status(429).json({ error: 'rate_limited' });
+    }
+    if (store.size > 20000) {
+      for (const [entryKey, item] of store.entries()) {
+        if (item.resetAt <= now) store.delete(entryKey);
+      }
+    }
+    return next();
+  };
+};
+
+const isSessionRestricted = (session) => {
+  if (!session) return false;
+  if (SESSION_ACCESS_MODE === 'public') return false;
+  if (SESSION_ACCESS_MODE === 'private') return true;
+  return Boolean(session.saved_at || session.owner_id);
+};
+
+const isSessionMember = async (sessionId, userId, ownerId) => {
+  if (!userId) return false;
+  if (ownerId && ownerId === userId) return true;
+  const res = await pool.query(
+    'SELECT 1 FROM session_savers WHERE session_id = $1 AND user_id = $2',
+    [sessionId, userId],
+  );
+  return res.rows.length > 0;
+};
+
+const resolveSessionAccess = async ({ sessionId, auth }) => {
+  const session = await getSession(sessionId);
+  if (!session) return { error: 'not_found' };
+  if (!isSessionRestricted(session)) return { session, access: 'public' };
+  if (!auth) return { error: 'unauthorized' };
+  const member = await isSessionMember(sessionId, auth.userId, session.owner_id);
+  if (!member) return { error: 'forbidden' };
+  return { session, access: 'member' };
+};
+
+const ensureSessionAccessForUser = async ({ session, userId, allowTech }) => {
+  if (!session) return false;
+  if (!isSessionRestricted(session)) return true;
+  if (allowTech) return true;
+  return isSessionMember(session.id, userId, session.owner_id);
+};
 
 function parseBoolLike(value) {
   if (value == null) return false;
@@ -2656,6 +2771,25 @@ async function ensurePinnedSession(sessionId) {
 }
 
 const app = express();
+app.set('trust proxy', TRUST_PROXY);
+if (metrics.enabled) {
+  app.get(metrics.path, metrics.handler);
+}
+app.use(createHttpLogger({
+  logger,
+  ignorePaths: metrics.enabled ? [metrics.path, '/healthz'] : ['/healthz'],
+}));
+app.use(metrics.middleware);
+const generalRateLimiter = createRateLimiter({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
+  skip: (req) => req.path === '/healthz' || (metrics.enabled && req.path === metrics.path),
+});
+app.use(generalRateLimiter);
+const authRateLimiter = createRateLimiter({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_AUTH_MAX,
+});
 app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
 app.use(
@@ -3470,6 +3604,13 @@ app.post('/api/integrations/mcp/participants', async (req, res) => {
   if (!sessionId) return res.status(400).json({ error: 'session_id_required' });
   const session = await getSession(sessionId);
   if (!session) return res.status(404).json({ error: 'session_not_found' });
+  const allowTech = info?.kind === 'tech';
+  const accessOk = await ensureSessionAccessForUser({
+    session,
+    userId: info?.userId ?? null,
+    allowTech,
+  });
+  if (!accessOk) return res.status(403).json({ error: 'forbidden' });
 
   const rows = await pool.query(
     `SELECT u.id, u.name, u.email, u.avatar_seed, u.avatar_url, u.avatar_animal, u.avatar_color, ss.saved_at
@@ -3522,6 +3663,14 @@ app.post('/api/integrations/mcp/view', async (req, res) => {
 
   const session = await getSession(sessionId);
   if (!session) return res.status(404).json({ error: 'session_not_found' });
+  const allowTech = info?.kind === 'tech' && !requestedTargetUserId;
+  const accessUserId = requestedTargetUserId || infoUserId;
+  const accessOk = await ensureSessionAccessForUser({
+    session,
+    userId: accessUserId,
+    allowTech,
+  });
+  if (!accessOk) return res.status(403).json({ error: 'forbidden' });
 
   const payload = {
     type: 'canvas_view',
@@ -3577,6 +3726,13 @@ app.post('/api/integrations/mcp/snapshot', async (req, res) => {
 
   const session = await getSession(sessionId);
   if (!session) return res.status(404).json({ error: 'session_not_found' });
+  const allowTech = info?.kind === 'tech';
+  const accessOk = await ensureSessionAccessForUser({
+    session,
+    userId,
+    allowTech,
+  });
+  if (!accessOk) return res.status(403).json({ error: 'forbidden' });
 
   try {
     const rawTimeout = req.body?.timeoutMs;
@@ -3664,7 +3820,7 @@ app.post('/api/auth/logout', async (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/auth/signup', async (req, res) => {
+app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase();
   const password = String(req.body?.password ?? '');
   const name = String(req.body?.name ?? '').trim() || null;
@@ -3710,7 +3866,7 @@ app.post('/api/auth/signup', async (req, res) => {
   res.json({ ok: true, sent: false, devVerifyUrl: verifyUrl });
 });
 
-app.get('/api/auth/verify', async (req, res) => {
+app.get('/api/auth/verify', authRateLimiter, async (req, res) => {
   const token = String(req.query?.token ?? '');
   if (!token) return res.status(400).send('bad_request');
   const tokenHash = createHash('sha256').update(token).digest('hex');
@@ -3725,7 +3881,7 @@ app.get('/api/auth/verify', async (req, res) => {
   res.redirect(`${getBaseUrl(req)}/?verified=1`);
 });
 
-app.get('/api/auth/change-email', async (req, res) => {
+app.get('/api/auth/change-email', authRateLimiter, async (req, res) => {
   const token = String(req.query?.token ?? '');
   if (!token) return res.status(400).send('bad_request');
   const tokenHash = createHash('sha256').update(token).digest('hex');
@@ -3746,7 +3902,7 @@ app.get('/api/auth/change-email', async (req, res) => {
   res.redirect(`${getBaseUrl(req)}/?emailChanged=1`);
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authRateLimiter, async (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase();
   const password = String(req.body?.password ?? '');
   if (!email || !email.includes('@')) return res.status(400).json({ error: 'bad_email' });
@@ -4222,23 +4378,33 @@ app.get('/api/sessions/mine', async (req, res) => {
 
 // Fast server-side clone: avoids uploading large session state from the client.
 app.post('/api/sessions/:id/clone', async (req, res) => {
-  const source = await getSession(req.params.id);
-  if (!source) return res.status(404).json({ error: 'not_found' });
+  const auth = authUserFromRequest(req);
+  const access = await resolveSessionAccess({ sessionId: req.params.id, auth });
+  if (access.error === 'unauthorized') return res.status(401).json({ error: 'unauthorized' });
+  if (access.error === 'forbidden') return res.status(403).json({ error: 'forbidden' });
+  if (access.error === 'not_found') return res.status(404).json({ error: 'not_found' });
+  const source = access.session;
   const id = randomUUID();
   const created = await createSession(id, normalizeState(source.state));
   res.status(201).json(serializeSession(created));
 });
 
 app.get('/api/sessions/:id', async (req, res) => {
-  const session = await getSession(req.params.id);
-  if (!session) return res.status(404).json({ error: 'not_found' });
-  res.json(serializeSession(session));
+  const auth = authUserFromRequest(req);
+  const access = await resolveSessionAccess({ sessionId: req.params.id, auth });
+  if (access.error === 'unauthorized') return res.status(401).json({ error: 'unauthorized' });
+  if (access.error === 'forbidden') return res.status(403).json({ error: 'forbidden' });
+  if (access.error === 'not_found') return res.status(404).json({ error: 'not_found' });
+  res.json(serializeSession(access.session));
 });
 
 app.get('/api/sessions/:id/savers', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
   const sessionId = req.params.id;
+  const access = await resolveSessionAccess({ sessionId, auth });
+  if (access.error === 'forbidden') return res.status(403).json({ error: 'forbidden' });
+  if (access.error === 'not_found') return res.status(404).json({ error: 'not_found' });
   const rows = await pool.query(
     `SELECT u.id, u.name, u.email, u.avatar_seed, u.avatar_url, u.avatar_animal, u.avatar_color, ss.saved_at
        FROM session_savers ss
@@ -4262,12 +4428,16 @@ app.get('/api/sessions/:id/savers', async (req, res) => {
 });
 
 app.put('/api/sessions/:id', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  const access = await resolveSessionAccess({ sessionId: req.params.id, auth });
+  if (access.error === 'unauthorized') return res.status(401).json({ error: 'unauthorized' });
+  if (access.error === 'forbidden') return res.status(403).json({ error: 'forbidden' });
+  if (access.error === 'not_found') return res.status(404).json({ error: 'not_found' });
   const state = req.body?.state;
   if (!state) return res.status(400).json({ error: 'bad_request' });
   const result = await mergeAndUpdateSession(req.params.id, state);
   if (!result?.updated) return res.status(404).json({ error: 'not_found' });
   res.json(serializeSession(result.updated));
-  const auth = authUserFromRequest(req);
   void (async () => {
     try {
       const actorUser = auth?.userId ? await getUserById(auth.userId) : null;
@@ -4305,6 +4475,9 @@ app.delete('/api/sessions/:id', async (req, res) => {
 app.post('/api/sessions/:id/save', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const access = await resolveSessionAccess({ sessionId: req.params.id, auth });
+  if (access.error === 'forbidden') return res.status(403).json({ error: 'forbidden' });
+  if (access.error === 'not_found') return res.status(404).json({ error: 'not_found' });
   const rawName = String(req.body?.name ?? '').trim();
   const incomingName = rawName ? rawName.slice(0, 120) : null;
 
@@ -4370,6 +4543,60 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 const rooms = new Map();
 const snapshotRequests = new Map();
+
+function updatePresenceMetrics() {
+  if (!metrics.enabled) return;
+  if (activeSessionsGauge) {
+    activeSessionsGauge.set(rooms.size);
+  }
+  if (activeUsersGauge) {
+    const userIds = new Set();
+    for (const clients of rooms.values()) {
+      for (const ws of clients) {
+        const meta = ws._meta;
+        if (meta?.userId) userIds.add(meta.userId);
+      }
+    }
+    activeUsersGauge.set(userIds.size);
+  }
+}
+updatePresenceMetrics();
+
+const ENTITY_COUNT_QUERIES = [
+  { entity: 'users', sql: 'SELECT COUNT(*)::int AS count FROM users' },
+  { entity: 'sessions', sql: 'SELECT COUNT(*)::int AS count FROM sessions' },
+  { entity: 'session_savers', sql: 'SELECT COUNT(*)::int AS count FROM session_savers' },
+  { entity: 'oauth_accounts', sql: 'SELECT COUNT(*)::int AS count FROM oauth_accounts' },
+  { entity: 'alerting_settings', sql: 'SELECT COUNT(*)::int AS count FROM alerting_settings' },
+  { entity: 'telegram_alert_links', sql: 'SELECT COUNT(*)::int AS count FROM telegram_alert_links' },
+  { entity: 'openai_keys', sql: 'SELECT COUNT(*)::int AS count FROM openai_keys' },
+  { entity: 'mcp_tokens', sql: 'SELECT COUNT(*)::int AS count FROM mcp_tokens' },
+  { entity: 'assistant_threads', sql: 'SELECT COUNT(*)::int AS count FROM assistant_threads' },
+  { entity: 'assistant_messages', sql: 'SELECT COUNT(*)::int AS count FROM assistant_messages' },
+  { entity: 'assistant_summaries', sql: 'SELECT COUNT(*)::int AS count FROM assistant_summaries' },
+  { entity: 'assistant_contexts', sql: 'SELECT COUNT(*)::int AS count FROM assistant_contexts' },
+  { entity: 'assistant_memories', sql: 'SELECT COUNT(*)::int AS count FROM assistant_memories' },
+];
+
+const normalizeIntervalMs = (value, fallback) => {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return fallback;
+  return Math.floor(num);
+};
+
+async function refreshEntityCounts() {
+  if (!entityCountGauge) return;
+  for (const entry of ENTITY_COUNT_QUERIES) {
+    try {
+      const res = await pool.query(entry.sql);
+      const count = Number(res.rows?.[0]?.count ?? 0);
+      entityCountGauge.set({ entity: entry.entity }, Number.isFinite(count) ? count : 0);
+    } catch (err) {
+      entityCountGauge.set({ entity: entry.entity }, 0);
+      logger.warn({ entity: entry.entity, error: err?.message ?? String(err) }, 'entity_count_failed');
+    }
+  }
+}
 
 function roomFor(sessionId) {
   let set = rooms.get(sessionId);
@@ -4558,6 +4785,17 @@ wss.on('connection', async (ws, req) => {
 
   const connId = randomUUID();
   const auth = authUserFromCookieHeader(req.headers.cookie);
+  if (isSessionRestricted(session)) {
+    if (!auth?.userId) {
+      ws.close(1008, 'unauthorized');
+      return;
+    }
+    const member = await isSessionMember(sessionId, auth.userId, session.owner_id);
+    if (!member) {
+      ws.close(1008, 'forbidden');
+      return;
+    }
+  }
   let user = null;
   if (auth?.userId) {
     try {
@@ -4573,9 +4811,11 @@ wss.on('connection', async (ws, req) => {
   const avatarAnimal = user?.avatar_animal ?? null;
   const avatarColor = user?.avatar_color ?? null;
   ws._meta = { sessionId, connId, clientId, userId: user?.id ?? null, name, avatarSeed, avatarUrl, avatarAnimal, avatarColor };
-  console.log('[ws] connect', JSON.stringify({ sessionId, userId: user?.id ?? null, clientId, connId }));
+  logger.info({ sessionId, userId: user?.id ?? null, clientId, connId }, 'ws_connect');
 
   roomFor(sessionId).add(ws);
+  metrics.wsConnections?.inc();
+  updatePresenceMetrics();
   const payload = serializeSession(session);
   ws.send(JSON.stringify({ type: 'sync', ...payload }));
   sendPresence(sessionId);
@@ -4628,15 +4868,17 @@ wss.on('connection', async (ws, req) => {
     clients.delete(ws);
     if (clients.size === 0) rooms.delete(sessionId);
     else sendPresence(sessionId);
+    metrics.wsConnections?.dec();
+    updatePresenceMetrics();
     const meta = ws._meta;
-    console.log('[ws] close', JSON.stringify({
+    logger.info({
       sessionId: meta?.sessionId ?? sessionId,
       userId: meta?.userId ?? null,
       clientId: meta?.clientId ?? null,
       connId: meta?.connId ?? null,
       code: typeof code === 'number' ? code : null,
       reason: reason ? String(reason) : null,
-    }));
+    }, 'ws_close');
   });
 });
 
@@ -4658,6 +4900,16 @@ try {
   await ensureTestUser();
 } catch {
   // ignore startup test user initialization errors
+}
+if (entityCountGauge) {
+  const intervalMs = normalizeIntervalMs(ENTITY_COUNT_INTERVAL_MS, 60000);
+  const run = () => {
+    refreshEntityCounts().catch((err) => {
+      logger.warn({ error: err?.message ?? String(err) }, 'entity_count_refresh_failed');
+    });
+  };
+  run();
+  setInterval(run, intervalMs);
 }
 try {
   await cleanupExpiredSessions();
@@ -4681,6 +4933,5 @@ try {
 }
 
 server.listen(PORT, () => {
-  // eslint-disable-next-line no-console
-  console.log(`[sessions-api] listening on :${PORT}`);
+  logger.info({ port: PORT }, 'sessions_api_listening');
 });

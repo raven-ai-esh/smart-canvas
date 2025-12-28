@@ -10,5 +10,4 @@ COPY server ./server
 ENV PORT=8787
 EXPOSE 8787
 
-CMD ["node", "server/index.js"]
-
+CMD ["node", "server/boot.js"]
