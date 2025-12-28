@@ -479,6 +479,27 @@ const fetchCanvasParticipants = async ({ sessionId }, extra) => {
   return { sessionId: resolvedSessionId, participants };
 };
 
+const sendAlert = async ({ sessionId, userRef, message }, extra) => {
+  const token = extra?.authInfo?.mcpToken;
+  if (!token) throw new Error('mcp_token_required');
+  const resolvedSessionId = await client.resolveSessionId(sessionId);
+  const payload = { sessionId: resolvedSessionId, userId: userRef, message };
+  const res = await fetch(`${apiBaseUrl}/api/integrations/mcp/alert`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = typeof data?.error === 'string' ? `:${data.error}` : '';
+    throw new Error(`alert_failed:${res.status}${detail}`);
+  }
+  return { sessionId: resolvedSessionId, ...data };
+};
+
 const normalizeParticipants = (items) => {
   if (!Array.isArray(items)) return [];
   const seen = new Set();
@@ -759,6 +780,30 @@ registerTool(
       limit: limited.limit,
       truncated: limited.truncated,
     });
+  }
+);
+
+registerTool(
+  'send_alert',
+  {
+    title: 'Send Alert',
+    description: 'Sends a Raven alert to a canvas participant using their enabled alerting channels. Pass userRef as the participant id (preferred) or their name/email/handle from list_canvas_participants.',
+    inputSchema: {
+      userRef: z.string(),
+      message: z.string(),
+    },
+    outputSchema: {
+      ok: z.boolean().optional(),
+      sessionId: z.string().optional(),
+      userId: z.string().optional(),
+      delivered: z.any().optional(),
+    },
+  },
+  async ({ sessionId, userRef, message }, extra) => {
+    if (typeof userRef !== 'string' || !userRef.trim()) throw new Error('user_ref_required');
+    if (typeof message !== 'string' || !message.trim()) throw new Error('message_required');
+    const result = await sendAlert({ sessionId, userRef: userRef.trim(), message }, extra);
+    return toolResult(result);
   }
 );
 

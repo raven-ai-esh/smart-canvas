@@ -391,6 +391,14 @@ async function initDb() {
     );
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS assistant_contexts (
+      thread_id TEXT PRIMARY KEY REFERENCES assistant_threads(id) ON DELETE CASCADE,
+      context JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
   if (VECTOR_ENABLED) {
     const dim = Number.isFinite(EMBEDDING_DIM) && EMBEDDING_DIM > 0 ? Math.floor(EMBEDDING_DIM) : 1536;
     await pool.query(`
@@ -501,6 +509,39 @@ async function listSessionSavers(sessionId) {
     name: row.name ?? 'User',
     email: row.email ?? null,
   }));
+}
+
+const normalizeUserLookup = (value) => {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim().toLowerCase();
+  return trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
+};
+
+async function resolveSessionParticipantId({ sessionId, userRef }) {
+  const normalized = normalizeUserLookup(userRef);
+  if (!normalized) return { error: 'participant_not_found' };
+  const res = await pool.query(
+    `SELECT u.id, u.name, u.email
+       FROM session_savers ss
+       JOIN users u ON u.id = ss.user_id
+      WHERE ss.session_id = $1`,
+    [sessionId],
+  );
+  const rows = res.rows ?? [];
+  const direct = rows.find((row) => row.id === userRef);
+  if (direct) return { userId: direct.id };
+  const matches = [];
+  for (const row of rows) {
+    const name = typeof row.name === 'string' ? row.name.trim().toLowerCase() : '';
+    const email = typeof row.email === 'string' ? row.email.trim().toLowerCase() : '';
+    const handle = email ? email.split('@')[0] : '';
+    if (name === normalized || email === normalized || handle === normalized) {
+      matches.push(row);
+    }
+  }
+  if (matches.length === 1) return { userId: matches[0].id };
+  if (matches.length > 1) return { error: 'participant_ambiguous' };
+  return { error: 'participant_not_found' };
 }
 
 async function getUserById(id) {
@@ -1202,6 +1243,11 @@ const normalizeMessageContent = (value) => {
   return trimmed.slice(0, MAX_MESSAGE_CHARS);
 };
 
+const normalizeAssistantContext = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value;
+};
+
 const createOpenAiClient = (apiKey) => new OpenAI({
   apiKey,
   baseURL: OPENAI_API_BASE_URL,
@@ -1370,6 +1416,31 @@ async function getAssistantMessageStats(threadId) {
     count: Number.isFinite(count) ? count : 0,
     totalChars: Number.isFinite(totalChars) ? totalChars : 0,
   };
+}
+
+async function getAssistantContext(threadId) {
+  const res = await pool.query(
+    'SELECT context, updated_at FROM assistant_contexts WHERE thread_id = $1',
+    [threadId],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return normalizeAssistantContext(row.context);
+}
+
+async function upsertAssistantContext({ threadId, context }) {
+  const normalized = normalizeAssistantContext(context);
+  if (!normalized) return null;
+  const res = await pool.query(
+    `INSERT INTO assistant_contexts (thread_id, context)
+     VALUES ($1, $2)
+     ON CONFLICT (thread_id) DO UPDATE
+       SET context = EXCLUDED.context,
+           updated_at = NOW()
+     RETURNING context, updated_at`,
+    [threadId, normalized],
+  );
+  return normalizeAssistantContext(res.rows[0]?.context);
 }
 
 async function listAssistantMessagesPage(threadId, limit, offset) {
@@ -1910,6 +1981,12 @@ const buildCardUrl = ({ baseUrl, sessionId, nodeId }) => {
   return `${base}/?session=${encodeURIComponent(sessionId)}&card=${encodeURIComponent(nodeId)}`;
 };
 
+const buildSessionUrl = ({ baseUrl, sessionId }) => {
+  if (!baseUrl || !sessionId) return null;
+  const base = normalizeBaseUrl(baseUrl);
+  return `${base}/?session=${encodeURIComponent(sessionId)}`;
+};
+
 const buildAlertLinkSet = ({ sessionId, nodes }) => {
   const baseUrl = normalizeBaseUrl(ALERT_PUBLIC_BASE_URL);
   if (!baseUrl || !sessionId || !Array.isArray(nodes)) return [];
@@ -2324,6 +2401,36 @@ const buildAlertMessage = (event, payload) => {
   return { subject: 'Notification', text: 'You have a new update.' };
 };
 
+const buildDirectAlertMessage = ({ sessionId, sessionName, message }) => {
+  const subject = 'Raven message';
+  const sessionLabel = sessionName || 'canvas';
+  const sessionLabelHtml = escapeHtml(sessionLabel);
+  const sessionUrl = buildSessionUrl({ baseUrl: ALERT_PUBLIC_BASE_URL, sessionId });
+  const rawMessage = typeof message === 'string' ? message.trim() : '';
+  const safeMessage = rawMessage || 'Raven sent a new update.';
+  const messageLines = safeMessage.split('\n');
+  const messageHtml = messageLines.map((line) => escapeHtml(line)).join('<br/>');
+  const messageTelegram = messageLines.map((line) => escapeHtml(line)).join('\n');
+  const textParts = [safeMessage];
+  const htmlParts = [messageHtml];
+  const telegramParts = [messageTelegram];
+  if (sessionUrl) {
+    textParts.push(`Open ${sessionLabel}: ${sessionUrl}`);
+    const linkHtml = `<a href="${escapeHtml(sessionUrl)}">Open ${sessionLabelHtml}</a>`;
+    htmlParts.push(linkHtml);
+    telegramParts.push(linkHtml);
+  }
+  return {
+    subject,
+    text: `**${subject}**\n\n${textParts.join('\n\n')}`,
+    html: `<strong>${escapeHtml(subject)}</strong><br/><br/>${htmlParts.join('<br/><br/>')}`,
+    telegram: {
+      text: `<b>${escapeHtml(subject)}</b>\n\n${telegramParts.join('\n\n')}`,
+      parseMode: 'HTML',
+    },
+  };
+};
+
 const sendAlertEmail = async ({ to, subject, text, html }) => {
   if (!SMTP_URL) return false;
   const transport = nodemailer.createTransport(SMTP_URL);
@@ -2463,6 +2570,69 @@ const dispatchAlertEvents = async (alerts) => {
   if (tasks.length) {
     await Promise.allSettled(tasks);
   }
+};
+
+const sendDirectAlertToUser = async ({ userId, sessionId, sessionName, message, actor }) => {
+  if (!userId || !message) return { delivered: { email: false, telegram: false, webhook: false } };
+  const [settings, user, telegramLink] = await Promise.all([
+    getAlertingSettings(userId),
+    getUserById(userId),
+    getTelegramAlertLink(userId),
+  ]);
+  if (!user) return { delivered: { email: false, telegram: false, webhook: false } };
+  const chatId = resolveTelegramChatId(settings, telegramLink?.chatId ?? null);
+  const messagePayload = buildDirectAlertMessage({ sessionId, sessionName, message });
+  const webhookPayload = {
+    event: 'agent_message',
+    timestamp: new Date().toISOString(),
+    user: { id: user.id, name: user.name, email: user.email },
+    session: { id: sessionId ?? null, name: sessionName ?? null },
+    actor: actor ?? null,
+    message,
+  };
+
+  const delivered = { email: false, telegram: false, webhook: false };
+  const tasks = [];
+  if (settings.channels?.email?.enabled && user.email) {
+    tasks.push((async () => {
+      try {
+        delivered.email = await sendAlertEmail({
+          to: user.email,
+          subject: messagePayload.subject,
+          text: messagePayload.text,
+          html: messagePayload.html,
+        });
+      } catch (err) {
+        console.warn('[alerting] direct email failed', err?.message ?? err);
+      }
+    })());
+  }
+  if (settings.channels?.telegram?.enabled && chatId) {
+    tasks.push((async () => {
+      try {
+        delivered.telegram = await sendAlertTelegram({
+          chatId,
+          text: messagePayload.telegram?.text ?? messagePayload.text,
+          parseMode: messagePayload.telegram?.parseMode,
+        });
+      } catch (err) {
+        console.warn('[alerting] direct telegram failed', err?.message ?? err);
+      }
+    })());
+  }
+  if (settings.channels?.webhook?.enabled && settings.channels.webhook.url) {
+    tasks.push((async () => {
+      try {
+        delivered.webhook = await sendAlertWebhook({ url: settings.channels.webhook.url, payload: webhookPayload });
+      } catch (err) {
+        console.warn('[alerting] direct webhook failed', err?.message ?? err);
+      }
+    })());
+  }
+  if (tasks.length) {
+    await Promise.allSettled(tasks);
+  }
+  return { delivered };
 };
 
 async function cleanupExpiredSessions() {
@@ -3106,18 +3276,26 @@ app.get('/api/assistant/threads/:id/messages', async (req, res) => {
   const parsedLimit = typeof rawLimit === 'string' ? Number(rawLimit) : Number(rawLimit ?? NaN);
   const limit = Number.isFinite(parsedLimit) ? parsedLimit : ASSISTANT_CONTEXT_LIMIT;
   const messages = await listAssistantMessages(threadId, limit);
-  const user = await getUserById(auth.userId);
-  const { items } = await buildAssistantContext({
-    threadId,
-    userId: auth.userId,
-    apiKey: null,
-    includeMemories: false,
-  });
-  const context = await callAgentContext({
-    model: OPENAI_MODEL,
-    input: items,
-    userName: user?.name ?? null,
-  }).catch(() => null);
+  let context = await getAssistantContext(threadId);
+  if (!context) {
+    const user = await getUserById(auth.userId);
+    const { items } = await buildAssistantContext({
+      threadId,
+      userId: auth.userId,
+      apiKey: null,
+      includeMemories: false,
+    });
+    context = await callAgentContext({
+      model: OPENAI_MODEL,
+      input: items,
+      userName: user?.name ?? null,
+    }).catch(() => null);
+    if (context) {
+      void upsertAssistantContext({ threadId, context }).catch((err) => {
+        console.warn('[assistant] context_upsert_failed', err?.message ?? err);
+      });
+    }
+  }
   logAssistantEvent('thread_messages', {
     userId: auth.userId,
     threadId,
@@ -3204,6 +3382,11 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
         input: contextItems,
         userName: user?.name ?? null,
       }).catch(() => null);
+    }
+    if (context) {
+      void upsertAssistantContext({ threadId, context }).catch((err) => {
+        console.warn('[assistant] context_upsert_failed', err?.message ?? err);
+      });
     }
     const remainingRatio = Number.isFinite(context?.remainingRatio) ? context.remainingRatio : null;
     if (remainingRatio !== null && remainingRatio <= getSummaryRemainingRatio()) {
@@ -3417,6 +3600,53 @@ app.post('/api/integrations/mcp/snapshot', async (req, res) => {
     if (msg === 'snapshot_timeout') return res.status(504).json({ error: 'snapshot_timeout' });
     res.status(500).json({ error: 'snapshot_failed' });
   }
+});
+
+app.post('/api/integrations/mcp/alert', async (req, res) => {
+  const headerToken = getBearerToken(req);
+  const bodyToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  const rawToken = headerToken || bodyToken;
+  if (!rawToken) return res.status(400).json({ error: 'token_required' });
+
+  const info = await resolveMcpTokenInfo(rawToken);
+  if (info?.error === 'invalid') return res.status(401).json({ error: 'invalid_token' });
+  if (info?.error === 'expired') return res.status(401).json({ error: 'token_expired' });
+
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+  if (!sessionId) return res.status(400).json({ error: 'session_id_required' });
+  const session = await getSession(sessionId);
+  if (!session) return res.status(404).json({ error: 'session_not_found' });
+
+  const userRef = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
+  if (!userRef) return res.status(400).json({ error: 'user_id_required' });
+  if (info?.kind !== 'tech' && userRef !== info?.userId) {
+    return res.status(403).json({ error: 'user_forbidden' });
+  }
+
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!message) return res.status(400).json({ error: 'message_required' });
+
+  const resolved = await resolveSessionParticipantId({ sessionId, userRef });
+  if (resolved?.error === 'participant_ambiguous') {
+    return res.status(409).json({ error: 'participant_ambiguous' });
+  }
+  if (!resolved?.userId) return res.status(404).json({ error: 'participant_not_found' });
+  const userId = resolved.userId;
+
+  const actor = info?.user ? { id: info.user.id, name: info.user.name } : null;
+  const result = await sendDirectAlertToUser({
+    userId,
+    sessionId,
+    sessionName: session?.name ?? null,
+    message,
+    actor,
+  });
+  res.json({
+    ok: true,
+    sessionId,
+    userId,
+    delivered: result.delivered,
+  });
 });
 
 app.get('/api/auth/providers', async (_req, res) => {
