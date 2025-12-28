@@ -25,6 +25,12 @@ Services (Docker):
 - `mcp`: MCP server that exposes canvas tools to the assistant.
 - `db`: Postgres (with pgvector extension).
 - `redis`: caching for assistant and session helpers.
+- `prometheus`: metrics store for API/MCP/agent.
+- `grafana`: dashboards for metrics/logs/traces.
+- `otel-collector`: OpenTelemetry ingest for traces.
+- `tempo`: trace storage (Grafana Tempo).
+- `loki`: log storage.
+- `promtail`: log collector from Docker containers.
 
 ## Local Development
 ### Using Docker (recommended)
@@ -35,6 +41,10 @@ docker compose up -d --build
 - API + WS: proxied at `http://localhost:8080/api` and `ws://localhost:8080/ws`
 - MCP: http://localhost:7010/mcp (debug/testing)
 - Agent: http://localhost:8001
+- Grafana: http://localhost:3000
+- Prometheus: http://localhost:9090
+- Tempo: http://localhost:3200
+- Loki: http://localhost:3100
 
 ### Without Docker
 1) Start Postgres and Redis locally.
@@ -111,6 +121,15 @@ Core:
 - `TEMP_SESSION_TTL_DAYS`
 - `REDIS_URL`
 
+Observability:
+- `LOG_LEVEL` (default `info`)
+- `LOG_TRACE` (adds trace_id/span_id to logs when tracing is enabled)
+- `METRICS_ENABLED` (default `true`)
+- `METRICS_PATH` (default `/metrics`)
+- `OTEL_EXPORTER_OTLP_ENDPOINT` (set to enable OpenTelemetry traces)
+- `OTEL_SERVICE_NAME` (optional override for service name)
+- `OTEL_LOG_LEVEL` (optional OpenTelemetry diag logging)
+
 Email:
 - `SMTP_URL`
 - `MAIL_FROM`
@@ -139,6 +158,10 @@ AI / Agent:
 - `AGENT_LOG_TRUNCATE`
 - `AGENT_PROMPT_PATH`
 
+curl -X POST "https://api.telegram.org/bot8579736745:AAEJK7mo2TTR4l3Gp6KLZECvFJwEA73jVwc/setWebhook" \
+    -d "url=https://canvas.raven-ai.ru/api/integrations/telegram/webhook" \
+    -d "secret_token=19308292be814f396d6b052c2f8d1ee86d36b1329b3de3c76e56b9d9fc34d28b"
+
 MCP:
 - `MCP_SERVER_URL`
 - `MCP_TECH_TOKEN`
@@ -159,6 +182,8 @@ Testing defaults:
 - Alert hyperlinks missing: set `ALERT_PUBLIC_BASE_URL` or `APP_ORIGIN`.
 - OAuth `bad_oauth_state` on localhost: set `COOKIE_SECURE=false`.
 - WebSocket errors: ensure `/ws` is reachable via Nginx.
+- Metrics: check that `METRICS_ENABLED=true` and access `/metrics` on API/MCP.
+- Traces missing: set `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP/HTTP).
 
 ## Scripts
 - `npm run dev` - frontend dev server

@@ -49,10 +49,24 @@ services:
       AGENT_SERVICE_TIMEOUT_MS: "${AGENT_SERVICE_TIMEOUT_MS:-600000}"
       AGENT_SERVICE_URL: "${AGENT_SERVICE_URL:-http://agent:8001/run}"
       REDIS_URL: "redis://redis:6379"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_TRACE: "${LOG_TRACE:-false}"
+      METRICS_ENABLED: "${METRICS_ENABLED:-true}"
+      METRICS_PATH: "${METRICS_PATH:-/metrics}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318/v1/traces}"
+      OTEL_SERVICE_NAME: "${OTEL_SERVICE_NAME:-smart-tracker-api}"
+      OTEL_LOG_LEVEL: "${OTEL_LOG_LEVEL:-}"
+      TRUST_PROXY: "${TRUST_PROXY:-false}"
+      SESSION_ACCESS_MODE: "${SESSION_ACCESS_MODE:-auto}"
+      RATE_LIMIT_ENABLED: "${RATE_LIMIT_ENABLED:-true}"
+      RATE_LIMIT_WINDOW_MS: "${RATE_LIMIT_WINDOW_MS:-60000}"
+      RATE_LIMIT_MAX: "${RATE_LIMIT_MAX:-1200}"
+      RATE_LIMIT_AUTH_MAX: "${RATE_LIMIT_AUTH_MAX:-30}"
     depends_on:
       - db
       - redis
       - agent
+      - otel-collector
     restart: always
 
   agent:
@@ -63,6 +77,13 @@ services:
       AGENT_LOG_LEVEL: "${AGENT_LOG_LEVEL:-DEBUG}"
       AGENT_LOG_TRUNCATE: "${AGENT_LOG_TRUNCATE:-5000}"
       AGENT_PROMPT_PATH: "/app/data/prompt.txt"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_TRACE: "${LOG_TRACE:-false}"
+      METRICS_ENABLED: "${METRICS_ENABLED:-true}"
+      METRICS_PATH: "${METRICS_PATH:-/metrics}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318/v1/traces}"
+      OTEL_SERVICE_NAME: "${OTEL_SERVICE_NAME:-smart-tracker-agent}"
+      OTEL_LOG_LEVEL: "${OTEL_LOG_LEVEL:-}"
     ports:
       - "8001:8001"
     volumes:
@@ -73,15 +94,23 @@ services:
     build:
       context: .
       dockerfile: server/Dockerfile
-    command: ["node", "server/mcp/canvas-server.js"]
+    command: ["node", "server/mcp/boot.js"]
     environment:
       MCP_TRANSPORT: "http"
       MCP_HTTP_PORT: "7010"
       CANVAS_BASE_URL: "http://api:8787"
       CANVAS_WS_URL: "ws://api:8787/ws"
       MCP_TECH_USER_ID: "${MCP_TECH_USER_ID:-raven-bot}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_TRACE: "${LOG_TRACE:-false}"
+      METRICS_ENABLED: "${METRICS_ENABLED:-true}"
+      METRICS_PATH: "${METRICS_PATH:-/metrics}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318/v1/traces}"
+      OTEL_SERVICE_NAME: "${OTEL_SERVICE_NAME:-smart-tracker-mcp}"
+      OTEL_LOG_LEVEL: "${OTEL_LOG_LEVEL:-}"
     depends_on:
       - api
+      - otel-collector
     ports:
       - "7010:7010"
     restart: always
@@ -102,7 +131,81 @@ services:
       - redis-data:/data
     restart: always
 
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: always
+
+  grafana:
+    image: grafana/grafana:11.5.0
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+    restart: always
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.103.0
+    command: ["--config=/etc/otel-collector.yml"]
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otel-collector.yml:ro
+    ports:
+      - "4318:4318"
+    depends_on:
+      - tempo
+    restart: always
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    command: ["-config.file=/etc/tempo.yml"]
+    volumes:
+      - ./observability/tempo.yml:/etc/tempo.yml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"
+      - "4319:4318"
+    restart: always
+
+  loki:
+    image: grafana/loki:2.9.7
+    command: ["-config.file=/etc/loki.yml"]
+    volumes:
+      - ./observability/loki.yml:/etc/loki.yml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    restart: always
+
+  promtail:
+    image: grafana/promtail:2.9.7
+    command: ["-config.file=/etc/promtail.yml"]
+    volumes:
+      - ./observability/promtail.yml:/etc/promtail.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+    restart: always
+
 volumes:
   db-data:
   redis-data:
   agent-data:
+  prometheus-data:
+  grafana-data:
+  tempo-data:
+  loki-data:
