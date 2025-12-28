@@ -54,6 +54,7 @@ DEFAULT_PROMPT_LINES = [
     "List responses are capped; if a list is truncated, request specific items by id or use a smaller limit.",
     "Canvas participants are users who saved the canvas; only they can be tagged.",
     "Use MCP tool list_canvas_participants to fetch taggable people (id, name, email).",
+    "Use MCP tool send_alert to notify a canvas participant via their enabled alerting channels. Pass userRef as the participant id (preferred) or their name/email/handle from list_canvas_participants.",
     "When tagging someone in a card, include @Name in the content and update node.mentions with {id,label}.",
     "To tag everyone, include @all and add {id:\"all\", label:\"all\"} to node.mentions.",
     "For destructive actions (delete), ask for explicit confirmation first.",
