@@ -1121,13 +1121,17 @@ export const Canvas: React.FC = () => {
             }
         };
 
-        const getPastePlacement = () => {
+        type Placement = { pos: { x: number; y: number }; offset: number };
+
+        const getPastePlacement = (): Placement => {
             const n = pasteCountRef.current++;
             return {
                 pos: getPasteWorldPos(),
                 offset: 36 + (n % 6) * 10,
             };
         };
+
+        const resolvePlacement = (placement?: Placement) => placement ?? getPastePlacement();
 
         const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -1194,8 +1198,8 @@ export const Canvas: React.FC = () => {
             createTextBoxFromText(url.toString());
         };
 
-        const createImageBox = (src: string) => {
-            const { pos, offset } = getPastePlacement();
+        const createImageBox = (src: string, placement?: Placement) => {
+            const { pos, offset } = resolvePlacement(placement);
             const maxSize = 360;
             const minSize = 140;
             const fallbackW = 320;
@@ -2768,6 +2772,94 @@ export const Canvas: React.FC = () => {
         });
     }, [screenToWorldLatest]);
 
+    const handleFileDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
+        if (!e.dataTransfer?.files?.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const files = Array.from(e.dataTransfer.files);
+        if (!files.length) return;
+        const { attachments, rejected } = await filesToAttachments(files);
+        if (!attachments.length) return;
+
+        const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+        const base = screenToWorldLatest(e.clientX, e.clientY);
+
+        const createImageBoxAt = (src: string, pos: { x: number; y: number }) => {
+            const maxSize = 360;
+            const minSize = 140;
+            const fallbackW = 320;
+            const fallbackH = 240;
+
+            const addImageBox = (w: number, h: number) => {
+                const width = clamp(w, minSize, maxSize);
+                const height = clamp(h, minSize, maxSize);
+                addTextBox({
+                    id: uuidv4(),
+                    x: pos.x - width / 2,
+                    y: pos.y - height / 2,
+                    width,
+                    height,
+                    text: '',
+                    kind: 'image',
+                    src,
+                });
+            };
+
+            const img = new Image();
+            img.onload = () => {
+                const w = img.naturalWidth || fallbackW;
+                const h = img.naturalHeight || fallbackH;
+                if (!w || !h) {
+                    addImageBox(fallbackW, fallbackH);
+                    return;
+                }
+                const scale = Math.min(1, maxSize / Math.max(w, h));
+                addImageBox(w * scale, h * scale);
+            };
+            img.onerror = () => addImageBox(fallbackW, fallbackH);
+            img.src = src;
+        };
+
+        const createFileBoxAt = (attachment: Attachment, pos: { x: number; y: number }) => {
+            const width = clamp(280, 180, 420);
+            const height = clamp(170, 120, 300);
+            addTextBox({
+                id: uuidv4(),
+                x: pos.x - width / 2,
+                y: pos.y - height / 2,
+                width,
+                height,
+                text: '',
+                kind: 'file',
+                src: attachment.dataUrl,
+                fileName: attachment.name,
+                fileMime: attachment.mime,
+                fileSize: attachment.size,
+            });
+        };
+
+        attachments.forEach((attachment, index) => {
+            const nudge = index * 24;
+            const pos = { x: base.x + nudge, y: base.y + nudge };
+            if (attachment.kind === 'image') {
+                createImageBoxAt(attachment.dataUrl, pos);
+            } else {
+                createFileBoxAt(attachment, pos);
+            }
+        });
+
+        if (rejected.length) {
+            console.warn(`Some files were too large. Max size is ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
+        }
+    }, [addTextBox, screenToWorldLatest]);
+
+    const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+        if (Array.from(e.dataTransfer?.types ?? []).includes('Files')) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+        }
+    }, []);
+
     // Helper to generate SVG path from points
     const getSvgPath = (points: { x: number; y: number }[]) => {
         if (points.length === 0) return '';
@@ -2813,11 +2905,13 @@ export const Canvas: React.FC = () => {
             ref={containerRef}
             className={`${styles.canvasContainer} ${mode === 'panning' ? styles.panning : ''}`}
             data-canvas-root="true"
-	    onPointerDown={handlePointerDown}
+            onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerLeave={handlePointerLeave}
             onPointerCancel={handlePointerCancel}
+            onDragOver={handleDragOver}
+            onDrop={handleFileDrop}
             onContextMenu={handleContextMenu}
             onDoubleClick={handleDoubleClick}
             style={{ cursor: textMode ? 'text' : penMode ? (penTool === 'eraser' ? 'cell' : 'crosshair') : undefined }}

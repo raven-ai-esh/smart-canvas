@@ -1,7 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Attachment } from '../types';
 
-export const MAX_ATTACHMENT_BYTES = 8_000_000;
+const DEFAULT_MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+const envMax = Number(import.meta.env.VITE_MAX_ATTACHMENT_BYTES);
+export const MAX_ATTACHMENT_BYTES = Number.isFinite(envMax) && envMax > 0 ? envMax : DEFAULT_MAX_ATTACHMENT_BYTES;
 
 const readFileAsDataUrl = (file: File) =>
   new Promise<string>((resolve, reject) => {

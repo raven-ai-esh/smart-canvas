@@ -67,8 +67,11 @@ export interface TextBox {
   width: number; // world
   height: number; // world
   text: string;
-  kind?: 'text' | 'image';
+  kind?: 'text' | 'image' | 'file';
   src?: string;
+  fileName?: string;
+  fileMime?: string;
+  fileSize?: number;
   createdAt?: number; // epoch ms
   updatedAt?: number; // epoch ms
   authorId?: string | null;

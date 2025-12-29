@@ -1,6 +1,11 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
+import { Download, FileText, X } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { TextBox as TextBoxType } from '../../types';
 import { useStore } from '../../store/useStore';
+import { formatBytes } from '../../utils/attachments';
 import styles from './TextBox.module.css';
 
 const MIN_W = 80;
@@ -12,6 +17,15 @@ const BORDER_BOX_SHRINK = 2; // 1px border on each side with box-sizing: border-
 const LONG_PRESS_MS = 500;
 const TOUCH_DRAG_THRESHOLD = 8;
 
+type PreviewState =
+  | { status: 'idle' }
+  | { status: 'loading'; kind: string }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; kind: 'pdf'; src: string }
+  | { status: 'ready'; kind: 'text' | 'markdown' | 'json'; text: string }
+  | { status: 'ready'; kind: 'table'; rows: string[][]; truncated: boolean }
+  | { status: 'ready'; kind: 'html'; html: string };
+
 type SnapAnchor = 'center' | 'topleft';
 type SnapRequest = {
   x: number;
@@ -21,6 +35,103 @@ type SnapRequest = {
   anchor: SnapAnchor;
   excludeNodeIds?: string[];
   excludeTextBoxIds?: string[];
+};
+
+const getFileExtension = (name: string) => {
+  const trimmed = name.trim();
+  const idx = trimmed.lastIndexOf('.');
+  if (idx === -1) return '';
+  return trimmed.slice(idx + 1).toLowerCase();
+};
+
+const dataUrlToText = (dataUrl: string) => {
+  const commaIdx = dataUrl.indexOf(',');
+  if (commaIdx === -1) return '';
+  const meta = dataUrl.slice(0, commaIdx);
+  const payload = dataUrl.slice(commaIdx + 1);
+  if (meta.includes(';base64')) {
+    const binary = atob(payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+  return decodeURIComponent(payload);
+};
+
+const dataUrlToArrayBuffer = (dataUrl: string) => {
+  const commaIdx = dataUrl.indexOf(',');
+  if (commaIdx === -1) return new ArrayBuffer(0);
+  const meta = dataUrl.slice(0, commaIdx);
+  const payload = dataUrl.slice(commaIdx + 1);
+  if (meta.includes(';base64')) {
+    const binary = atob(payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
+  }
+  const text = decodeURIComponent(payload);
+  return new TextEncoder().encode(text).buffer;
+};
+
+const limitRows = (rows: unknown[][], maxRows: number, maxCols: number) => {
+  const limited = rows.slice(0, maxRows).map((row) =>
+    row.slice(0, maxCols).map((cell) => (cell == null ? '' : String(cell))),
+  );
+  const truncated = rows.length > maxRows || rows.some((row) => row.length > maxCols);
+  return { rows: limited, truncated };
+};
+
+const parseCsvRows = (input: string, maxRows: number, maxCols: number) => {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+    if (char === '"') {
+      const nextChar = input[i + 1];
+      if (inQuotes && nextChar === '"') {
+        cell += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (char === '\r') continue;
+    if (char === '\n' && !inQuotes) {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = '';
+      if (rows.length >= maxRows) break;
+      continue;
+    }
+    if (char === ',' && !inQuotes) {
+      row.push(cell);
+      cell = '';
+      if (row.length >= maxCols) {
+        rows.push(row);
+        row = [];
+        cell = '';
+        if (rows.length >= maxRows) break;
+      }
+      continue;
+    }
+    cell += char;
+  }
+
+  if (row.length || cell) {
+    row.push(cell);
+    rows.push(row);
+  }
+
+  return limitRows(rows, maxRows, maxCols);
 };
 
 export function TextBox({
@@ -48,7 +159,15 @@ export function TextBox({
 
   const isEditing = editingId === box.id;
   const isImage = box.kind === 'image' && typeof box.src === 'string' && box.src.length > 0;
+  const isFile = box.kind === 'file' && typeof box.src === 'string' && box.src.length > 0;
+  const isMedia = isImage || isFile;
   const isSelected = selectedId === box.id || selectedIds.includes(box.id);
+  const fileName = typeof box.fileName === 'string' ? box.fileName.trim() : '';
+  const fileMime = typeof box.fileMime === 'string' ? box.fileMime.trim() : '';
+  const fileSize = Number.isFinite(box.fileSize) ? Number(box.fileSize) : null;
+  const fileExt = getFileExtension(fileName);
+  const fileBadge = fileExt ? fileExt.toUpperCase() : 'FILE';
+  const fileDisplayName = fileName || 'Document';
   const authorLabel = typeof box.authorName === 'string' ? box.authorName.trim() : '';
   const [isHovered, setIsHovered] = React.useState(false);
   const showAuthor = authorshipMode && !!authorLabel && (isHovered || isSelected);
@@ -58,6 +177,8 @@ export function TextBox({
   const lastTapRef = React.useRef<{ t: number; x: number; y: number } | null>(null);
 
   const [fontSize, setFontSize] = React.useState(14);
+  const [previewOpen, setPreviewOpen] = React.useState(false);
+  const [previewState, setPreviewState] = React.useState<PreviewState>({ status: 'idle' });
 
   React.useEffect(() => {
     if (!isEditing) editHistoryRef.current = false;
@@ -83,10 +204,116 @@ export function TextBox({
     }
   }, [isEditing]);
 
+  React.useEffect(() => {
+    if (!previewOpen || !isFile || !box.src) {
+      setPreviewState({ status: 'idle' });
+      return;
+    }
+    const src = box.src;
+    let cancelled = false;
+
+    const run = async () => {
+      const ext = getFileExtension(fileName);
+      const mime = fileMime.toLowerCase();
+      const isPdf = mime === 'application/pdf' || ext === 'pdf';
+      const isMarkdown = ext === 'md' || mime === 'text/markdown' || mime === 'text/x-markdown';
+      const isText = ext === 'txt' || mime.startsWith('text/plain');
+      const isJson = ext === 'json' || mime === 'application/json';
+      const isCsv = ext === 'csv' || mime === 'text/csv';
+      const isDocx = ext === 'docx' || mime.includes('wordprocessingml');
+      const isDoc = ext === 'doc' || mime === 'application/msword';
+      const isXlsx = ext === 'xlsx' || mime.includes('spreadsheet') || mime.includes('excel');
+
+      try {
+        if (isPdf) {
+          if (!cancelled) setPreviewState({ status: 'ready', kind: 'pdf', src });
+          return;
+        }
+        if (isMarkdown) {
+          const text = dataUrlToText(src);
+          if (!cancelled) setPreviewState({ status: 'ready', kind: 'markdown', text });
+          return;
+        }
+        if (isText) {
+          const text = dataUrlToText(src);
+          if (!cancelled) setPreviewState({ status: 'ready', kind: 'text', text });
+          return;
+        }
+        if (isJson) {
+          const raw = dataUrlToText(src);
+          let text = raw;
+          try {
+            text = JSON.stringify(JSON.parse(raw), null, 2);
+          } catch {
+            // Keep raw JSON if parsing fails.
+          }
+          if (!cancelled) setPreviewState({ status: 'ready', kind: 'json', text });
+          return;
+        }
+        if (isCsv) {
+          const text = dataUrlToText(src);
+          const { rows, truncated } = parseCsvRows(text, 200, 30);
+          if (!cancelled) setPreviewState({ status: 'ready', kind: 'table', rows, truncated });
+          return;
+        }
+        if (isDoc) {
+          if (!cancelled) setPreviewState({ status: 'error', message: 'Preview is not available for .doc files.' });
+          return;
+        }
+        if (isDocx) {
+          if (!cancelled) setPreviewState({ status: 'loading', kind: 'docx' });
+          const buffer = dataUrlToArrayBuffer(src);
+          const mammothModule = await import('mammoth/mammoth.browser');
+          const convert = typeof mammothModule.convertToHtml === 'function'
+            ? mammothModule.convertToHtml
+            : mammothModule.default?.convertToHtml;
+          if (!convert) throw new Error('docx_preview_unavailable');
+          const result = await convert({ arrayBuffer: buffer });
+          if (!cancelled) setPreviewState({ status: 'ready', kind: 'html', html: result.value || '' });
+          return;
+        }
+        if (isXlsx) {
+          if (!cancelled) setPreviewState({ status: 'loading', kind: 'xlsx' });
+          const buffer = dataUrlToArrayBuffer(src);
+          const xlsxModule = await import('xlsx');
+          const XLSX = xlsxModule.default ?? xlsxModule;
+          if (!XLSX.read || !XLSX.utils?.sheet_to_json) throw new Error('xlsx_preview_unavailable');
+          const workbook = XLSX.read(buffer, { type: 'array' });
+          const sheetName = workbook.SheetNames?.[0];
+          if (!sheetName) throw new Error('xlsx_preview_empty');
+          const sheet = workbook.Sheets[sheetName];
+          const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false }) as unknown[][];
+          const { rows, truncated } = limitRows(rawRows, 200, 30);
+          if (!cancelled) setPreviewState({ status: 'ready', kind: 'table', rows, truncated });
+          return;
+        }
+        if (!cancelled) setPreviewState({ status: 'error', message: 'Preview is not available for this file type.' });
+      } catch (err) {
+        if (!cancelled) {
+          setPreviewState({ status: 'error', message: 'Failed to load preview.' });
+        }
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [previewOpen, isFile, box.src, fileName, fileMime]);
+
+  React.useEffect(() => {
+    if (!previewOpen) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPreviewOpen(false);
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [previewOpen]);
+
   // Auto-fit font size to the current box (smooth updates, no jumping).
   React.useEffect(() => {
     const el = measureRef.current;
-    if (isImage) return;
+    if (isMedia) return;
     if (!el) return;
 
     // The container uses `box-sizing: border-box` and has a 1px border even when transparent.
@@ -126,7 +353,7 @@ export function TextBox({
     });
 
     return () => cancelAnimationFrame(raf);
-  }, [box.width, box.height, box.text]);
+  }, [box.width, box.height, box.text, isMedia]);
 
   // Auto-expand box height while editing (so text doesn't get cut off and doesn't require scrolling).
   React.useEffect(() => {
@@ -457,6 +684,10 @@ export function TextBox({
 
   const onDoubleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (isFile) {
+      setPreviewOpen(true);
+      return;
+    }
     if (isImage) return;
     setEditingId(box.id);
     selectTextBox(box.id);
@@ -589,7 +820,7 @@ export function TextBox({
         />
       ) : (
         <div
-          className={`${styles.display} ${(!isImage && !box.text) ? styles.placeholder : ''}`}
+          className={`${styles.display} ${(!isMedia && !box.text) ? styles.placeholder : ''}`}
           style={{ fontSize, lineHeight: 1.25 }}
           onPointerMove={onDragMove}
           onPointerUp={endDrag}
@@ -597,6 +828,30 @@ export function TextBox({
         >
           {isImage ? (
             <img className={styles.imageDisplay} src={box.src} alt="" draggable={false} />
+          ) : isFile ? (
+            <div className={styles.fileCard}>
+              <div className={styles.fileIcon}>
+                <FileText size={26} />
+                <span className={styles.fileBadge}>{fileBadge}</span>
+              </div>
+              <div className={styles.fileInfo}>
+                <div className={styles.fileName}>{fileDisplayName}</div>
+                <div className={styles.fileMeta}>
+                  {fileSize !== null ? formatBytes(fileSize) : 'Unknown size'}
+                </div>
+              </div>
+              <button
+                type="button"
+                className={styles.fileOpenButton}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPreviewOpen(true);
+                }}
+              >
+                Open
+              </button>
+            </div>
           ) : (
             (box.text || 'Type…')
           )}
@@ -611,6 +866,90 @@ export function TextBox({
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
         />
+      )}
+      {previewOpen && isFile && typeof document !== 'undefined' && box.src && createPortal(
+        <div
+          className={styles.previewOverlay}
+          onClick={() => setPreviewOpen(false)}
+        >
+          <div
+            className={styles.previewModal}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className={styles.previewHeader}>
+              <div className={styles.previewTitle}>
+                {fileDisplayName}
+                {fileSize !== null ? ` · ${formatBytes(fileSize)}` : ''}
+              </div>
+              <div className={styles.previewActions}>
+                <a
+                  className={styles.previewButton}
+                  href={box.src}
+                  download={fileDisplayName}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Download size={14} />
+                  Download
+                </a>
+                <button
+                  type="button"
+                  className={styles.previewButton}
+                  onClick={() => setPreviewOpen(false)}
+                >
+                  <X size={14} />
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className={styles.previewBody}>
+              {previewState.status === 'loading' && (
+                <div className={styles.previewLoading}>Loading preview…</div>
+              )}
+              {previewState.status === 'error' && (
+                <div className={styles.previewError}>{previewState.message}</div>
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'pdf' && (
+                <iframe className={styles.previewFrame} src={previewState.src} title={fileDisplayName} />
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'text' && (
+                <pre className={styles.previewText}>{previewState.text}</pre>
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'json' && (
+                <pre className={styles.previewText}>{previewState.text}</pre>
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'markdown' && (
+                <div className={styles.previewMarkdown}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewState.text}</ReactMarkdown>
+                </div>
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'html' && (
+                <div
+                  className={styles.previewDoc}
+                  dangerouslySetInnerHTML={{ __html: previewState.html }}
+                />
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'table' && (
+                <div className={styles.previewTableWrap}>
+                  <table className={styles.previewTable}>
+                    <tbody>
+                      {previewState.rows.map((row, rowIdx) => (
+                        <tr key={`${rowIdx}`}>
+                          {row.map((cell, cellIdx) => (
+                            <td key={`${rowIdx}-${cellIdx}`}>{cell}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {previewState.truncated && (
+                    <div className={styles.previewNotice}>Showing first 200 rows / 30 columns.</div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
