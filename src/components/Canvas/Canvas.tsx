@@ -1250,12 +1250,41 @@ export const Canvas: React.FC = () => {
             }
         };
 
+        const extFromMime = (mime: string) => {
+            const normalized = mime.toLowerCase().trim();
+            if (!normalized) return '';
+            if (normalized.startsWith('image/')) return normalized.split('/')[1] || '';
+            if (normalized.startsWith('text/')) return normalized.split('/')[1] || '';
+            const map: Record<string, string> = {
+                'application/pdf': 'pdf',
+                'application/json': 'json',
+                'application/msword': 'doc',
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+                'application/vnd.ms-excel': 'xls',
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+                'text/csv': 'csv',
+                'text/markdown': 'md',
+            };
+            return map[normalized] ?? '';
+        };
+
+        const createClipboardFile = (blob: Blob, index: number) => {
+            if (typeof File === 'undefined') return null;
+            const mime = blob.type || 'application/octet-stream';
+            const ext = extFromMime(mime);
+            const name = ext
+                ? `pasted-file-${Date.now()}-${index + 1}.${ext}`
+                : `pasted-file-${Date.now()}-${index + 1}`;
+            return new File([blob], name, { type: mime });
+        };
+
         const uploadClipboardImage = async (blob: Blob) => {
-            if (!sessionId) return null;
+            const currentSessionId = useStore.getState().sessionId;
+            if (!currentSessionId) return null;
             const ext = blob.type.split('/')[1] || 'png';
             const name = `clipboard-${Date.now()}.${ext}`;
             const file = new File([blob], name, { type: blob.type || 'image/png' });
-            const { attachments, rejected, failed } = await filesToAttachments([file], sessionId);
+            const { attachments, rejected, failed } = await filesToAttachments([file], currentSessionId);
             if (rejected.length) {
                 console.warn(`Clipboard image exceeded max size of ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
             }
@@ -1263,6 +1292,58 @@ export const Canvas: React.FC = () => {
                 console.warn('Clipboard image failed to upload.');
             }
             return attachments[0] ?? null;
+        };
+
+        const uploadClipboardFiles = async (files: File[], placement?: Placement) => {
+            if (!files.length) return false;
+            const currentSessionId = useStore.getState().sessionId;
+            if (!currentSessionId) return false;
+            const { attachments, rejected, failed } = await filesToAttachments(files, currentSessionId);
+            if (!attachments.length) {
+                if (rejected.length) {
+                    console.warn(`Some files were too large. Max size is ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
+                }
+                if (failed.length) {
+                    console.warn('Some files failed to upload.');
+                }
+                return false;
+            }
+
+            const base = resolvePlacement(placement);
+            attachments.forEach((attachment, index) => {
+                const nudge = index * 24;
+                const placementForItem: Placement = {
+                    pos: base.pos,
+                    offset: base.offset + nudge,
+                };
+                if (attachment.kind === 'image') {
+                    createImageBox(attachment.url ?? attachment.dataUrl ?? '', placementForItem);
+                } else {
+                    const width = clamp(280, 180, 420);
+                    const height = clamp(170, 120, 300);
+                    addTextBox({
+                        id: uuidv4(),
+                        x: placementForItem.pos.x + placementForItem.offset - width / 2,
+                        y: placementForItem.pos.y + placementForItem.offset - height / 2,
+                        width,
+                        height,
+                        text: '',
+                        kind: 'file',
+                        src: attachment.url ?? attachment.dataUrl,
+                        fileName: attachment.name,
+                        fileMime: attachment.mime,
+                        fileSize: attachment.size,
+                    });
+                }
+            });
+
+            if (rejected.length) {
+                console.warn(`Some files were too large. Max size is ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
+            }
+            if (failed.length) {
+                console.warn('Some files failed to upload.');
+            }
+            return true;
         };
 
         const doPasteSelection = (payload: ClipboardPayload | null) => {
@@ -1387,29 +1468,24 @@ export const Canvas: React.FC = () => {
         const pasteFromClipboardData = async (clipboardData: DataTransfer | null, localPayload: ClipboardPayload | null) => {
             if (!clipboardData) return false;
             const items = Array.from(clipboardData.items || []);
-            let imageBlob: Blob | null = null;
-
+            const files: File[] = [];
             for (const item of items) {
-                if (item.type.startsWith('image/')) {
-                    const file = item.getAsFile();
-                    if (file) {
-                        imageBlob = file;
-                        break;
+                if (item.kind !== 'file') continue;
+                const file = item.getAsFile();
+                if (file) files.push(file);
+            }
+
+            if (clipboardData.files?.length) {
+                for (const file of Array.from(clipboardData.files)) {
+                    if (!files.some((f) => f.name === file.name && f.size === file.size && f.type === file.type)) {
+                        files.push(file);
                     }
                 }
             }
 
-            if (!imageBlob && clipboardData.files?.length) {
-                const file = Array.from(clipboardData.files).find((f) => f.type.startsWith('image/'));
-                imageBlob = file ?? null;
-            }
-
-            if (imageBlob) {
-                const attachment = await uploadClipboardImage(imageBlob);
-                if (attachment?.url || attachment?.dataUrl) {
-                    createImageBox(attachment.url ?? attachment.dataUrl ?? '');
-                    return true;
-                }
+            if (files.length) {
+                const handled = await uploadClipboardFiles(files);
+                if (handled) return true;
             }
 
             const htmlText = clipboardData.getData('text/html');
@@ -1460,22 +1536,34 @@ export const Canvas: React.FC = () => {
                 try {
                     const items = await navigator.clipboard.read();
                     let imageBlob: Blob | null = null;
+                    const fileBlobs: File[] = [];
                     let htmlText: string | null = null;
                     let plainText: string | null = null;
                     let uriText: string | null = null;
 
                     for (const item of items) {
                         for (const type of item.types) {
-                            if (!imageBlob && type.startsWith('image/')) {
-                                imageBlob = await item.getType(type);
-                            } else if (!htmlText && type === 'text/html') {
+                            if (!htmlText && type === 'text/html') {
                                 htmlText = await item.getType(type).then((b) => b.text());
                             } else if (!plainText && type === 'text/plain') {
                                 plainText = await item.getType(type).then((b) => b.text());
                             } else if (!uriText && type === 'text/uri-list') {
                                 uriText = await item.getType(type).then((b) => b.text());
+                            } else if (type !== 'text/html' && type !== 'text/plain' && type !== 'text/uri-list') {
+                                const blob = await item.getType(type);
+                                const file = createClipboardFile(blob, fileBlobs.length);
+                                if (file) {
+                                    fileBlobs.push(file);
+                                } else if (!imageBlob && type.startsWith('image/')) {
+                                    imageBlob = blob;
+                                }
                             }
                         }
+                    }
+
+                    if (fileBlobs.length) {
+                        const handled = await uploadClipboardFiles(fileBlobs);
+                        if (handled) return;
                     }
 
                     const uriLine = uriText
