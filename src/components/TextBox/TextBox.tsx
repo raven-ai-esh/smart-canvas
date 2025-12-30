@@ -16,13 +16,15 @@ const INNER_PAD_Y = 16; // top+bottom (8+8)
 const BORDER_BOX_SHRINK = 2; // 1px border on each side with box-sizing: border-box
 const LONG_PRESS_MS = 500;
 const TOUCH_DRAG_THRESHOLD = 8;
+const MAX_PDF_PREVIEW_BYTES = 10 * 1024 * 1024;
+const MAX_MARKDOWN_RENDER_CHARS = 20_000;
 
 type PreviewState =
   | { status: 'idle' }
   | { status: 'loading'; kind: string }
   | { status: 'error'; message: string }
   | { status: 'ready'; kind: 'pdf'; src: string }
-  | { status: 'ready'; kind: 'text' | 'markdown' | 'json'; text: string }
+  | { status: 'ready'; kind: 'text' | 'markdown' | 'json'; text: string; truncated?: boolean }
   | { status: 'ready'; kind: 'table'; rows: string[][]; truncated: boolean }
   | { status: 'ready'; kind: 'html'; html: string };
 
@@ -44,111 +46,10 @@ const getFileExtension = (name: string) => {
   return trimmed.slice(idx + 1).toLowerCase();
 };
 
-const dataUrlToText = (dataUrl: string) => {
-  const commaIdx = dataUrl.indexOf(',');
-  if (commaIdx === -1) return '';
-  const meta = dataUrl.slice(0, commaIdx);
-  const payload = dataUrl.slice(commaIdx + 1);
-  if (meta.includes(';base64')) {
-    const binary = atob(payload);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i += 1) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return new TextDecoder('utf-8').decode(bytes);
-  }
-  return decodeURIComponent(payload);
-};
+const yieldToUi = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-const dataUrlToArrayBuffer = (dataUrl: string) => {
-  const commaIdx = dataUrl.indexOf(',');
-  if (commaIdx === -1) return new ArrayBuffer(0);
-  const meta = dataUrl.slice(0, commaIdx);
-  const payload = dataUrl.slice(commaIdx + 1);
-  if (meta.includes(';base64')) {
-    const binary = atob(payload);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i += 1) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes.buffer;
-  }
-  const text = decodeURIComponent(payload);
-  return new TextEncoder().encode(text).buffer;
-};
-
-const isDataUrl = (value: string) => value.startsWith('data:');
-
-const sourceToText = async (src: string) => {
-  if (isDataUrl(src)) return dataUrlToText(src);
-  const res = await fetch(src, { credentials: 'include' });
-  if (!res.ok) throw new Error('preview_fetch_failed');
-  return res.text();
-};
-
-const sourceToArrayBuffer = async (src: string) => {
-  if (isDataUrl(src)) return dataUrlToArrayBuffer(src);
-  const res = await fetch(src, { credentials: 'include' });
-  if (!res.ok) throw new Error('preview_fetch_failed');
-  return res.arrayBuffer();
-};
-
-const limitRows = (rows: unknown[][], maxRows: number, maxCols: number) => {
-  const limited = rows.slice(0, maxRows).map((row) =>
-    row.slice(0, maxCols).map((cell) => (cell == null ? '' : String(cell))),
-  );
-  const truncated = rows.length > maxRows || rows.some((row) => row.length > maxCols);
-  return { rows: limited, truncated };
-};
-
-const parseCsvRows = (input: string, maxRows: number, maxCols: number) => {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < input.length; i += 1) {
-    const char = input[i];
-    if (char === '"') {
-      const nextChar = input[i + 1];
-      if (inQuotes && nextChar === '"') {
-        cell += '"';
-        i += 1;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-    if (char === '\r') continue;
-    if (char === '\n' && !inQuotes) {
-      row.push(cell);
-      rows.push(row);
-      row = [];
-      cell = '';
-      if (rows.length >= maxRows) break;
-      continue;
-    }
-    if (char === ',' && !inQuotes) {
-      row.push(cell);
-      cell = '';
-      if (row.length >= maxCols) {
-        rows.push(row);
-        row = [];
-        cell = '';
-        if (rows.length >= maxRows) break;
-      }
-      continue;
-    }
-    cell += char;
-  }
-
-  if (row.length || cell) {
-    row.push(cell);
-    rows.push(row);
-  }
-
-  return limitRows(rows, maxRows, maxCols);
-};
+const createPreviewWorker = () =>
+  new Worker(new URL('../../workers/filePreview.worker.ts', import.meta.url), { type: 'module' });
 
 export function TextBox({
   box,
@@ -195,6 +96,8 @@ export function TextBox({
   const [fontSize, setFontSize] = React.useState(14);
   const [previewOpen, setPreviewOpen] = React.useState(false);
   const [previewState, setPreviewState] = React.useState<PreviewState>({ status: 'idle' });
+  const previewWorkerRef = React.useRef<Worker | null>(null);
+  const previewRequestRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     if (!isEditing) editHistoryRef.current = false;
@@ -222,11 +125,18 @@ export function TextBox({
 
   React.useEffect(() => {
     if (!previewOpen || !isFile || !box.src) {
+      if (previewWorkerRef.current) {
+        previewWorkerRef.current.terminate();
+        previewWorkerRef.current = null;
+      }
+      previewRequestRef.current = null;
       setPreviewState({ status: 'idle' });
       return;
     }
     const src = box.src;
     let cancelled = false;
+    const controller = new AbortController();
+    const { signal } = controller;
 
     const run = async () => {
       const ext = getFileExtension(fileName);
@@ -242,70 +152,76 @@ export function TextBox({
 
       try {
         if (isPdf) {
-          if (!cancelled) setPreviewState({ status: 'ready', kind: 'pdf', src });
-          return;
-        }
-        if (isMarkdown) {
-          const text = await sourceToText(src);
-          if (!cancelled) setPreviewState({ status: 'ready', kind: 'markdown', text });
-          return;
-        }
-        if (isText) {
-          const text = await sourceToText(src);
-          if (!cancelled) setPreviewState({ status: 'ready', kind: 'text', text });
-          return;
-        }
-        if (isJson) {
-          const raw = await sourceToText(src);
-          let text = raw;
-          try {
-            text = JSON.stringify(JSON.parse(raw), null, 2);
-          } catch {
-            // Keep raw JSON if parsing fails.
+          if (!cancelled) {
+            if (Number.isFinite(fileSize) && fileSize && fileSize > MAX_PDF_PREVIEW_BYTES) {
+              setPreviewState({ status: 'error', message: 'Preview is disabled for large PDF files. Download instead.' });
+            } else {
+              setPreviewState({ status: 'ready', kind: 'pdf', src });
+            }
           }
-          if (!cancelled) setPreviewState({ status: 'ready', kind: 'json', text });
-          return;
-        }
-        if (isCsv) {
-          const text = await sourceToText(src);
-          const { rows, truncated } = parseCsvRows(text, 200, 30);
-          if (!cancelled) setPreviewState({ status: 'ready', kind: 'table', rows, truncated });
           return;
         }
         if (isDoc) {
           if (!cancelled) setPreviewState({ status: 'error', message: 'Preview is not available for .doc files.' });
           return;
         }
-        if (isDocx) {
-          if (!cancelled) setPreviewState({ status: 'loading', kind: 'docx' });
-          const buffer = await sourceToArrayBuffer(src);
-          const mammothModule = await import('mammoth/mammoth.browser');
-          const convert = typeof mammothModule.convertToHtml === 'function'
-            ? mammothModule.convertToHtml
-            : mammothModule.default?.convertToHtml;
-          if (!convert) throw new Error('docx_preview_unavailable');
-          const result = await convert({ arrayBuffer: buffer });
-          if (!cancelled) setPreviewState({ status: 'ready', kind: 'html', html: result.value || '' });
-          return;
-        }
-        if (isXlsx) {
-          if (!cancelled) setPreviewState({ status: 'loading', kind: 'xlsx' });
-          const buffer = await sourceToArrayBuffer(src);
-          const xlsxModule = await import('xlsx');
-          const XLSX = xlsxModule.default ?? xlsxModule;
-          if (!XLSX.read || !XLSX.utils?.sheet_to_json) throw new Error('xlsx_preview_unavailable');
-          const workbook = XLSX.read(buffer, { type: 'array' });
-          const sheetName = workbook.SheetNames?.[0];
-          if (!sheetName) throw new Error('xlsx_preview_empty');
-          const sheet = workbook.Sheets[sheetName];
-          const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false }) as unknown[][];
-          const { rows, truncated } = limitRows(rawRows, 200, 30);
-          if (!cancelled) setPreviewState({ status: 'ready', kind: 'table', rows, truncated });
-          return;
-        }
-        if (!cancelled) setPreviewState({ status: 'error', message: 'Preview is not available for this file type.' });
-      } catch (err) {
         if (!cancelled) {
+          setPreviewState({ status: 'loading', kind: isXlsx ? 'xlsx' : isDocx ? 'docx' : isCsv ? 'table' : isJson ? 'json' : isMarkdown ? 'markdown' : isText ? 'text' : 'file' });
+        }
+        await yieldToUi();
+        if (cancelled) return;
+
+        if (previewWorkerRef.current) {
+          previewWorkerRef.current.terminate();
+        }
+        const worker = createPreviewWorker();
+        previewWorkerRef.current = worker;
+        const requestId = typeof crypto?.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        previewRequestRef.current = requestId;
+
+        worker.onmessage = (evt) => {
+          const msg = evt.data;
+          if (!msg || msg.id !== previewRequestRef.current) return;
+          if (msg.status === 'error') {
+            setPreviewState({ status: 'error', message: msg.message || 'Failed to load preview.' });
+            return;
+          }
+          if (msg.status === 'ready' && msg.kind === 'pdf') {
+            setPreviewState({ status: 'ready', kind: 'pdf', src: msg.src });
+            return;
+          }
+          if (msg.status === 'ready' && (msg.kind === 'text' || msg.kind === 'markdown' || msg.kind === 'json')) {
+            setPreviewState({ status: 'ready', kind: msg.kind, text: msg.text ?? '', truncated: !!msg.truncated });
+            return;
+          }
+          if (msg.status === 'ready' && msg.kind === 'table') {
+            setPreviewState({ status: 'ready', kind: 'table', rows: Array.isArray(msg.rows) ? msg.rows : [], truncated: !!msg.truncated });
+            return;
+          }
+          if (msg.status === 'ready' && msg.kind === 'html') {
+            setPreviewState({ status: 'ready', kind: 'html', html: msg.html ?? '' });
+            return;
+          }
+          setPreviewState({ status: 'error', message: 'Failed to load preview.' });
+        };
+
+        worker.onerror = () => {
+          if (!cancelled) setPreviewState({ status: 'error', message: 'Failed to load preview.' });
+        };
+
+        worker.postMessage({
+          id: requestId,
+          src,
+          fileName,
+          fileMime,
+          fileSize,
+          kind: isXlsx ? 'xlsx' : isDocx ? 'docx' : isCsv ? 'csv' : isJson ? 'json' : isMarkdown ? 'markdown' : isText ? 'text' : 'file',
+        });
+      } catch (err) {
+        const aborted = (err instanceof DOMException && err.name === 'AbortError') || signal.aborted;
+        if (!cancelled && !aborted) {
           setPreviewState({ status: 'error', message: 'Failed to load preview.' });
         }
       }
@@ -314,6 +230,12 @@ export function TextBox({
     run();
     return () => {
       cancelled = true;
+      controller.abort();
+      if (previewWorkerRef.current) {
+        previewWorkerRef.current.terminate();
+        previewWorkerRef.current = null;
+      }
+      previewRequestRef.current = null;
     };
   }, [previewOpen, isFile, box.src, fileName, fileMime]);
 
@@ -884,10 +806,7 @@ export function TextBox({
         />
       )}
       {previewOpen && isFile && typeof document !== 'undefined' && box.src && createPortal(
-        <div
-          className={styles.previewOverlay}
-          onClick={() => setPreviewOpen(false)}
-        >
+        <div className={styles.previewOverlay}>
           <div
             className={styles.previewModal}
             onClick={(e) => e.stopPropagation()}
@@ -919,7 +838,10 @@ export function TextBox({
             </div>
             <div className={styles.previewBody}>
               {previewState.status === 'loading' && (
-                <div className={styles.previewLoading}>Loading preview…</div>
+                <div className={styles.previewLoading}>
+                  <span className={styles.previewSpinner} aria-hidden="true" />
+                  Loading preview…
+                </div>
               )}
               {previewState.status === 'error' && (
                 <div className={styles.previewError}>{previewState.message}</div>
@@ -928,15 +850,34 @@ export function TextBox({
                 <iframe className={styles.previewFrame} src={previewState.src} title={fileDisplayName} />
               )}
               {previewState.status === 'ready' && previewState.kind === 'text' && (
-                <pre className={styles.previewText}>{previewState.text}</pre>
+                <>
+                  <pre className={styles.previewText}>{previewState.text}</pre>
+                  {previewState.truncated && (
+                    <div className={styles.previewNotice}>Preview truncated. Download for full content.</div>
+                  )}
+                </>
               )}
               {previewState.status === 'ready' && previewState.kind === 'json' && (
-                <pre className={styles.previewText}>{previewState.text}</pre>
+                <>
+                  <pre className={styles.previewText}>{previewState.text}</pre>
+                  {previewState.truncated && (
+                    <div className={styles.previewNotice}>Preview truncated. Download for full content.</div>
+                  )}
+                </>
               )}
               {previewState.status === 'ready' && previewState.kind === 'markdown' && (
-                <div className={styles.previewMarkdown}>
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewState.text}</ReactMarkdown>
-                </div>
+                <>
+                  {previewState.text.length > MAX_MARKDOWN_RENDER_CHARS ? (
+                    <pre className={styles.previewText}>{previewState.text}</pre>
+                  ) : (
+                    <div className={styles.previewMarkdown}>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewState.text}</ReactMarkdown>
+                    </div>
+                  )}
+                  {previewState.truncated && (
+                    <div className={styles.previewNotice}>Preview truncated. Download for full content.</div>
+                  )}
+                </>
               )}
               {previewState.status === 'ready' && previewState.kind === 'html' && (
                 <div
