@@ -4,7 +4,7 @@ import { Node } from '../Node/Node';
 import { Edge, ConnectionLine, LayerBridgeEdge } from '../Edge/Edge';
 import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
-import { Link2, MessageCircle, Paperclip, X, Zap, ZapOff } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpToLine, Link2, MessageCircle, Paperclip, X, Zap, ZapOff } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
 import type { Attachment, Comment, EdgeData, NodeData, TextBox as TextBoxType } from '../../types';
 import { debugLog } from '../../utils/debug';
@@ -13,6 +13,7 @@ import { SnowOverlay } from '../Snow/SnowOverlay';
 import { hashString } from '../../utils/guestIdentity';
 import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES } from '../../utils/attachments';
 import { DEFAULT_LAYER_ID } from '../../utils/layers';
+import { collectLayerStackEntries, sortLayerStackEntries } from '../../utils/stacking';
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
@@ -3092,6 +3093,23 @@ export const Canvas: React.FC = () => {
         return map;
     }, [visibleComments]);
     const showCommentLayer = commentsMode || !!draftComment || !!openCommentId;
+    const orderedVisibleLayers = useMemo(
+        () => layers.filter((layer) => visibleLayerIds.has(layer.id)),
+        [layers, visibleLayerIds],
+    );
+    const stackedItems = useMemo(() => {
+        const items: Array<ReturnType<typeof collectLayerStackEntries>[number]> = [];
+        orderedVisibleLayers.forEach((layer) => {
+            const entries = sortLayerStackEntries(collectLayerStackEntries({
+                nodes: visibleNodes,
+                textBoxes: visibleTextBoxes,
+                comments: rootComments,
+                layerId: layer.id,
+            }));
+            items.push(...entries);
+        });
+        return items;
+    }, [orderedVisibleLayers, rootComments, visibleNodes, visibleTextBoxes]);
     const getCommentLabel = (comment: Comment) => {
         const name = String(comment.authorName ?? 'Guest').trim();
         return name || 'Guest';
@@ -3111,6 +3129,7 @@ export const Canvas: React.FC = () => {
         ? edges.find((edge) => edge.id === contextMenu.id) ?? null
         : null;
     const contextEdgeEnergyEnabled = contextEdge?.energyEnabled !== false;
+    const stackableContext = contextMenu?.kind === 'node' || contextMenu?.kind === 'textBox' || contextMenu?.kind === 'comment';
 
     return (
         <div
@@ -3246,6 +3265,74 @@ export const Canvas: React.FC = () => {
 	                                <X size={18} />
 	                            </button>
 	                        )}
+                            {stackableContext && (
+                                <>
+                                    <button
+                                        type="button"
+                                        className={styles.contextButton}
+                                        title="Bring to front"
+                                        data-interactive="true"
+                                        onPointerDown={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            if (contextMenu.id) {
+                                                useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'top');
+                                            }
+                                            setContextMenu(null);
+                                        }}
+                                    >
+                                        <ArrowUpToLine size={18} />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={styles.contextButton}
+                                        title="Move forward"
+                                        data-interactive="true"
+                                        onPointerDown={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            if (contextMenu.id) {
+                                                useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'up');
+                                            }
+                                            setContextMenu(null);
+                                        }}
+                                    >
+                                        <ArrowUp size={18} />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={styles.contextButton}
+                                        title="Move backward"
+                                        data-interactive="true"
+                                        onPointerDown={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            if (contextMenu.id) {
+                                                useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'down');
+                                            }
+                                            setContextMenu(null);
+                                        }}
+                                    >
+                                        <ArrowDown size={18} />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={styles.contextButton}
+                                        title="Send to back"
+                                        data-interactive="true"
+                                        onPointerDown={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            if (contextMenu.id) {
+                                                useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'bottom');
+                                            }
+                                            setContextMenu(null);
+                                        }}
+                                    >
+                                        <ArrowDownToLine size={18} />
+                                    </button>
+                                </>
+                            )}
                             {contextMenu.kind === 'edge' && contextEdge && (
                                 <button
                                     type="button"
@@ -3397,237 +3484,239 @@ export const Canvas: React.FC = () => {
                     zIndex: 1
                 } as React.CSSProperties}
             >
-	                {visibleTextBoxes.map((tb) => (
-	                    <TextBox
-	                        key={tb.id}
-	                        box={tb}
-	                        screenToWorld={screenToWorld}
-	                        snapMode={snapMode}
-	                        resolveSnap={resolveSnap}
-	                        clearAlignmentGuides={clearAlignmentGuides}
-	                        onRequestContextMenu={(args) => {
-	                            if (args.id === '__selection__') setContextMenu({ kind: 'selection', id: '__selection__', x: args.x, y: args.y });
-	                            else setContextMenu({ kind: 'textBox', id: args.id, x: args.x, y: args.y });
-	                        }}
-	                    />
-	                ))}
-                {visibleNodes.map((node) => (
-                    <div
-                        key={node.id}
-                        data-node-id={node.id}
-                    >
-                        <Node data={node} />
-                    </div>
-                ))}
-                {showCommentLayer && (
-                    <div className={styles.commentLayer} data-comment-ui="true" onContextMenu={handleCommentContextMenu}>
-                        {rootComments.map((comment) => {
-                            const anchor = resolveCommentAnchor(comment);
-                            if (!anchor) return null;
-                            const label = getCommentLabel(comment);
-                            const isOpen = openCommentId === comment.id;
-                            const isHover = hoverCommentId === comment.id;
-                            const replies = repliesByParent.get(comment.id) ?? [];
-                            const showBubble = isOpen || isHover;
-                            const avatarColor = getCommentColor(comment);
-                            return (
-                                <div
-                                    key={comment.id}
-                                    className={styles.commentItem}
-                                    style={{ left: anchor.x, top: anchor.y }}
-                                    data-comment-ui="true"
-                                    data-comment-id={comment.id}
-                                    onPointerDown={(e) => e.stopPropagation()}
-                                >
-                                    <button
-                                        type="button"
-                                        className={`${styles.commentAvatarButton} ${isOpen ? styles.commentAvatarActive : ''}`}
-                                        title={label}
-                                        data-comment-ui="true"
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                        onMouseEnter={() => setHoverCommentId(comment.id)}
-                                        onMouseLeave={() => setHoverCommentId(null)}
-                                        onClick={() => setOpenCommentId((prev) => (prev === comment.id ? null : comment.id))}
-                                    >
-                                        {comment.avatarUrl ? (
-                                            <img className={styles.commentAvatarImg} src={comment.avatarUrl} alt={label} />
-                                        ) : (
-                                            <div className={styles.commentAvatarFallback} style={{ background: avatarColor }}>
-                                                {getCommentInitial(label)}
-                                            </div>
-                                        )}
-                                    </button>
-                                    <div
-                                        className={`${styles.commentBubble} ${showBubble ? styles.commentBubbleVisible : ''} ${isOpen ? styles.commentBubbleOpen : ''}`}
-                                        data-comment-ui="true"
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        <div className={styles.commentAuthor}>{label}</div>
-                                        {comment.text ? <div className={styles.commentText}>{comment.text}</div> : null}
-                                        {comment.attachments && comment.attachments.length > 0 && (
-                                            <div className={styles.commentAttachmentList}>
-                                                {comment.attachments.map((attachment) => (
-                                                    <a
-                                                        key={attachment.id}
-                                                        href={attachment.url ?? attachment.dataUrl ?? ''}
-                                                        download={attachment.name}
-                                                        className={styles.commentAttachmentFile}
-                                                    >
-                                                        <span className={styles.commentAttachmentName}>{attachment.name}</span>
-                                                        <span className={styles.commentAttachmentMeta}>{formatBytes(attachment.size)}</span>
-                                                    </a>
-                                                ))}
-                                            </div>
-                                        )}
-                                        {isOpen && replies.length > 0 && (
-                                            <div className={styles.commentReplies}>
-                                                {replies.map((reply) => {
-                                                    const replyLabel = getCommentLabel(reply);
-                                                    return (
-                                                        <div key={reply.id} className={styles.commentReply} data-comment-id={reply.id}>
-                                                            <span className={styles.commentReplyAuthor}>{replyLabel}</span>
-                                                            <span className={styles.commentReplyText}>{reply.text}</span>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        )}
-                                        {isOpen && (
-                                            me ? (
-                                                <div className={styles.commentReplyRow}>
-                                                    <input
-                                                        className={styles.commentReplyInput}
-                                                        type="text"
-                                                        value={replyDrafts[comment.id] ?? ''}
-                                                        placeholder="Reply..."
-                                                        data-comment-ui="true"
-                                                        onPointerDown={(e) => e.stopPropagation()}
-                                                        onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [comment.id]: e.target.value }))}
-                                                        onKeyDown={(e) => {
-                                                            if (e.key === 'Enter') {
-                                                                e.preventDefault();
-                                                                submitReply(comment);
-                                                            }
-                                                        }}
-                                                    />
-                                                    <button
-                                                        type="button"
-                                                        className={styles.commentReplyButton}
-                                                        data-comment-ui="true"
-                                                        onPointerDown={(e) => e.stopPropagation()}
-                                                        onClick={() => submitReply(comment)}
-                                                    >
-                                                        Reply
-                                                    </button>
-                                                </div>
-                                            ) : (
-                                                <div className={styles.commentReplyNotice}>Sign in to reply.</div>
-                                            )
-                                        )}
+                {stackedItems.map((entry) => {
+                    if (entry.kind === 'textBox') {
+                        const tb = entry.item as TextBoxType;
+                        return (
+                            <TextBox
+                                key={`textBox-${tb.id}`}
+                                box={tb}
+                                screenToWorld={screenToWorld}
+                                snapMode={snapMode}
+                                resolveSnap={resolveSnap}
+                                clearAlignmentGuides={clearAlignmentGuides}
+                                onRequestContextMenu={(args) => {
+                                    if (args.id === '__selection__') setContextMenu({ kind: 'selection', id: '__selection__', x: args.x, y: args.y });
+                                    else setContextMenu({ kind: 'textBox', id: args.id, x: args.x, y: args.y });
+                                }}
+                            />
+                        );
+                    }
+                    if (entry.kind === 'node') {
+                        const node = entry.item as NodeData;
+                        return (
+                            <div key={`node-${node.id}`} data-node-id={node.id}>
+                                <Node data={node} />
+                            </div>
+                        );
+                    }
+                    if (entry.kind !== 'comment' || !showCommentLayer) return null;
+                    const comment = entry.item as Comment;
+                    const anchor = resolveCommentAnchor(comment);
+                    if (!anchor) return null;
+                    const label = getCommentLabel(comment);
+                    const isOpen = openCommentId === comment.id;
+                    const isHover = hoverCommentId === comment.id;
+                    const replies = repliesByParent.get(comment.id) ?? [];
+                    const showBubble = isOpen || isHover;
+                    const avatarColor = getCommentColor(comment);
+                    return (
+                        <div
+                            key={`comment-${comment.id}`}
+                            className={styles.commentItem}
+                            style={{ left: anchor.x, top: anchor.y }}
+                            data-comment-ui="true"
+                            data-comment-id={comment.id}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onContextMenu={handleCommentContextMenu}
+                        >
+                            <button
+                                type="button"
+                                className={`${styles.commentAvatarButton} ${isOpen ? styles.commentAvatarActive : ''}`}
+                                title={label}
+                                data-comment-ui="true"
+                                onPointerDown={(e) => e.stopPropagation()}
+                                onMouseEnter={() => setHoverCommentId(comment.id)}
+                                onMouseLeave={() => setHoverCommentId(null)}
+                                onClick={() => setOpenCommentId((prev) => (prev === comment.id ? null : comment.id))}
+                            >
+                                {comment.avatarUrl ? (
+                                    <img className={styles.commentAvatarImg} src={comment.avatarUrl} alt={label} />
+                                ) : (
+                                    <div className={styles.commentAvatarFallback} style={{ background: avatarColor }}>
+                                        {getCommentInitial(label)}
                                     </div>
-                                </div>
-                            );
-                        })}
-                        {draftComment && (() => {
-                            const anchor = resolveCommentAnchor(draftComment);
-                            if (!anchor) return null;
-                            return (
-                                <div
-                                    className={styles.commentItem}
-                                    style={{ left: anchor.x, top: anchor.y }}
-                                    data-comment-ui="true"
-                                    onPointerDown={(e) => e.stopPropagation()}
-                                >
-                                    <div className={styles.commentDraft} data-comment-ui="true">
-                                        <textarea
-                                            ref={draftInputRef}
-                                            className={styles.commentDraftInput}
-                                            value={draftText}
-                                            placeholder="Write a comment..."
-                                            data-comment-ui="true"
-                                            onPointerDown={(e) => e.stopPropagation()}
-                                            onChange={(e) => setDraftText(e.target.value)}
-                                            onKeyDown={(e) => {
-                                                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                                                    e.preventDefault();
-                                                    submitDraftComment();
-                                                }
-                                            }}
-                                        />
-                                        {draftAttachments.length > 0 && (
-                                            <div className={styles.commentAttachmentList}>
-                                                {draftAttachments.map((attachment) => (
-                                                    <div key={attachment.id} className={styles.commentAttachmentDraft}>
-                                                        <div className={styles.commentAttachmentFile}>
-                                                            <span className={styles.commentAttachmentName}>{attachment.name}</span>
-                                                            <span className={styles.commentAttachmentMeta}>{formatBytes(attachment.size)}</span>
-                                                        </div>
-                                                        <button
-                                                            type="button"
-                                                            className={styles.commentAttachmentRemove}
-                                                            data-comment-ui="true"
-                                                            onPointerDown={(e) => e.stopPropagation()}
-                                                            onClick={() => setDraftAttachments((prev) => prev.filter((a) => a.id !== attachment.id))}
-                                                        >
-                                                            Remove
-                                                        </button>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-                                        {draftNotice && (
-                                            <div className={styles.commentDraftNotice}>{draftNotice}</div>
-                                        )}
-                                        <div className={styles.commentDraftActions}>
-                                            <button
-                                                type="button"
-                                                className={styles.commentDraftButton}
-                                                data-comment-ui="true"
-                                                onPointerDown={(e) => e.stopPropagation()}
-                                                onClick={() => draftAttachInputRef.current?.click()}
+                                )}
+                            </button>
+                            <div
+                                className={`${styles.commentBubble} ${showBubble ? styles.commentBubbleVisible : ''} ${isOpen ? styles.commentBubbleOpen : ''}`}
+                                data-comment-ui="true"
+                                onPointerDown={(e) => e.stopPropagation()}
+                            >
+                                <div className={styles.commentAuthor}>{label}</div>
+                                {comment.text ? <div className={styles.commentText}>{comment.text}</div> : null}
+                                {comment.attachments && comment.attachments.length > 0 && (
+                                    <div className={styles.commentAttachmentList}>
+                                        {comment.attachments.map((attachment) => (
+                                            <a
+                                                key={attachment.id}
+                                                href={attachment.url ?? attachment.dataUrl ?? ''}
+                                                download={attachment.name}
+                                                className={styles.commentAttachmentFile}
                                             >
-                                                Attach
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className={styles.commentDraftButton}
+                                                <span className={styles.commentAttachmentName}>{attachment.name}</span>
+                                                <span className={styles.commentAttachmentMeta}>{formatBytes(attachment.size)}</span>
+                                            </a>
+                                        ))}
+                                    </div>
+                                )}
+                                {isOpen && replies.length > 0 && (
+                                    <div className={styles.commentReplies}>
+                                        {replies.map((reply) => {
+                                            const replyLabel = getCommentLabel(reply);
+                                            return (
+                                                <div key={reply.id} className={styles.commentReply} data-comment-id={reply.id}>
+                                                    <span className={styles.commentReplyAuthor}>{replyLabel}</span>
+                                                    <span className={styles.commentReplyText}>{reply.text}</span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                                {isOpen && (
+                                    me ? (
+                                        <div className={styles.commentReplyRow}>
+                                            <input
+                                                className={styles.commentReplyInput}
+                                                type="text"
+                                                value={replyDrafts[comment.id] ?? ''}
+                                                placeholder="Reply..."
                                                 data-comment-ui="true"
                                                 onPointerDown={(e) => e.stopPropagation()}
-                                                onClick={submitDraftComment}
-                                            >
-                                                Send
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className={styles.commentDraftButton}
-                                                data-comment-ui="true"
-                                                onPointerDown={(e) => e.stopPropagation()}
-                                                onClick={() => {
-                                                    setDraftComment(null);
-                                                    setDraftAttachments([]);
-                                                    setDraftNotice(null);
+                                                onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [comment.id]: e.target.value }))}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === 'Enter') {
+                                                        e.preventDefault();
+                                                        submitReply(comment);
+                                                    }
                                                 }}
+                                            />
+                                            <button
+                                                type="button"
+                                                className={styles.commentReplyButton}
+                                                data-comment-ui="true"
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                                onClick={() => submitReply(comment)}
                                             >
-                                                Cancel
+                                                Reply
                                             </button>
                                         </div>
-                                        <input
-                                            ref={draftAttachInputRef}
-                                            type="file"
-                                            multiple
-                                            className={styles.commentAttachmentInput}
-                                            onChange={(e) => {
-                                                handleDraftAttachmentInput(e.target.files);
-                                                e.currentTarget.value = '';
-                                            }}
-                                            data-comment-ui="true"
-                                        />
+                                    ) : (
+                                        <div className={styles.commentReplyNotice}>Sign in to reply.</div>
+                                    )
+                                )}
+                            </div>
+                        </div>
+                    );
+                })}
+                {showCommentLayer && draftComment && (() => {
+                    const anchor = resolveCommentAnchor(draftComment);
+                    if (!anchor) return null;
+                    return (
+                        <div
+                            className={styles.commentItem}
+                            style={{ left: anchor.x, top: anchor.y }}
+                            data-comment-ui="true"
+                            onPointerDown={(e) => e.stopPropagation()}
+                        >
+                            <div className={styles.commentDraft} data-comment-ui="true">
+                                <textarea
+                                    ref={draftInputRef}
+                                    className={styles.commentDraftInput}
+                                    value={draftText}
+                                    placeholder="Write a comment..."
+                                    data-comment-ui="true"
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    onChange={(e) => setDraftText(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                                            e.preventDefault();
+                                            submitDraftComment();
+                                        }
+                                    }}
+                                />
+                                {draftAttachments.length > 0 && (
+                                    <div className={styles.commentAttachmentList}>
+                                        {draftAttachments.map((attachment) => (
+                                            <div key={attachment.id} className={styles.commentAttachmentDraft}>
+                                                <div className={styles.commentAttachmentFile}>
+                                                    <span className={styles.commentAttachmentName}>{attachment.name}</span>
+                                                    <span className={styles.commentAttachmentMeta}>{formatBytes(attachment.size)}</span>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    className={styles.commentAttachmentRemove}
+                                                    data-comment-ui="true"
+                                                    onPointerDown={(e) => e.stopPropagation()}
+                                                    onClick={() => setDraftAttachments((prev) => prev.filter((a) => a.id !== attachment.id))}
+                                                >
+                                                    Remove
+                                                </button>
+                                            </div>
+                                        ))}
                                     </div>
+                                )}
+                                {draftNotice && (
+                                    <div className={styles.commentDraftNotice}>{draftNotice}</div>
+                                )}
+                                <div className={styles.commentDraftActions}>
+                                    <button
+                                        type="button"
+                                        className={styles.commentDraftButton}
+                                        data-comment-ui="true"
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                        onClick={() => draftAttachInputRef.current?.click()}
+                                    >
+                                        Attach
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={styles.commentDraftButton}
+                                        data-comment-ui="true"
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                        onClick={submitDraftComment}
+                                    >
+                                        Send
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={styles.commentDraftButton}
+                                        data-comment-ui="true"
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                        onClick={() => {
+                                            setDraftComment(null);
+                                            setDraftAttachments([]);
+                                            setDraftNotice(null);
+                                        }}
+                                    >
+                                        Cancel
+                                    </button>
                                 </div>
-                            );
-                        })()}
-                    </div>
-                )}
+                                <input
+                                    ref={draftAttachInputRef}
+                                    type="file"
+                                    multiple
+                                    className={styles.commentAttachmentInput}
+                                    onChange={(e) => {
+                                        handleDraftAttachmentInput(e.target.files);
+                                        e.currentTarget.value = '';
+                                    }}
+                                    data-comment-ui="true"
+                                />
+                            </div>
+                        </div>
+                    );
+                })()}
             </div>
         </div>
     );
