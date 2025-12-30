@@ -46,7 +46,7 @@ services:
       MCP_TECH_USER_ID: "${MCP_TECH_USER_ID:-raven-bot}"
       MCP_TECH_USER_NAME: "${MCP_TECH_USER_NAME:-Raven}"
       MCP_TECH_AVATAR_SEED: "${MCP_TECH_AVATAR_SEED:-raven-bot}"
-      MCP_AGENT_ALLOWED_TOOLS: "${MCP_AGENT_ALLOWED_TOOLS:-get_state,node,edge,textbox,comment,drawing,layers,list_canvas_participants,send_alert,focus_node,zoom,pan}"
+      MCP_AGENT_ALLOWED_TOOLS: "${MCP_AGENT_ALLOWED_TOOLS:-get_state,node,edge,textbox,file,image,comment,drawing,layers,list_canvas_participants,send_alert,focus_node,zoom,pan}"
       OPENAI_TIMEOUT_MS: "${OPENAI_TIMEOUT_MS:-600000}"
       AGENT_SERVICE_TIMEOUT_MS: "${AGENT_SERVICE_TIMEOUT_MS:-600000}"
       AGENT_SERVICE_URL: "${AGENT_SERVICE_URL:-http://agent:8001/run}"

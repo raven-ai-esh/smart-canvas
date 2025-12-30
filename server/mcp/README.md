@@ -1,6 +1,6 @@
 # MCP Canvas Server
 
-This MCP server exposes tools to control Smart Tracker canvas objects (nodes, edges, text boxes, comments, drawings) via the existing session sync WebSocket.
+This MCP server exposes tools to control Smart Tracker canvas objects (nodes, edges, text boxes, files, images, comments, drawings) via the existing session sync WebSocket.
 
 ## Run (stdio)
 
