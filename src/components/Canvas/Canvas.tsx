@@ -28,6 +28,39 @@ const ALIGN_SNAP_PX = 8;
 const FOCUS_RADIUS_X = 180;
 const FOCUS_RADIUS_Y = Math.round(FOCUS_RADIUS_X * 0.7);
 
+const canScrollInDirection = (el: HTMLElement, deltaX: number, deltaY: number) => {
+    const style = window.getComputedStyle(el);
+    const overflowY = style.overflowY;
+    const overflowX = style.overflowX;
+    if (deltaY !== 0 && (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay')) {
+        const maxScrollTop = el.scrollHeight - el.clientHeight;
+        if (maxScrollTop > 0) {
+            const atTop = el.scrollTop <= 0;
+            const atBottom = el.scrollTop >= maxScrollTop - 1;
+            if ((deltaY < 0 && !atTop) || (deltaY > 0 && !atBottom)) return true;
+        }
+    }
+    if (deltaX !== 0 && (overflowX === 'auto' || overflowX === 'scroll' || overflowX === 'overlay')) {
+        const maxScrollLeft = el.scrollWidth - el.clientWidth;
+        if (maxScrollLeft > 0) {
+            const atLeft = el.scrollLeft <= 0;
+            const atRight = el.scrollLeft >= maxScrollLeft - 1;
+            if ((deltaX < 0 && !atLeft) || (deltaX > 0 && !atRight)) return true;
+        }
+    }
+    return false;
+};
+
+const shouldAllowWheelScroll = (start: HTMLElement, boundary: HTMLElement | null, deltaX: number, deltaY: number) => {
+    let el: HTMLElement | null = start;
+    while (el) {
+        if (canScrollInDirection(el, deltaX, deltaY)) return true;
+        if (boundary && el === boundary) break;
+        el = el.parentElement;
+    }
+    return false;
+};
+
     type InteractionMode = 'idle' | 'panning' | 'draggingNode' | 'connecting' | 'textPlacing' | 'selecting';
 type AlignmentGuide = { axis: 'x' | 'y'; pos: number; length: number };
 type SnapAnchor = 'center' | 'topleft';
@@ -905,6 +938,27 @@ export const Canvas: React.FC = () => {
 		    };
 
     const handleWheel = useCallback((e: WheelEvent) => {
+        const target = e.target instanceof HTMLElement ? e.target : null;
+        if (target) {
+            const scrollLockRoot = target.closest('[data-scroll-lock="true"]');
+            if (scrollLockRoot instanceof HTMLElement) {
+                if (shouldAllowWheelScroll(target, containerRef.current, e.deltaX, e.deltaY)) {
+                    return;
+                }
+                e.preventDefault();
+                return;
+            }
+            const interactiveRoot = target.closest('[data-interactive="true"]');
+            const editableRoot = target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]');
+            const interactiveBoundary = interactiveRoot instanceof HTMLElement ? interactiveRoot : null;
+            const editableBoundary = editableRoot instanceof HTMLElement ? editableRoot : null;
+            if (interactiveBoundary || editableBoundary) {
+                const boundary = interactiveBoundary ?? editableBoundary ?? containerRef.current;
+                if (shouldAllowWheelScroll(target, boundary, e.deltaX, e.deltaY)) {
+                    return;
+                }
+            }
+        }
         e.preventDefault();
         const base = wheelPendingRef.current ?? canvasRef.current;
         if (e.ctrlKey || e.metaKey) {
