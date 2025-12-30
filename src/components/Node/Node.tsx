@@ -505,6 +505,7 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
                 <div
                     className={styles.editorPreview}
                     data-interactive="true"
+                    data-scroll-lock="true"
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={() => {
                         setEditing(true);
@@ -606,6 +607,7 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
                         <textarea
                             ref={textareaRef}
                             className={styles.noteContentInput}
+                            data-scroll-lock="true"
                             value={safeValue}
                             onChange={handleChange}
                             onBlur={handleBlur}

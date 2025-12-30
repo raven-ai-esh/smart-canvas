@@ -311,7 +311,7 @@
 
 .noteHeaderRow {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 10px;
@@ -502,9 +502,8 @@
     margin: 0;
     color: var(--text-primary);
     cursor: text;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    word-break: break-word;
 }
 
 .noteTitleInput {
