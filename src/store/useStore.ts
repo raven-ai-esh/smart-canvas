@@ -5,6 +5,7 @@ import { clampEnergy, computeEffectiveEnergy, relu } from '../utils/energy';
 import { debugLog } from '../utils/debug';
 import { getGuestIdentity } from '../utils/guestIdentity';
 import { DEFAULT_LAYER_ID, normalizeLayers, resolveLayerId } from '../utils/layers';
+import { collectLayerStackEntries, sortLayerStackEntries, type StackKind } from '../utils/stacking';
 
 type UndoSnapshot = {
     nodes: NodeData[];
@@ -14,6 +15,8 @@ type UndoSnapshot = {
     layers: LayerData[];
     tombstones: Tombstones;
 };
+
+type StackMoveAction = 'up' | 'down' | 'top' | 'bottom';
 
 const ts = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
 const clampProgress = (x: unknown) => Math.min(100, Math.max(0, Number.isFinite(Number(x)) ? Number(x) : 0));
@@ -200,6 +203,7 @@ interface AppState {
     deleteTextBox: (id: string) => void;
     addComment: (comment: Comment) => void;
     deleteComment: (id: string) => void;
+    moveStackItem: (kind: StackKind, id: string, action: StackMoveAction) => void;
 
     theme: 'dark' | 'light';
     toggleTheme: () => void;
@@ -314,6 +318,33 @@ const sanitizeSelections = (state: AppState, visibleLayerIds: Set<string>) => {
         selectedEdges: [],
         neighbors: {},
     };
+};
+
+const stackableLayerId = (item: { layerId?: string | null }) => (
+    typeof item.layerId === 'string' && item.layerId ? item.layerId : DEFAULT_LAYER_ID
+);
+
+const maxLayerZIndex = (state: Pick<AppState, 'nodes' | 'textBoxes' | 'comments'>, layerId: string) => {
+    const rootComments = state.comments.filter((comment) => !comment.parentId);
+    const entries = collectLayerStackEntries({
+        nodes: state.nodes,
+        textBoxes: state.textBoxes,
+        comments: rootComments,
+        layerId,
+    });
+    let max = -Infinity;
+    for (const entry of entries) {
+        if (typeof entry.zIndex === 'number' && Number.isFinite(entry.zIndex)) {
+            max = Math.max(max, entry.zIndex);
+        }
+    }
+    return max === -Infinity ? null : max;
+};
+
+const resolveStackItem = (state: Pick<AppState, 'nodes' | 'textBoxes' | 'comments'>, kind: StackKind, id: string) => {
+    if (kind === 'node') return state.nodes.find((node) => node.id === id) ?? null;
+    if (kind === 'textBox') return state.textBoxes.find((tb) => tb.id === id) ?? null;
+    return state.comments.find((comment) => comment.id === id) ?? null;
 };
 
 export const useStore = create<AppState>()(
@@ -647,6 +678,7 @@ export const useStore = create<AppState>()(
                 const now = Date.now();
                 const base = withAuthor(state, node);
                 const layerId = resolveLayerId(state.layers, base.layerId ?? state.activeLayerId);
+                const nextZ = maxLayerZIndex(state, layerId);
                 const legacyInWork = (base as { inWork?: boolean }).inWork;
                 const progress = base.type === 'task'
                     ? clampProgress(base.progress ?? progressFromStatus(base.status, legacyInWork))
@@ -655,6 +687,7 @@ export const useStore = create<AppState>()(
                 const normalized: NodeData = {
                     ...base,
                     layerId,
+                    zIndex: Number.isFinite(base.zIndex) ? base.zIndex : (nextZ !== null ? nextZ + 1 : undefined),
                     status,
                     progress,
                     createdAt: base.createdAt ?? now,
@@ -1066,9 +1099,11 @@ export const useStore = create<AppState>()(
                     const now = Date.now();
                     const base = withAuthor(state, tb);
                     const layerId = resolveLayerId(state.layers, base.layerId ?? state.activeLayerId);
+                    const nextZ = maxLayerZIndex(state, layerId);
                     const normalized: TextBox = {
                         ...base,
                         layerId,
+                        zIndex: Number.isFinite(base.zIndex) ? base.zIndex : (nextZ !== null ? nextZ + 1 : undefined),
                         createdAt: base.createdAt ?? now,
                         updatedAt: base.updatedAt ?? now,
                         kind: base.kind ?? 'text',
@@ -1142,10 +1177,13 @@ export const useStore = create<AppState>()(
                         inferredLayerId = tb?.layerId ?? null;
                     }
                     const layerId = resolveLayerId(state.layers, inferredLayerId ?? state.activeLayerId);
+                    const isRoot = !comment.parentId;
+                    const nextZ = isRoot ? maxLayerZIndex(state, layerId) : null;
                     const normalized: Comment = {
                         ...author,
                         ...comment,
                         layerId,
+                        zIndex: Number.isFinite(comment.zIndex) ? comment.zIndex : (nextZ !== null ? nextZ + 1 : undefined),
                         targetId: comment.targetId ?? null,
                         parentId: comment.parentId ?? null,
                         text,
@@ -1197,9 +1235,65 @@ export const useStore = create<AppState>()(
                     return { comments, tombstones };
                 }),
 
-	            theme: 'dark',
-	            toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
-	            snowEnabled: false,
+            moveStackItem: (kind, id, action) => set((state) => {
+                if (!id) return {};
+                const target = resolveStackItem(state, kind, id);
+                if (!target) return {};
+                const layerId = stackableLayerId(target);
+                const rootComments = state.comments.filter((comment) => !comment.parentId);
+                const entries = sortLayerStackEntries(collectLayerStackEntries({
+                    nodes: state.nodes,
+                    textBoxes: state.textBoxes,
+                    comments: rootComments,
+                    layerId,
+                }));
+                if (entries.length < 2) return {};
+                const index = entries.findIndex((entry) => entry.kind === kind && entry.id === id);
+                if (index < 0) return {};
+                let nextIndex = index;
+                if (action === 'up') nextIndex = Math.min(entries.length - 1, index + 1);
+                if (action === 'down') nextIndex = Math.max(0, index - 1);
+                if (action === 'top') nextIndex = entries.length - 1;
+                if (action === 'bottom') nextIndex = 0;
+                if (nextIndex === index) return {};
+
+                const nextEntries = entries.slice();
+                const [moved] = nextEntries.splice(index, 1);
+                nextEntries.splice(nextIndex, 0, moved);
+
+                const nodeUpdates = new Map<string, number>();
+                const textBoxUpdates = new Map<string, number>();
+                const commentUpdates = new Map<string, number>();
+                nextEntries.forEach((entry, idx) => {
+                    if (entry.item.zIndex === idx) return;
+                    if (entry.kind === 'node') nodeUpdates.set(entry.id, idx);
+                    else if (entry.kind === 'textBox') textBoxUpdates.set(entry.id, idx);
+                    else commentUpdates.set(entry.id, idx);
+                });
+
+                if (!nodeUpdates.size && !textBoxUpdates.size && !commentUpdates.size) return {};
+                const now = Date.now();
+                const nodes = nodeUpdates.size
+                    ? state.nodes.map((node) => (
+                        nodeUpdates.has(node.id) ? { ...node, zIndex: nodeUpdates.get(node.id), updatedAt: now } : node
+                    ))
+                    : state.nodes;
+                const textBoxes = textBoxUpdates.size
+                    ? state.textBoxes.map((tb) => (
+                        textBoxUpdates.has(tb.id) ? { ...tb, zIndex: textBoxUpdates.get(tb.id), updatedAt: now } : tb
+                    ))
+                    : state.textBoxes;
+                const comments = commentUpdates.size
+                    ? state.comments.map((comment) => (
+                        commentUpdates.has(comment.id) ? { ...comment, zIndex: commentUpdates.get(comment.id), updatedAt: now } : comment
+                    ))
+                    : state.comments;
+                return { ...pushHistoryReducer(state), nodes, textBoxes, comments };
+            }),
+
+            theme: 'dark',
+            toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
+            snowEnabled: false,
 	            toggleSnow: () => set((state) => ({ snowEnabled: !state.snowEnabled })),
 
 	        }),

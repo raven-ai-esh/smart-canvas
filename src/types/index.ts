@@ -24,6 +24,7 @@ export interface NodeData {
   content: string;
   type: NodeType;
   layerId?: string;
+  zIndex?: number;
   x: number;
   y: number;
   createdAt?: number; // epoch ms
@@ -74,6 +75,7 @@ export interface Drawing {
 export interface TextBox {
   id: string;
   layerId?: string;
+  zIndex?: number;
   x: number; // world
   y: number; // world
   width: number; // world
@@ -96,6 +98,7 @@ export interface Comment {
   targetId?: string | null;
   parentId?: string | null;
   layerId?: string;
+  zIndex?: number;
   x?: number; // world (for canvas comments)
   y?: number; // world (for canvas comments)
   text: string;
