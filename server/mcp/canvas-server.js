@@ -24,6 +24,7 @@ const nowTs = () => Date.now();
 const ts = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
 const tombstoneFor = (now, updatedAt) => Math.max(now, ts(updatedAt) + 1);
 const AI_AUTHOR_NAME = 'Raven';
+const DEFAULT_LAYER_ID = 'layer-default';
 const MCP_TECH_USER_ID = process.env.MCP_TECH_USER_ID ?? 'raven-bot';
 const MCP_WS_ACK_TIMEOUT_MS = Number(process.env.MCP_WS_ACK_TIMEOUT_MS ?? 4000);
 const MCP_AUTH_CACHE_TTL_MS = Number(process.env.MCP_AUTH_CACHE_TTL_MS ?? 60_000);
@@ -666,18 +667,49 @@ const registerTool = (name, meta, handler) => {
   return server.registerTool(name, meta, wrapped);
 };
 
-const summarizeNode = (node) => ({
-  id: node.id,
-  title: node.title,
-  type: node.type,
-  status: node.status,
-  progress: node.progress,
-  authorId: node.authorId ?? null,
-  authorName: node.authorName ?? null,
-  mentions: Array.isArray(node.mentions) ? node.mentions : [],
-  createdAt: node.createdAt ?? null,
-  updatedAt: node.updatedAt ?? null,
+const buildLayerById = (layers) => {
+  const map = new Map();
+  if (!Array.isArray(layers)) return map;
+  layers.forEach((layer) => {
+    if (!layer || typeof layer !== 'object') return;
+    const id = typeof layer.id === 'string' ? layer.id : null;
+    if (!id) return;
+    map.set(id, layer);
+  });
+  return map;
+};
+
+const resolveNodeLayerId = (node) => {
+  const layerId = typeof node?.layerId === 'string' ? node.layerId : null;
+  return layerId || DEFAULT_LAYER_ID;
+};
+
+const summarizeLayer = (layer) => ({
+  id: layer?.id ?? null,
+  name: layer?.name ?? null,
+  visible: layer?.visible !== false,
+  createdAt: layer?.createdAt ?? null,
+  updatedAt: layer?.updatedAt ?? null,
 });
+
+const summarizeNode = (node, layerById) => {
+  const layerId = resolveNodeLayerId(node);
+  const layerName = layerById?.get(layerId)?.name ?? null;
+  return {
+    id: node.id,
+    title: node.title,
+    type: node.type,
+    status: node.status,
+    progress: node.progress,
+    layerId,
+    layerName,
+    authorId: node.authorId ?? null,
+    authorName: node.authorName ?? null,
+    mentions: Array.isArray(node.mentions) ? node.mentions : [],
+    createdAt: node.createdAt ?? null,
+    updatedAt: node.updatedAt ?? null,
+  };
+};
 
 const summarizeEdge = (edge) => ({
   id: edge.id,
@@ -692,11 +724,15 @@ const summarizeState = (state, limit) => {
   const drawings = Array.isArray(state?.drawings) ? state.drawings : [];
   const textBoxes = Array.isArray(state?.textBoxes) ? state.textBoxes : [];
   const comments = Array.isArray(state?.comments) ? state.comments : [];
+  const layers = Array.isArray(state?.layers) ? state.layers : [];
+  const layerById = buildLayerById(layers);
   const limitedNodes = limitList(nodes, limit);
   const limitedEdges = limitList(edges, limit);
+  const limitedLayers = limitList(layers, limit);
   return {
     theme: state?.theme ?? 'dark',
-    nodes: limitedNodes.items.map(summarizeNode),
+    layers: limitedLayers.items.map(summarizeLayer),
+    nodes: limitedNodes.items.map((node) => summarizeNode(node, layerById)),
     edges: limitedEdges.items.map(summarizeEdge),
     counts: {
       nodes: nodes.length,
@@ -704,10 +740,12 @@ const summarizeState = (state, limit) => {
       drawings: drawings.length,
       textBoxes: textBoxes.length,
       comments: comments.length,
+      layers: layers.length,
     },
     truncated: {
       nodes: limitedNodes.truncated,
       edges: limitedEdges.truncated,
+      layers: limitedLayers.truncated,
     },
     limit: limitedNodes.limit,
   };
@@ -793,6 +831,167 @@ registerTool(
 );
 
 registerTool(
+  'layers',
+  {
+    title: 'Layers',
+    description: 'Creates, reads, updates, or deletes canvas layers.',
+    inputSchema: {
+      action: CrudAction,
+      limit: z.number().optional(),
+      id: z.string().optional(),
+      name: z.string().optional(),
+      visible: z.boolean().optional(),
+      patch: z.any().optional(),
+    },
+    outputSchema: {
+      action: CrudAction,
+      layer: z.any().optional(),
+      layers: z.array(z.any()).optional(),
+      total: z.number().optional(),
+      limit: z.number().optional(),
+      truncated: z.boolean().optional(),
+      deletedLayerId: z.string().optional(),
+      deletedCounts: z.any().optional(),
+      sessionId: z.string().optional(),
+      requestId: z.string().optional(),
+    },
+  },
+  async (input) => {
+    const action = input.action;
+    if (action === 'read') {
+      const state = await client.fetchState(input.sessionId);
+      const layers = Array.isArray(state?.layers) ? state.layers : [];
+      if (input.id) {
+        const layer = layers.find((l) => l.id === input.id) ?? null;
+        return toolResult({ action, layer: layer ? summarizeLayer(layer) : null });
+      }
+      const limited = limitList(layers, input.limit);
+      return toolResult({
+        action,
+        layers: limited.items.map(summarizeLayer),
+        total: limited.total,
+        limit: limited.limit,
+        truncated: limited.truncated,
+      });
+    }
+
+    if (action === 'create') {
+      const state = await client.fetchState(input.sessionId);
+      const layers = Array.isArray(state?.layers) ? state.layers : [];
+      const name = typeof input.name === 'string' && input.name.trim()
+        ? input.name.trim()
+        : `Layer ${layers.length + 1}`;
+      const id = input.id ?? randomUUID();
+      if (layers.some((layer) => layer.id === id)) throw new Error('layer_id_exists');
+      const now = nowTs();
+      const layer = {
+        id,
+        name,
+        visible: input.visible !== false,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const patch = emptyPatch();
+      patch.layers.push(layer);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, layer: summarizeLayer(layer), ...result });
+    }
+
+    if (action === 'update') {
+      if (!input.id) throw new Error('id_required');
+      const patch = input.patch && typeof input.patch === 'object' ? { ...input.patch } : {};
+      if (typeof input.name === 'string') patch.name = input.name;
+      if (typeof input.visible === 'boolean') patch.visible = input.visible;
+      if (!Object.keys(patch).length) throw new Error('patch_required');
+      if (Object.prototype.hasOwnProperty.call(patch, 'name')) {
+        if (typeof patch.name !== 'string' || !patch.name.trim()) throw new Error('name_required');
+        patch.name = patch.name.trim();
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'visible') && typeof patch.visible !== 'boolean') {
+        throw new Error('visible_required');
+      }
+      const state = await client.fetchState(input.sessionId);
+      const current = state?.layers?.find((layer) => layer.id === input.id);
+      if (!current) throw new Error('layer_not_found');
+      const next = { ...current, ...patch, id: input.id, updatedAt: nowTs() };
+      const updatePatch = emptyPatch();
+      updatePatch.layers.push(next);
+      const result = await client.sendPatch(input.sessionId, updatePatch);
+      return toolResult({ action, layer: summarizeLayer(next), ...result });
+    }
+
+    if (action === 'delete') {
+      if (!input.id) throw new Error('id_required');
+      if (input.id === DEFAULT_LAYER_ID) throw new Error('cannot_delete_default_layer');
+      const state = await client.fetchState(input.sessionId);
+      const layers = Array.isArray(state?.layers) ? state.layers : [];
+      const layer = layers.find((item) => item.id === input.id);
+      if (!layer) throw new Error('layer_not_found');
+      const nodes = Array.isArray(state?.nodes) ? state.nodes : [];
+      const edges = Array.isArray(state?.edges) ? state.edges : [];
+      const drawings = Array.isArray(state?.drawings) ? state.drawings : [];
+      const textBoxes = Array.isArray(state?.textBoxes) ? state.textBoxes : [];
+      const comments = Array.isArray(state?.comments) ? state.comments : [];
+
+      const inLayer = (item) => (item?.layerId ?? DEFAULT_LAYER_ID) === input.id;
+      const nodeIds = nodes.filter(inLayer).map((node) => node.id);
+      const nodeSet = new Set(nodeIds);
+      const textBoxIds = textBoxes.filter(inLayer).map((tb) => tb.id);
+      const textBoxSet = new Set(textBoxIds);
+      const drawingIds = drawings.filter(inLayer).map((drawing) => drawing.id);
+      const edgeIds = edges
+        .filter((edge) => nodeSet.has(edge.source) || nodeSet.has(edge.target))
+        .map((edge) => edge.id);
+      const commentIds = comments.filter((comment) => {
+        if (inLayer(comment)) return true;
+        if (comment.targetKind === 'node' && comment.targetId && nodeSet.has(comment.targetId)) return true;
+        if (comment.targetKind === 'textBox' && comment.targetId && textBoxSet.has(comment.targetId)) return true;
+        return false;
+      }).map((comment) => comment.id);
+
+      const now = nowTs();
+      const patch = emptyPatch();
+      patch.tombstones.layers[input.id] = tombstoneFor(now, layer.updatedAt);
+      nodeIds.forEach((id) => {
+        const node = nodes.find((item) => item.id === id);
+        patch.tombstones.nodes[id] = tombstoneFor(now, node?.updatedAt);
+      });
+      edgeIds.forEach((id) => {
+        const edge = edges.find((item) => item.id === id);
+        patch.tombstones.edges[id] = tombstoneFor(now, edge?.updatedAt);
+      });
+      drawingIds.forEach((id) => {
+        const drawing = drawings.find((item) => item.id === id);
+        patch.tombstones.drawings[id] = tombstoneFor(now, drawing?.updatedAt);
+      });
+      textBoxIds.forEach((id) => {
+        const textBox = textBoxes.find((item) => item.id === id);
+        patch.tombstones.textBoxes[id] = tombstoneFor(now, textBox?.updatedAt);
+      });
+      commentIds.forEach((id) => {
+        const comment = comments.find((item) => item.id === id);
+        patch.tombstones.comments[id] = tombstoneFor(now, comment?.updatedAt);
+      });
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({
+        action,
+        deletedLayerId: input.id,
+        deletedCounts: {
+          nodes: nodeIds.length,
+          edges: edgeIds.length,
+          drawings: drawingIds.length,
+          textBoxes: textBoxIds.length,
+          comments: commentIds.length,
+        },
+        ...result,
+      });
+    }
+
+    throw new Error('action_not_supported');
+  }
+);
+
+registerTool(
   'send_alert',
   {
     title: 'Send Alert',
@@ -829,6 +1028,7 @@ registerTool(
       title: z.string().optional(),
       content: z.string().optional(),
       type: NodeType.optional(),
+      layerId: z.string().optional(),
       x: z.number().optional(),
       y: z.number().optional(),
       clarity: z.number().optional(),
@@ -862,13 +1062,16 @@ registerTool(
       const participantPayload = await fetchCanvasParticipants({ sessionId: input.sessionId }, extra);
       const participants = normalizeParticipants(participantPayload.participants);
       const nodesWithParticipants = attachParticipantsToNodes(state?.nodes ?? [], participants);
+      const layerById = buildLayerById(state?.layers ?? []);
       if (input.id) {
         const node = nodesWithParticipants.find((n) => n.id === input.id) ?? null;
         return toolResult({ action, node, participants });
       }
       const limited = limitList(nodesWithParticipants, input.limit);
       const resolvedMode = resolveStateMode(input.mode, extra);
-      const nodes = resolvedMode === 'full' ? limited.items : limited.items.map(summarizeNode);
+      const nodes = resolvedMode === 'full'
+        ? limited.items
+        : limited.items.map((node) => summarizeNode(node, layerById));
       return toolResult({
         action,
         nodes,
@@ -885,11 +1088,15 @@ registerTool(
       if (!Number.isFinite(input.y)) throw new Error('y_required');
       const author = resolveAuthorFromExtra(extra);
       const now = nowTs();
+      const layerId = typeof input.layerId === 'string' && input.layerId.trim()
+        ? input.layerId.trim()
+        : DEFAULT_LAYER_ID;
       const node = {
         id: input.id ?? randomUUID(),
         title: input.title,
         content: input.content ?? '',
         type: input.type ?? 'idea',
+        layerId,
         x: input.x,
         y: input.y,
         clarity: Number.isFinite(input.clarity) ? input.clarity : 0.5,
@@ -915,7 +1122,15 @@ registerTool(
       const state = await client.fetchState(input.sessionId);
       const current = state?.nodes?.find((n) => n.id === input.id);
       if (!current) throw new Error('node_not_found');
-      const next = { ...current, ...input.patch, id: input.id, updatedAt: nowTs() };
+      const patch = { ...input.patch };
+      if (Object.prototype.hasOwnProperty.call(patch, 'layerId')) {
+        if (typeof patch.layerId === 'string' && patch.layerId.trim()) {
+          patch.layerId = patch.layerId.trim();
+        } else {
+          patch.layerId = DEFAULT_LAYER_ID;
+        }
+      }
+      const next = { ...current, ...patch, id: input.id, updatedAt: nowTs() };
       const updatePatch = emptyPatch();
       updatePatch.nodes.push(next);
       const result = await client.sendPatch(input.sessionId, updatePatch);

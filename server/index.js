@@ -547,7 +547,23 @@ async function getSession(id) {
     'SELECT id, state, version, name, owner_id, saved_at, expires_at FROM sessions WHERE id = $1 AND (expires_at IS NULL OR expires_at > NOW())',
     [id],
   );
-  return res.rows[0] ?? null;
+  const row = res.rows[0] ?? null;
+  if (!row) return null;
+  const normalized = normalizeState(row.state);
+  if (!needsStateRepair(row.state, normalized)) return row;
+
+  try {
+    const updated = await pool.query(
+      `UPDATE sessions
+         SET state = $1, version = version + 1, updated_at = NOW()
+       WHERE id = $2 AND version = $3
+       RETURNING id, state, version, name, owner_id, saved_at, expires_at`,
+      [normalized, row.id, row.version],
+    );
+    return updated.rows[0] ?? { ...row, state: normalized };
+  } catch {
+    return { ...row, state: normalized };
+  }
 }
 
 const ensureDir = async (dirPath) => {
@@ -2043,6 +2059,76 @@ async function createSession(id, state, opts = {}) {
   return res.rows[0];
 }
 
+const DEFAULT_LAYER_ID = 'layer-default';
+const DEFAULT_LAYER_NAME = 'Base';
+
+function normalizeLayer(raw, now, fallbackIndex) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : null;
+  if (!id) return null;
+  const nameRaw = typeof raw.name === 'string' ? raw.name.trim() : '';
+  const name = nameRaw || `Layer ${fallbackIndex + 1}`;
+  const visible = raw.visible !== false;
+  const createdAt = Number.isFinite(raw.createdAt) ? Number(raw.createdAt) : now;
+  const updatedAt = Number.isFinite(raw.updatedAt) ? Number(raw.updatedAt) : createdAt;
+  return { id, name, visible, createdAt, updatedAt };
+}
+
+function normalizeLayers(raw, now = Date.now()) {
+  const input = Array.isArray(raw) ? raw : [];
+  const seen = new Set();
+  const cleaned = [];
+  input.forEach((item, idx) => {
+    const layer = normalizeLayer(item, now, idx);
+    if (!layer || seen.has(layer.id)) return;
+    seen.add(layer.id);
+    cleaned.push(layer);
+  });
+  if (!seen.has(DEFAULT_LAYER_ID)) {
+    cleaned.unshift({
+      id: DEFAULT_LAYER_ID,
+      name: DEFAULT_LAYER_NAME,
+      visible: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+  return cleaned;
+}
+
+function ensureLayersForItems(layers, items, now = Date.now()) {
+  const next = layers.slice();
+  const seen = new Set(next.map((layer) => layer.id));
+  const missing = new Set();
+  for (const item of items) {
+    const layerId = typeof item?.layerId === 'string' ? item.layerId.trim() : '';
+    if (!layerId || seen.has(layerId)) continue;
+    missing.add(layerId);
+  }
+  if (!missing.size) return next;
+  const sorted = Array.from(missing).sort((a, b) => a.localeCompare(b));
+  for (const layerId of sorted) {
+    const name = `Layer ${next.length + 1}`;
+    next.push({ id: layerId, name, visible: true, createdAt: now, updatedAt: now });
+    seen.add(layerId);
+  }
+  return next;
+}
+
+function ensureItemLayerId(items, layers) {
+  const layerIds = new Set(layers.map((layer) => layer.id));
+  const fallbackId = layers[0]?.id ?? DEFAULT_LAYER_ID;
+  let changed = false;
+  const next = items.map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    const layerId = typeof item.layerId === 'string' ? item.layerId : null;
+    if (layerId && layerIds.has(layerId)) return item;
+    changed = true;
+    return { ...item, layerId: fallbackId };
+  });
+  return changed ? next : items;
+}
+
 function normalizeTombstones(raw) {
   if (!raw || typeof raw !== 'object') return { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {} };
   return {
@@ -2057,19 +2143,46 @@ function normalizeTombstones(raw) {
 
 function normalizeState(raw) {
   const obj = raw && typeof raw === 'object' ? raw : {};
+  const now = Date.now();
+  const nodes = Array.isArray(obj.nodes) ? obj.nodes : [];
+  const drawings = Array.isArray(obj.drawings) ? obj.drawings : [];
+  const textBoxes = Array.isArray(obj.textBoxes) ? obj.textBoxes : [];
+  const comments = Array.isArray(obj.comments) ? obj.comments : [];
+  const baseLayers = normalizeLayers(obj.layers, now);
+  const layers = ensureLayersForItems(
+    baseLayers,
+    [...nodes, ...drawings, ...textBoxes, ...comments],
+    now,
+  );
   return {
-    nodes: Array.isArray(obj.nodes) ? obj.nodes : [],
+    nodes: ensureItemLayerId(nodes, layers),
     edges: Array.isArray(obj.edges) ? obj.edges : [],
-    drawings: Array.isArray(obj.drawings) ? obj.drawings : [],
-    textBoxes: Array.isArray(obj.textBoxes) ? obj.textBoxes : [],
-    comments: Array.isArray(obj.comments) ? obj.comments : [],
-    layers: Array.isArray(obj.layers) ? obj.layers : [],
+    drawings: ensureItemLayerId(drawings, layers),
+    textBoxes: ensureItemLayerId(textBoxes, layers),
+    comments: ensureItemLayerId(comments, layers),
+    layers,
     theme: obj.theme === 'light' ? 'light' : 'dark',
     tombstones: normalizeTombstones(obj.tombstones),
   };
 }
 
 const ts = (x) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
+
+function needsStateRepair(raw, normalized) {
+  if (!raw || typeof raw !== 'object') return true;
+  const rawLayers = Array.isArray(raw.layers) ? raw.layers : null;
+  if (!rawLayers) return true;
+  const rawIds = new Set(rawLayers.map((layer) => (typeof layer?.id === 'string' ? layer.id : '')).filter(Boolean));
+  const normalizedIds = new Set(normalized.layers.map((layer) => layer.id));
+  if (rawIds.size !== normalizedIds.size) return true;
+  for (const id of normalizedIds) {
+    if (!rawIds.has(id)) return true;
+  }
+  const tombstones = raw.tombstones;
+  if (!tombstones || typeof tombstones !== 'object') return true;
+  if (!tombstones.layers || typeof tombstones.layers !== 'object') return true;
+  return false;
+}
 
 function mergeTombstones(a, b) {
   const ta = normalizeTombstones(a);
