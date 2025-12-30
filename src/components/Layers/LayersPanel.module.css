@@ -1,0 +1,232 @@
+.layersRoot {
+    position: fixed;
+    left: 18px;
+    bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    z-index: 1650;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    pointer-events: auto;
+}
+
+.layersToggle {
+    width: 40px;
+    height: 40px;
+    border-radius: 0;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    transition: transform 160ms ease, opacity 160ms ease;
+    opacity: 0.7;
+    padding: 0;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.layersToggleActive {
+    transform: translateY(-2px);
+    opacity: 1;
+}
+
+.layersToggle:hover {
+    opacity: 0.95;
+}
+
+.layersIcon {
+    width: 26px;
+    height: 26px;
+    display: block;
+    filter: brightness(0) invert(1);
+    opacity: 0.85;
+}
+
+:global(body.light-theme) .layersIcon {
+    filter: brightness(0);
+    opacity: 0.7;
+}
+
+.layersPanel {
+    width: 280px;
+    padding: 12px;
+    border-radius: 18px;
+    border: 1px solid var(--border-strong);
+    background: color-mix(in srgb, var(--bg-node) 92%, transparent);
+    box-shadow: 0 18px 38px rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(14px);
+}
+
+.panelHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.panelTitle {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.panelCount {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--border-strong) 60%, transparent);
+    padding: 2px 6px;
+    border-radius: 999px;
+}
+
+.panelHeaderActions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.panelActions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 10px 0 12px;
+}
+
+.actionButton {
+    border: 1px solid var(--border-subtle);
+    background: color-mix(in srgb, var(--bg-node) 82%, transparent);
+    color: var(--text-primary);
+    font-size: 11px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.actionButton:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.layerList {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 220px;
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
+.layerRow {
+    display: grid;
+    grid-template-columns: 18px 24px 1fr 24px;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 12px;
+    border: 1px solid transparent;
+    background: color-mix(in srgb, var(--bg-node) 78%, transparent);
+    transition: background 160ms ease, border 160ms ease;
+}
+
+.layerRow:hover {
+    border-color: var(--border-subtle);
+    background: color-mix(in srgb, var(--bg-node-hover) 85%, transparent);
+}
+
+.layerRowActive {
+    border-color: color-mix(in srgb, var(--accent-primary) 45%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-primary) 45%, transparent);
+}
+
+.layerRowSelected {
+    border-color: color-mix(in srgb, var(--accent-primary) 70%, transparent);
+}
+
+.layerRowHidden {
+    opacity: 0.6;
+}
+
+.layerCheckbox {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent-primary);
+}
+
+.visibilityButton,
+.deleteButton,
+.layerNameButton {
+    background: none;
+    border: none;
+    color: inherit;
+    padding: 0;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+}
+
+.visibilityButton {
+    color: var(--text-secondary);
+}
+
+.layerNameButton {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 8px;
+    text-align: left;
+}
+
+.layerName {
+    font-size: 13px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.activeBadge {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent-primary);
+    border: 1px solid color-mix(in srgb, var(--accent-primary) 60%, transparent);
+    padding: 2px 6px;
+    border-radius: 999px;
+}
+
+.layerRenameInput {
+    width: 100%;
+    background: color-mix(in srgb, var(--bg-node-hover) 82%, transparent);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 13px;
+    padding: 4px 8px;
+}
+
+.deleteButton {
+    color: var(--text-secondary);
+}
+
+.deleteButton:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+@media (max-width: 520px) {
+    .layersRoot {
+        left: 12px;
+        bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    }
+
+    .layersPanel {
+        width: min(88vw, 280px);
+    }
+}

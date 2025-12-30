@@ -1,7 +1,7 @@
-import React, { useRef, useState, useCallback, useEffect } from 'react';
+import React, { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useStore } from '../../store/useStore';
 import { Node } from '../Node/Node';
-import { Edge, ConnectionLine } from '../Edge/Edge';
+import { Edge, ConnectionLine, LayerBridgeEdge } from '../Edge/Edge';
 import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
 import { Link2, MessageCircle, Paperclip, X, Zap, ZapOff } from 'lucide-react';
@@ -12,6 +12,7 @@ import { TextBox } from '../TextBox/TextBox';
 import { SnowOverlay } from '../Snow/SnowOverlay';
 import { hashString } from '../../utils/guestIdentity';
 import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES } from '../../utils/attachments';
+import { DEFAULT_LAYER_ID } from '../../utils/layers';
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
@@ -103,6 +104,7 @@ export const Canvas: React.FC = () => {
     const canvasViewCommand = useStore((state) => state.canvasViewCommand);
     const nodes = useStore((state) => state.nodes);
     const edges = useStore((state) => state.edges);
+    const layers = useStore((state) => state.layers);
     const penMode = useStore((state) => state.penMode);
     const penTool = useStore((state) => state.penTool);
     const drawings = useStore((state) => state.drawings);
@@ -131,10 +133,65 @@ export const Canvas: React.FC = () => {
 	    const setEditingTextBoxId = useStore((state) => state.setEditingTextBoxId);
 	    const toggleTextMode = useStore((state) => state.toggleTextMode);
 	    const updateEdge = useStore((state) => state.updateEdge);
-	    const addComment = useStore((state) => state.addComment);
-	    const deleteComment = useStore((state) => state.deleteComment);
+    const addComment = useStore((state) => state.addComment);
+    const deleteComment = useStore((state) => state.deleteComment);
     const toggleCommentsMode = useStore((state) => state.toggleCommentsMode);
     const setCanvasViewCommand = useStore((state) => state.setCanvasViewCommand);
+
+    const layerById = useMemo(() => new Map(layers.map((layer) => [layer.id, layer])), [layers]);
+    const visibleLayerIds = useMemo(() => {
+        const visible = layers.filter((layer) => layer.visible).map((layer) => layer.id);
+        const resolved = visible.length ? visible : layers.map((layer) => layer.id);
+        return new Set(resolved.length ? resolved : [DEFAULT_LAYER_ID]);
+    }, [layers]);
+    const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+    const visibleNodes = useMemo(
+        () => nodes.filter((node) => visibleLayerIds.has(node.layerId ?? DEFAULT_LAYER_ID)),
+        [nodes, visibleLayerIds],
+    );
+    const visibleNodeIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
+    const visibleDrawings = useMemo(
+        () => drawings.filter((drawing) => visibleLayerIds.has(drawing.layerId ?? DEFAULT_LAYER_ID)),
+        [drawings, visibleLayerIds],
+    );
+    const visibleTextBoxes = useMemo(
+        () => textBoxes.filter((tb) => visibleLayerIds.has(tb.layerId ?? DEFAULT_LAYER_ID)),
+        [textBoxes, visibleLayerIds],
+    );
+    const visibleTextBoxIds = useMemo(() => new Set(visibleTextBoxes.map((tb) => tb.id)), [visibleTextBoxes]);
+    const { visibleEdges, bridgeEdges, visibleEdgeIds } = useMemo(() => {
+        const visibleEdges: EdgeData[] = [];
+        const bridgeEdges: Array<{ id: string; fromId: string; toId: string; layerLabel: string }> = [];
+        const visibleEdgeIds = new Set<string>();
+        edges.forEach((edge) => {
+            const sourceVisible = visibleNodeIds.has(edge.source);
+            const targetVisible = visibleNodeIds.has(edge.target);
+            if (sourceVisible && targetVisible) {
+                visibleEdges.push(edge);
+                visibleEdgeIds.add(edge.id);
+                return;
+            }
+            if (sourceVisible === targetVisible) return;
+            const fromId = sourceVisible ? edge.source : edge.target;
+            const toId = sourceVisible ? edge.target : edge.source;
+            const hiddenNode = nodeById.get(toId);
+            if (!hiddenNode) return;
+            const layerId = hiddenNode.layerId ?? DEFAULT_LAYER_ID;
+            const layerLabel = layerById.get(layerId)?.name ?? 'Layer';
+            bridgeEdges.push({ id: edge.id, fromId, toId, layerLabel });
+        });
+        return { visibleEdges, bridgeEdges, visibleEdgeIds };
+    }, [edges, layerById, nodeById, visibleNodeIds]);
+    const visibleComments = useMemo(() => {
+        return comments.filter((comment) => {
+            const layerId = comment.layerId ?? DEFAULT_LAYER_ID;
+            if (!visibleLayerIds.has(layerId)) return false;
+            if (comment.targetKind === 'node' && comment.targetId && !visibleNodeIds.has(comment.targetId)) return false;
+            if (comment.targetKind === 'textBox' && comment.targetId && !visibleTextBoxIds.has(comment.targetId)) return false;
+            if (comment.targetKind === 'edge' && comment.targetId && !visibleEdgeIds.has(comment.targetId)) return false;
+            return true;
+        });
+    }, [comments, visibleLayerIds, visibleNodeIds, visibleTextBoxIds, visibleEdgeIds]);
 
     const canvasRef = useRef(canvas);
     useEffect(() => {
@@ -455,6 +512,9 @@ export const Canvas: React.FC = () => {
         let minY = Infinity;
         let maxX = -Infinity;
         let maxY = -Infinity;
+        const visibleLayerIds = new Set(st.layers.filter((layer) => layer.visible).map((layer) => layer.id));
+        const activeLayerSet = visibleLayerIds.size ? visibleLayerIds : new Set(st.layers.map((layer) => layer.id));
+        const isLayerVisible = (layerId?: string | null) => activeLayerSet.has(layerId ?? DEFAULT_LAYER_ID);
 
         const addRect = (x: number, y: number, width: number, height: number) => {
             if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) return;
@@ -465,15 +525,18 @@ export const Canvas: React.FC = () => {
         };
 
         for (const node of st.nodes) {
+            if (!isLayerVisible(node.layerId)) continue;
             const size = getNodeSize(node.id) ?? { width: 240, height: 120 };
             addRect(node.x - size.width / 2, node.y - size.height / 2, size.width, size.height);
         }
 
         for (const box of st.textBoxes) {
+            if (!isLayerVisible(box.layerId)) continue;
             addRect(box.x, box.y, box.width, box.height);
         }
 
         for (const drawing of st.drawings) {
+            if (!isLayerVisible(drawing.layerId)) continue;
             const points = Array.isArray(drawing.points) ? drawing.points : [];
             if (points.length === 0) continue;
             let dMinX = Infinity;
@@ -492,6 +555,7 @@ export const Canvas: React.FC = () => {
         }
 
         for (const comment of st.comments) {
+            if (!isLayerVisible(comment.layerId)) continue;
             if (comment.targetKind !== 'canvas') continue;
             const cx = comment.x;
             const cy = comment.y;
@@ -565,7 +629,7 @@ export const Canvas: React.FC = () => {
         }
         if (target.targetKind === 'node') {
             const nodeId = target.targetId ?? null;
-            const node = nodeId ? nodes.find((n) => n.id === nodeId) : null;
+            const node = nodeId ? visibleNodes.find((n) => n.id === nodeId) : null;
             if (!node) return null;
             const size = getNodeSize(node.id) ?? { width: 240, height: 120 };
             return {
@@ -575,7 +639,7 @@ export const Canvas: React.FC = () => {
         }
         if (target.targetKind === 'textBox') {
             const boxId = target.targetId ?? null;
-            const box = boxId ? textBoxes.find((t) => t.id === boxId) : null;
+            const box = boxId ? visibleTextBoxes.find((t) => t.id === boxId) : null;
             if (!box) return null;
             return {
                 x: box.x + box.width + 10,
@@ -584,10 +648,10 @@ export const Canvas: React.FC = () => {
         }
         if (target.targetKind === 'edge') {
             const edgeId = target.targetId ?? null;
-            const edge = edgeId ? edges.find((e) => e.id === edgeId) : null;
+            const edge = edgeId ? visibleEdges.find((e) => e.id === edgeId) : null;
             if (!edge) return null;
-            const source = nodes.find((n) => n.id === edge.source);
-            const targetNode = nodes.find((n) => n.id === edge.target);
+            const source = nodeById.get(edge.source);
+            const targetNode = nodeById.get(edge.target);
             if (!source || !targetNode) return null;
             return {
                 x: (source.x + targetNode.x) / 2,
@@ -595,7 +659,7 @@ export const Canvas: React.FC = () => {
             };
         }
         return null;
-    }, [edges, nodes, textBoxes, getNodeSize]);
+    }, [getNodeSize, nodeById, visibleEdges, visibleNodes, visibleTextBoxes]);
 
     const applyLiveStrokeStyle = (style: { stroke: string; width: number; opacity: number }) => {
         liveStrokeStyleRef.current = style;
@@ -3017,16 +3081,16 @@ export const Canvas: React.FC = () => {
 
     const noteScale = 1 / Math.max(0.0001, canvas.scale);
     const focusHintVisible = canvas.scale > 1.1;
-    const rootComments = React.useMemo(() => comments.filter((c) => !c.parentId), [comments]);
+    const rootComments = React.useMemo(() => visibleComments.filter((c) => !c.parentId), [visibleComments]);
     const repliesByParent = React.useMemo(() => {
         const map = new Map<string, Comment[]>();
-        comments.forEach((comment) => {
+        visibleComments.forEach((comment) => {
             if (!comment.parentId) return;
             if (!map.has(comment.parentId)) map.set(comment.parentId, []);
             map.get(comment.parentId)?.push(comment);
         });
         return map;
-    }, [comments]);
+    }, [visibleComments]);
     const showCommentLayer = commentsMode || !!draftComment || !!openCommentId;
     const getCommentLabel = (comment: Comment) => {
         const name = String(comment.authorName ?? 'Guest').trim();
@@ -3268,7 +3332,7 @@ export const Canvas: React.FC = () => {
             >
 	                <defs />
                 {/* Render Saved Drawings */}
-                {drawings.map(drawing => (
+                {visibleDrawings.map(drawing => (
                     <path
                         key={drawing.id}
                         d={drawing.path ?? getSvgPath(drawing.points)}
@@ -3293,7 +3357,16 @@ export const Canvas: React.FC = () => {
                     style={{ opacity: 1, pointerEvents: 'none' }}
                 />
 
-			                {edges.map((edge) => (
+			                {bridgeEdges.map((bridge) => (
+			                    <LayerBridgeEdge
+			                        key={`${bridge.id}-bridge`}
+			                        id={bridge.id}
+			                        fromId={bridge.fromId}
+			                        toId={bridge.toId}
+			                        layerLabel={bridge.layerLabel}
+			                    />
+			                ))}
+			                {visibleEdges.map((edge) => (
 			                    <Edge
 			                        key={edge.id}
 			                        sourceId={edge.source}
@@ -3324,7 +3397,7 @@ export const Canvas: React.FC = () => {
                     zIndex: 1
                 } as React.CSSProperties}
             >
-	                {textBoxes.map((tb) => (
+	                {visibleTextBoxes.map((tb) => (
 	                    <TextBox
 	                        key={tb.id}
 	                        box={tb}
@@ -3338,7 +3411,7 @@ export const Canvas: React.FC = () => {
 	                        }}
 	                    />
 	                ))}
-                {nodes.map((node) => (
+                {visibleNodes.map((node) => (
                     <div
                         key={node.id}
                         data-node-id={node.id}

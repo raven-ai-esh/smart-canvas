@@ -3,6 +3,7 @@ import { Controls } from './components/Controls/Controls';
 import { Presence } from './components/Presence/Presence';
 import { SessionBar } from './components/SessionBar/SessionBar';
 import { AgentWidget } from './components/AgentWidget/AgentWidget';
+import { LayersPanel } from './components/Layers/LayersPanel';
 import { useEffect } from 'react';
 import { useSessionSync } from './hooks/useSessionSync';
 import { useAuth } from './hooks/useAuth';
@@ -28,6 +29,7 @@ function App() {
       <Canvas />
       <SessionBar />
       <Presence />
+      <LayersPanel />
       <Controls />
       <AgentWidget />
     </div>

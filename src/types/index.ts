@@ -1,5 +1,13 @@
 export type NodeType = 'task' | 'idea';
 
+export interface LayerData {
+  id: string;
+  name: string;
+  visible: boolean;
+  createdAt?: number; // epoch ms
+  updatedAt?: number; // epoch ms
+}
+
 export interface Attachment {
   id: string;
   kind: 'image' | 'file';
@@ -15,6 +23,7 @@ export interface NodeData {
   title: string;
   content: string;
   type: NodeType;
+  layerId?: string;
   x: number;
   y: number;
   createdAt?: number; // epoch ms
@@ -49,6 +58,7 @@ export type PenToolType = 'pen' | 'eraser' | 'highlighter';
 
 export interface Drawing {
   id: string;
+  layerId?: string;
   points: { x: number; y: number }[];
   path?: string; // beautified SVG path
   color: string;
@@ -63,6 +73,7 @@ export interface Drawing {
 
 export interface TextBox {
   id: string;
+  layerId?: string;
   x: number; // world
   y: number; // world
   width: number; // world
@@ -84,6 +95,7 @@ export interface Comment {
   targetKind: 'canvas' | 'node' | 'edge' | 'textBox';
   targetId?: string | null;
   parentId?: string | null;
+  layerId?: string;
   x?: number; // world (for canvas comments)
   y?: number; // world (for canvas comments)
   text: string;
@@ -103,6 +115,7 @@ export interface Tombstones {
   drawings: Record<string, number>;
   textBoxes: Record<string, number>;
   comments: Record<string, number>;
+  layers: Record<string, number>;
 }
 
 export interface CanvasState {

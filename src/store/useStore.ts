@@ -1,15 +1,17 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { Comment, NodeData, EdgeData, CanvasState, Drawing, PenToolType, Tombstones, TextBox, SessionSaver } from '../types';
+import type { Comment, NodeData, EdgeData, CanvasState, Drawing, LayerData, PenToolType, Tombstones, TextBox, SessionSaver } from '../types';
 import { clampEnergy, computeEffectiveEnergy, relu } from '../utils/energy';
 import { debugLog } from '../utils/debug';
 import { getGuestIdentity } from '../utils/guestIdentity';
+import { DEFAULT_LAYER_ID, normalizeLayers, resolveLayerId } from '../utils/layers';
 
 type UndoSnapshot = {
     nodes: NodeData[];
     edges: EdgeData[];
     drawings: Drawing[];
     textBoxes: TextBox[];
+    layers: LayerData[];
     tombstones: Tombstones;
 };
 
@@ -79,6 +81,16 @@ const resolveCommentAuthor = (state: AppState) => {
 interface AppState {
     nodes: NodeData[];
     edges: EdgeData[];
+    layers: LayerData[];
+    activeLayerId: string;
+    setActiveLayerId: (id: string) => void;
+    addLayer: (name?: string) => string;
+    renameLayer: (id: string, name: string) => void;
+    toggleLayerVisibility: (id: string) => void;
+    setLayerVisibility: (id: string, visible: boolean) => void;
+    showAllLayers: () => void;
+    mergeLayers: (layerIds: string[], targetId?: string) => void;
+    deleteLayers: (layerIds: string[]) => void;
     canvas: CanvasState;
     effectiveEnergy: Record<string, number>;
     tombstones: Tombstones;
@@ -206,11 +218,12 @@ type CanvasViewCommand = {
     scale?: number | null;
 };
 
-const snapshotOf = (state: Pick<AppState, 'nodes' | 'edges' | 'drawings' | 'textBoxes' | 'tombstones'>): UndoSnapshot => ({
+const snapshotOf = (state: Pick<AppState, 'nodes' | 'edges' | 'drawings' | 'textBoxes' | 'layers' | 'tombstones'>): UndoSnapshot => ({
     nodes: state.nodes,
     edges: state.edges,
     drawings: state.drawings,
     textBoxes: state.textBoxes,
+    layers: state.layers,
     tombstones: state.tombstones,
 });
 
@@ -266,14 +279,239 @@ const effectiveForMode = (nodes: NodeData[], edges: EdgeData[], monitoringMode: 
     return fallback ?? computeEffectiveEnergy(nodes, edges);
 };
 
+const initialLayers = normalizeLayers([]);
+const initialActiveLayerId = resolveLayerId(initialLayers, null);
+
+const nextLayerName = (layers: LayerData[]) => `Layer ${layers.length + 1}`;
+
+const ensureActiveLayerVisible = (layers: LayerData[], activeLayerId: string) => {
+    let changed = false;
+    const next = layers.map((layer) => {
+        if (layer.id !== activeLayerId || layer.visible) return layer;
+        changed = true;
+        return { ...layer, visible: true, updatedAt: Date.now() };
+    });
+    return changed ? next : layers;
+};
+
+const sanitizeSelections = (state: AppState, visibleLayerIds: Set<string>) => {
+    const visibleNodeIds = new Set(
+        state.nodes.filter((node) => visibleLayerIds.has(node.layerId ?? DEFAULT_LAYER_ID)).map((node) => node.id),
+    );
+    const visibleTextBoxIds = new Set(
+        state.textBoxes.filter((tb) => visibleLayerIds.has(tb.layerId ?? DEFAULT_LAYER_ID)).map((tb) => tb.id),
+    );
+    const selectedNodes = state.selectedNodes.filter((id) => visibleNodeIds.has(id));
+    const selectedTextBoxes = state.selectedTextBoxes.filter((id) => visibleTextBoxIds.has(id));
+    const selectedNode = selectedNodes.length === 1 ? selectedNodes[0] : null;
+    const selectedTextBoxId = selectedTextBoxes.length === 1 ? selectedTextBoxes[0] : null;
+    return {
+        selectedNodes,
+        selectedTextBoxes,
+        selectedNode,
+        selectedTextBoxId,
+        selectedEdge: null,
+        selectedEdges: [],
+        neighbors: {},
+    };
+};
+
 export const useStore = create<AppState>()(
     persist(
         (set, get) => ({
             nodes: [],
             edges: [],
+            layers: initialLayers,
+            activeLayerId: initialActiveLayerId,
             canvas: { x: 0, y: 0, scale: 1 },
             effectiveEnergy: {},
-            tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {} },
+            tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {} },
+            setActiveLayerId: (id) => set((state) => {
+                const resolved = resolveLayerId(state.layers, id);
+                const layers = ensureActiveLayerVisible(state.layers, resolved);
+                return { activeLayerId: resolved, layers };
+            }),
+            addLayer: (name) => {
+                const now = Date.now();
+                const nextName = typeof name === 'string' && name.trim() ? name.trim() : nextLayerName(get().layers);
+                const id = crypto.randomUUID();
+                const layer: LayerData = { id, name: nextName, visible: true, createdAt: now, updatedAt: now };
+                set((state) => ({
+                    ...pushHistoryReducer(state),
+                    layers: [...state.layers, layer],
+                    activeLayerId: id,
+                }));
+                return id;
+            },
+            renameLayer: (id, name) => set((state) => {
+                const trimmed = name.trim();
+                if (!trimmed) return {};
+                let changed = false;
+                const layers = state.layers.map((layer) => {
+                    if (layer.id !== id) return layer;
+                    if (layer.name === trimmed) return layer;
+                    changed = true;
+                    return { ...layer, name: trimmed, updatedAt: Date.now() };
+                });
+                if (!changed) return {};
+                return { ...pushHistoryReducer(state), layers };
+            }),
+            toggleLayerVisibility: (id) => set((state) => {
+                const target = state.layers.find((layer) => layer.id === id);
+                if (!target) return {};
+                const visibleCount = state.layers.filter((layer) => layer.visible).length;
+                let nextVisible = target.visible;
+                if (target.visible) {
+                    if (visibleCount > 1) nextVisible = false;
+                } else {
+                    nextVisible = true;
+                }
+                if (nextVisible === target.visible) return {};
+                const layers = state.layers.map((layer) => (
+                    layer.id === id ? { ...layer, visible: nextVisible, updatedAt: Date.now() } : layer
+                ));
+                const activeLayerId = nextVisible ? state.activeLayerId : resolveLayerId(layers, state.activeLayerId);
+                const visibleLayerIds = new Set(layers.filter((layer) => layer.visible).map((layer) => layer.id));
+                return { layers, activeLayerId, ...sanitizeSelections(state, visibleLayerIds) };
+            }),
+            setLayerVisibility: (id, visible) => set((state) => {
+                const target = state.layers.find((layer) => layer.id === id);
+                if (!target || target.visible === visible) return {};
+                const visibleCount = state.layers.filter((layer) => layer.visible).length;
+                if (!visible && visibleCount <= 1) return {};
+                const layers = state.layers.map((layer) => (
+                    layer.id === id ? { ...layer, visible, updatedAt: Date.now() } : layer
+                ));
+                const activeLayerId = visible ? state.activeLayerId : resolveLayerId(layers, state.activeLayerId);
+                const visibleLayerIds = new Set(layers.filter((layer) => layer.visible).map((layer) => layer.id));
+                return { layers, activeLayerId, ...sanitizeSelections(state, visibleLayerIds) };
+            }),
+            showAllLayers: () => set((state) => {
+                const layers = state.layers.map((layer) => (layer.visible ? layer : { ...layer, visible: true, updatedAt: Date.now() }));
+                return { layers, ...sanitizeSelections(state, new Set(layers.map((layer) => layer.id))) };
+            }),
+            mergeLayers: (layerIds, targetId) => set((state) => {
+                const unique = Array.from(new Set(layerIds.filter(Boolean)));
+                if (unique.length < 2) return {};
+                const resolvedTarget = resolveLayerId(state.layers, targetId ?? unique[0]);
+                if (!unique.includes(resolvedTarget)) unique.push(resolvedTarget);
+                const removeSet = new Set(unique.filter((id) => id !== resolvedTarget && id !== DEFAULT_LAYER_ID));
+                if (removeSet.size === 0) return {};
+                const now = Date.now();
+                const moveSet = new Set(unique.filter((id) => id !== resolvedTarget));
+                const nodes = state.nodes.map((node) => (
+                    moveSet.has(node.layerId ?? DEFAULT_LAYER_ID) ? { ...node, layerId: resolvedTarget, updatedAt: now } : node
+                ));
+                const drawings = state.drawings.map((drawing) => (
+                    moveSet.has(drawing.layerId ?? DEFAULT_LAYER_ID) ? { ...drawing, layerId: resolvedTarget, updatedAt: now } : drawing
+                ));
+                const textBoxes = state.textBoxes.map((tb) => (
+                    moveSet.has(tb.layerId ?? DEFAULT_LAYER_ID) ? { ...tb, layerId: resolvedTarget, updatedAt: now } : tb
+                ));
+                const comments = state.comments.map((comment) => {
+                    const commentLayerId = comment.layerId ?? DEFAULT_LAYER_ID;
+                    if (moveSet.has(commentLayerId)) return { ...comment, layerId: resolvedTarget, updatedAt: now };
+                    return comment;
+                });
+                const layers = state.layers.filter((layer) => !removeSet.has(layer.id)).map((layer) => (
+                    layer.id === resolvedTarget ? { ...layer, updatedAt: now } : layer
+                ));
+                const tombstones: Tombstones = {
+                    ...state.tombstones,
+                    layers: { ...state.tombstones.layers },
+                };
+                for (const id of removeSet) {
+                    const layer = state.layers.find((l) => l.id === id);
+                    tombstones.layers[id] = tombstoneFor(now, layer?.updatedAt);
+                }
+                return {
+                    ...pushHistoryReducer(state),
+                    nodes,
+                    drawings,
+                    textBoxes,
+                    comments,
+                    layers,
+                    tombstones,
+                    activeLayerId: resolvedTarget,
+                    selectedNode: null,
+                    selectedNodes: [],
+                    selectedEdge: null,
+                    selectedEdges: [],
+                    selectedTextBoxId: null,
+                    selectedTextBoxes: [],
+                    neighbors: {},
+                };
+            }),
+            deleteLayers: (layerIds) => set((state) => {
+                const removeIds = Array.from(new Set(layerIds.filter((id) => id && id !== DEFAULT_LAYER_ID)));
+                if (removeIds.length === 0) return {};
+                const remaining = state.layers.filter((layer) => !removeIds.includes(layer.id));
+                if (remaining.length === 0) return {};
+                const now = Date.now();
+                const removeSet = new Set(removeIds);
+                const removeNodes = state.nodes.filter((node) => removeSet.has(node.layerId ?? DEFAULT_LAYER_ID));
+                const removeNodeSet = new Set(removeNodes.map((node) => node.id));
+                const removeEdges = state.edges.filter((edge) => removeNodeSet.has(edge.source) || removeNodeSet.has(edge.target));
+                const removeEdgeSet = new Set(removeEdges.map((edge) => edge.id));
+                const removeTextBoxes = state.textBoxes.filter((tb) => removeSet.has(tb.layerId ?? DEFAULT_LAYER_ID));
+                const removeDrawings = state.drawings.filter((drawing) => removeSet.has(drawing.layerId ?? DEFAULT_LAYER_ID));
+                const removeComments = state.comments.filter((comment) => {
+                    const layerId = comment.layerId ?? DEFAULT_LAYER_ID;
+                    if (removeSet.has(layerId)) return true;
+                    if (comment.targetKind === 'node' && comment.targetId && removeNodeSet.has(comment.targetId)) return true;
+                    return false;
+                });
+                const removeTextBoxSet = new Set(removeTextBoxes.map((tb) => tb.id));
+                const removeDrawingSet = new Set(removeDrawings.map((drawing) => drawing.id));
+                const removeCommentSet = new Set(removeComments.map((comment) => comment.id));
+                const nodes = state.nodes.filter((node) => !removeNodeSet.has(node.id));
+                const edges = state.edges.filter((edge) => !removeEdgeSet.has(edge.id));
+                const textBoxes = state.textBoxes.filter((tb) => !removeTextBoxSet.has(tb.id));
+                const drawings = state.drawings.filter((drawing) => !removeDrawingSet.has(drawing.id));
+                const comments = state.comments.filter((comment) => !removeCommentSet.has(comment.id));
+                const layers = remaining;
+                const tombstones: Tombstones = {
+                    ...state.tombstones,
+                    nodes: { ...state.tombstones.nodes },
+                    edges: { ...state.tombstones.edges },
+                    drawings: { ...state.tombstones.drawings },
+                    textBoxes: { ...state.tombstones.textBoxes },
+                    comments: { ...state.tombstones.comments },
+                    layers: { ...state.tombstones.layers },
+                };
+                for (const node of removeNodes) tombstones.nodes[node.id] = tombstoneFor(now, node.updatedAt);
+                for (const edge of removeEdges) tombstones.edges[edge.id] = tombstoneFor(now, edge.updatedAt);
+                for (const drawing of removeDrawings) tombstones.drawings[drawing.id] = tombstoneFor(now, drawing.updatedAt);
+                for (const tb of removeTextBoxes) tombstones.textBoxes[tb.id] = tombstoneFor(now, tb.updatedAt);
+                for (const comment of removeComments) tombstones.comments[comment.id] = tombstoneFor(now, comment.updatedAt);
+                for (const layerId of removeSet) {
+                    const layer = state.layers.find((l) => l.id === layerId);
+                    tombstones.layers[layerId] = tombstoneFor(now, layer?.updatedAt);
+                }
+                const normalizedEnergy = normalizeEnergies(nodes, edges);
+                const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
+                const activeLayerId = resolveLayerId(layers, state.activeLayerId);
+                return {
+                    ...pushHistoryReducer(state),
+                    nodes: normalizedEnergy.nodes,
+                    edges,
+                    drawings,
+                    textBoxes,
+                    comments,
+                    layers,
+                    tombstones,
+                    effectiveEnergy,
+                    activeLayerId,
+                    selectedNode: null,
+                    selectedNodes: [],
+                    selectedEdge: null,
+                    selectedEdges: [],
+                    selectedTextBoxId: null,
+                    selectedTextBoxes: [],
+                    neighbors: {},
+                    editingTextBoxId: null,
+                };
+            }),
             sessionId: null,
             sessionName: null,
             sessionSaved: false,
@@ -352,17 +590,19 @@ export const useStore = create<AppState>()(
             pushHistory: (snapshot) => set((state) => pushHistoryReducer(state, snapshot)),
 	            undo: () => set((state) => {
 	                if (state.history.length === 0) return {};
-	                const prev = state.history[state.history.length - 1];
-	                const history = state.history.slice(0, -1);
-	                const future = [...state.future, snapshotOf(state)];
-	                return {
-	                    nodes: prev.nodes,
-	                    edges: prev.edges,
-	                    drawings: prev.drawings,
-	                    textBoxes: prev.textBoxes,
-	                    tombstones: prev.tombstones,
-	                    history,
-	                    future,
+                const prev = state.history[state.history.length - 1];
+                const history = state.history.slice(0, -1);
+                const future = [...state.future, snapshotOf(state)];
+                return {
+                    nodes: prev.nodes,
+                    edges: prev.edges,
+                    drawings: prev.drawings,
+                    textBoxes: prev.textBoxes,
+                    layers: prev.layers,
+                    activeLayerId: resolveLayerId(prev.layers, state.activeLayerId),
+                    tombstones: prev.tombstones,
+                    history,
+                    future,
 	                    selectedNode: null,
 	                    selectedNodes: [],
 	                    selectedEdge: null,
@@ -377,17 +617,19 @@ export const useStore = create<AppState>()(
 	            }),
 	            redo: () => set((state) => {
 	                if (state.future.length === 0) return {};
-	                const next = state.future[state.future.length - 1];
-	                const future = state.future.slice(0, -1);
-	                const history = [...state.history, snapshotOf(state)];
-	                return {
-	                    nodes: next.nodes,
-	                    edges: next.edges,
-	                    drawings: next.drawings,
-	                    textBoxes: next.textBoxes,
-	                    tombstones: next.tombstones,
-	                    history,
-	                    future,
+                const next = state.future[state.future.length - 1];
+                const future = state.future.slice(0, -1);
+                const history = [...state.history, snapshotOf(state)];
+                return {
+                    nodes: next.nodes,
+                    edges: next.edges,
+                    drawings: next.drawings,
+                    textBoxes: next.textBoxes,
+                    layers: next.layers,
+                    activeLayerId: resolveLayerId(next.layers, state.activeLayerId),
+                    tombstones: next.tombstones,
+                    history,
+                    future,
 	                    selectedNode: null,
 	                    selectedNodes: [],
 	                    selectedEdge: null,
@@ -404,6 +646,7 @@ export const useStore = create<AppState>()(
             addNode: (node) => set((state) => {
                 const now = Date.now();
                 const base = withAuthor(state, node);
+                const layerId = resolveLayerId(state.layers, base.layerId ?? state.activeLayerId);
                 const legacyInWork = (base as { inWork?: boolean }).inWork;
                 const progress = base.type === 'task'
                     ? clampProgress(base.progress ?? progressFromStatus(base.status, legacyInWork))
@@ -411,6 +654,7 @@ export const useStore = create<AppState>()(
                 const status = base.type === 'task' ? statusFromProgress(progress ?? 0) : base.status;
                 const normalized: NodeData = {
                     ...base,
+                    layerId,
                     status,
                     progress,
                     createdAt: base.createdAt ?? now,
@@ -421,6 +665,7 @@ export const useStore = create<AppState>()(
                     ...state.tombstones,
                     nodes: { ...state.tombstones.nodes },
                     comments: { ...state.tombstones.comments },
+                    layers: { ...state.tombstones.layers },
                 };
                 delete tombstones.nodes[normalized.id];
                 const normalizedEnergy = normalizeEnergies(nodes, state.edges);
@@ -436,6 +681,9 @@ export const useStore = create<AppState>()(
             updateNode: (id, data) => set((state) => {
                 const now = Date.now();
                 const nextData = { ...data } as Partial<NodeData>;
+                if (Object.prototype.hasOwnProperty.call(nextData, 'layerId')) {
+                    nextData.layerId = resolveLayerId(state.layers, nextData.layerId ?? null);
+                }
                 if (Object.prototype.hasOwnProperty.call(nextData, 'energy')) {
                     nextData.energy = clampEnergy(Number(nextData.energy));
                 }
@@ -493,6 +741,7 @@ export const useStore = create<AppState>()(
                     drawings: { ...state.tombstones.drawings },
                     textBoxes: { ...state.tombstones.textBoxes },
                     comments: { ...state.tombstones.comments },
+                    layers: { ...state.tombstones.layers },
                 };
                 for (const e of removedEdges) {
                     tombstones.edges[e.id] = tombstoneFor(now, e.updatedAt);
@@ -521,6 +770,7 @@ export const useStore = create<AppState>()(
                     ...state.tombstones,
                     edges: { ...state.tombstones.edges },
                     comments: { ...state.tombstones.comments },
+                    layers: { ...state.tombstones.layers },
                 };
                 delete tombstones.edges[normalized.id];
                 const normalizedEnergy = normalizeEnergies(state.nodes, edges);
@@ -556,6 +806,7 @@ export const useStore = create<AppState>()(
                     ...state.tombstones,
                     edges: { ...state.tombstones.edges, [id]: tombstoneEdge },
                     comments: { ...state.tombstones.comments },
+                    layers: { ...state.tombstones.layers },
                 };
                 debugLog({ type: 'delete_call', t: performance.now(), kind: 'edge', id, now, updatedAt: edge?.updatedAt, tombstone: tombstoneEdge });
                 const normalizedEnergy = normalizeEnergies(state.nodes, edges);
@@ -717,6 +968,7 @@ export const useStore = create<AppState>()(
                     drawings: { ...state.tombstones.drawings },
                     textBoxes: { ...state.tombstones.textBoxes },
                     comments: { ...state.tombstones.comments },
+                    layers: { ...state.tombstones.layers },
                 };
 
                 for (const nodeId of removeNodeSet) {
@@ -769,8 +1021,10 @@ export const useStore = create<AppState>()(
             addDrawing: (drawing) => set((state) => {
                 const now = Date.now();
                 const base = withAuthor(state, drawing);
+                const layerId = resolveLayerId(state.layers, base.layerId ?? state.activeLayerId);
                 const normalized: Drawing = {
                     ...base,
+                    layerId,
                     createdAt: base.createdAt ?? now,
                     updatedAt: base.updatedAt ?? now,
                 };
@@ -779,6 +1033,7 @@ export const useStore = create<AppState>()(
                     ...state.tombstones,
                     drawings: { ...state.tombstones.drawings },
                     comments: { ...state.tombstones.comments },
+                    layers: { ...state.tombstones.layers },
                 };
                 delete tombstones.drawings[normalized.id];
                 return { ...pushHistoryReducer(state), drawings, tombstones };
@@ -792,6 +1047,7 @@ export const useStore = create<AppState>()(
                     ...state.tombstones,
                     drawings: { ...state.tombstones.drawings, [id]: tombstoneDrawing },
                     comments: { ...state.tombstones.comments },
+                    layers: { ...state.tombstones.layers },
                 };
                 debugLog({ type: 'delete_call', t: performance.now(), kind: 'drawing', id, now, updatedAt: drawing?.updatedAt, tombstone: tombstoneDrawing });
                 return { ...pushHistoryReducer(state), drawings, tombstones };
@@ -809,8 +1065,10 @@ export const useStore = create<AppState>()(
                 set((state) => {
                     const now = Date.now();
                     const base = withAuthor(state, tb);
+                    const layerId = resolveLayerId(state.layers, base.layerId ?? state.activeLayerId);
                     const normalized: TextBox = {
                         ...base,
+                        layerId,
                         createdAt: base.createdAt ?? now,
                         updatedAt: base.updatedAt ?? now,
                         kind: base.kind ?? 'text',
@@ -821,6 +1079,7 @@ export const useStore = create<AppState>()(
                         ...state.tombstones,
                         textBoxes: { ...state.tombstones.textBoxes },
                         comments: { ...state.tombstones.comments },
+                        layers: { ...state.tombstones.layers },
                     };
                     delete tombstones.textBoxes[normalized.id];
                     return {
@@ -840,7 +1099,11 @@ export const useStore = create<AppState>()(
             updateTextBox: (id, data) =>
                 set((state) => {
                     const now = Date.now();
-                    const textBoxes = state.textBoxes.map((t) => (t.id === id ? { ...t, ...data, updatedAt: now } : t));
+                    const nextData = { ...data } as Partial<TextBox>;
+                    if (Object.prototype.hasOwnProperty.call(nextData, 'layerId')) {
+                        nextData.layerId = resolveLayerId(state.layers, nextData.layerId ?? null);
+                    }
+                    const textBoxes = state.textBoxes.map((t) => (t.id === id ? { ...t, ...nextData, updatedAt: now } : t));
                     return { textBoxes };
                 }),
 	            deleteTextBox: (id) =>
@@ -853,6 +1116,7 @@ export const useStore = create<AppState>()(
                         ...state.tombstones,
                         textBoxes: { ...state.tombstones.textBoxes, [id]: tombstoneTextBox },
                         comments: { ...state.tombstones.comments },
+                        layers: { ...state.tombstones.layers },
                     };
 	                    debugLog({ type: 'delete_call', t: performance.now(), kind: 'textBox', id, now, updatedAt: tb?.updatedAt, tombstone: tombstoneTextBox });
 	                    const editingTextBoxId = state.editingTextBoxId === id ? null : state.editingTextBoxId;
@@ -868,9 +1132,20 @@ export const useStore = create<AppState>()(
                     const text = String(comment.text ?? '').trim();
                     const attachments = Array.isArray(comment.attachments) ? comment.attachments : [];
                     if (!text && attachments.length === 0) return {};
+                    let inferredLayerId = comment.layerId ?? null;
+                    if (!inferredLayerId && comment.targetKind === 'node' && comment.targetId) {
+                        const node = state.nodes.find((n) => n.id === comment.targetId);
+                        inferredLayerId = node?.layerId ?? null;
+                    }
+                    if (!inferredLayerId && comment.targetKind === 'textBox' && comment.targetId) {
+                        const tb = state.textBoxes.find((t) => t.id === comment.targetId);
+                        inferredLayerId = tb?.layerId ?? null;
+                    }
+                    const layerId = resolveLayerId(state.layers, inferredLayerId ?? state.activeLayerId);
                     const normalized: Comment = {
                         ...author,
                         ...comment,
+                        layerId,
                         targetId: comment.targetId ?? null,
                         parentId: comment.parentId ?? null,
                         text,
@@ -881,6 +1156,7 @@ export const useStore = create<AppState>()(
                     const tombstones: Tombstones = {
                         ...state.tombstones,
                         comments: { ...state.tombstones.comments },
+                        layers: { ...state.tombstones.layers },
                     };
                     delete tombstones.comments[normalized.id];
                     return { comments: [...state.comments, normalized], tombstones };
@@ -912,6 +1188,7 @@ export const useStore = create<AppState>()(
                     const tombstones: Tombstones = {
                         ...state.tombstones,
                         comments: { ...state.tombstones.comments },
+                        layers: { ...state.tombstones.layers },
                     };
                     state.comments.forEach((comment) => {
                         if (!toDelete.has(comment.id)) return;

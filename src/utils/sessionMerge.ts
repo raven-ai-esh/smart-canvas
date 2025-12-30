@@ -1,4 +1,5 @@
-import type { Comment, Drawing, EdgeData, NodeData, Tombstones, TextBox } from '../types';
+import type { Comment, Drawing, EdgeData, LayerData, NodeData, Tombstones, TextBox } from '../types';
+import { ensureItemLayerId, normalizeLayers } from './layers';
 
 export type SessionState = {
   nodes: NodeData[];
@@ -6,13 +7,14 @@ export type SessionState = {
   drawings: Drawing[];
   textBoxes: TextBox[];
   comments: Comment[];
+  layers: LayerData[];
   tombstones: Tombstones;
 };
 
 const ts = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
 
 const normalizeTombstones = (raw: unknown): Tombstones => {
-  if (!raw || typeof raw !== 'object') return { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {} };
+  if (!raw || typeof raw !== 'object') return { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {} };
   const r: any = raw;
   return {
     nodes: r.nodes && typeof r.nodes === 'object' ? r.nodes : {},
@@ -20,17 +22,20 @@ const normalizeTombstones = (raw: unknown): Tombstones => {
     drawings: r.drawings && typeof r.drawings === 'object' ? r.drawings : {},
     textBoxes: r.textBoxes && typeof r.textBoxes === 'object' ? r.textBoxes : {},
     comments: r.comments && typeof r.comments === 'object' ? r.comments : {},
+    layers: r.layers && typeof r.layers === 'object' ? r.layers : {},
   };
 };
 
 export function normalizeSessionState(raw: any): SessionState {
   const obj = raw && typeof raw === 'object' ? raw : {};
+  const layers = normalizeLayers(obj.layers);
   return {
-    nodes: Array.isArray(obj.nodes) ? obj.nodes : [],
+    nodes: ensureItemLayerId(Array.isArray(obj.nodes) ? obj.nodes : [], layers),
     edges: Array.isArray(obj.edges) ? obj.edges : [],
-    drawings: Array.isArray(obj.drawings) ? obj.drawings : [],
-    textBoxes: Array.isArray(obj.textBoxes) ? obj.textBoxes : [],
-    comments: Array.isArray(obj.comments) ? obj.comments : [],
+    drawings: ensureItemLayerId(Array.isArray(obj.drawings) ? obj.drawings : [], layers),
+    textBoxes: ensureItemLayerId(Array.isArray(obj.textBoxes) ? obj.textBoxes : [], layers),
+    comments: ensureItemLayerId(Array.isArray(obj.comments) ? obj.comments : [], layers),
+    layers,
     tombstones: normalizeTombstones(obj.tombstones),
   };
 }
@@ -42,12 +47,14 @@ function mergeTombstones(a: Tombstones, b: Tombstones): Tombstones {
     drawings: { ...a.drawings },
     textBoxes: { ...a.textBoxes },
     comments: { ...a.comments },
+    layers: { ...a.layers },
   };
   for (const [id, t] of Object.entries(b.nodes)) out.nodes[id] = Math.max(ts(out.nodes[id]), ts(t));
   for (const [id, t] of Object.entries(b.edges)) out.edges[id] = Math.max(ts(out.edges[id]), ts(t));
   for (const [id, t] of Object.entries(b.drawings)) out.drawings[id] = Math.max(ts(out.drawings[id]), ts(t));
   for (const [id, t] of Object.entries(b.textBoxes)) out.textBoxes[id] = Math.max(ts(out.textBoxes[id]), ts(t));
   for (const [id, t] of Object.entries(b.comments)) out.comments[id] = Math.max(ts(out.comments[id]), ts(t));
+  for (const [id, t] of Object.entries(b.layers)) out.layers[id] = Math.max(ts(out.layers[id]), ts(t));
   return out;
 }
 
@@ -91,6 +98,15 @@ export function mergeSessionState(localRaw: unknown, remoteRaw: unknown): Sessio
   const drawings = mergeById(local.drawings, remote.drawings, tombstones.drawings);
   const textBoxes = mergeById(local.textBoxes, remote.textBoxes, tombstones.textBoxes);
   const comments = mergeById(local.comments, remote.comments, tombstones.comments);
+  const layers = mergeById(local.layers, remote.layers, tombstones.layers);
 
-  return { nodes, edges, drawings, textBoxes, comments, tombstones };
+  return {
+    nodes: ensureItemLayerId(nodes, layers),
+    edges,
+    drawings: ensureItemLayerId(drawings, layers),
+    textBoxes: ensureItemLayerId(textBoxes, layers),
+    comments: ensureItemLayerId(comments, layers),
+    layers,
+    tombstones,
+  };
 }
