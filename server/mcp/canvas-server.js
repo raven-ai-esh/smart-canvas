@@ -563,6 +563,32 @@ const sanitizeComment = (comment) => {
   return next;
 };
 
+const isFileTextBox = (textBox) => {
+  if (!textBox || typeof textBox !== 'object') return false;
+  const kind = typeof textBox.kind === 'string' ? textBox.kind : '';
+  if (kind === 'image') return false;
+  if (kind === 'file') return true;
+  const hasFileName = typeof textBox.fileName === 'string' && textBox.fileName.trim();
+  const hasFileMime = typeof textBox.fileMime === 'string' && textBox.fileMime.trim();
+  const hasFileSize = Number.isFinite(textBox.fileSize);
+  return Boolean(hasFileName || hasFileMime || hasFileSize);
+};
+
+const isImageTextBox = (textBox) => {
+  if (!textBox || typeof textBox !== 'object') return false;
+  const kind = typeof textBox.kind === 'string' ? textBox.kind : '';
+  if (kind === 'file') return false;
+  if (kind === 'image') return true;
+  if (isFileTextBox(textBox)) return false;
+  const src = typeof textBox.src === 'string' ? textBox.src.trim() : '';
+  if (!src) return false;
+  const fileMime = typeof textBox.fileMime === 'string' ? textBox.fileMime.trim().toLowerCase() : '';
+  if (fileMime && fileMime.startsWith('image/')) return true;
+  const fileName = typeof textBox.fileName === 'string' ? textBox.fileName.trim().toLowerCase() : '';
+  if (fileName && /\.(png|jpe?g|gif|webp|svg|bmp|tiff)$/.test(fileName)) return true;
+  return !fileMime && !fileName;
+};
+
 const sanitizeTextBox = (textBox) => {
   if (!textBox || typeof textBox !== 'object') return textBox;
   const hasSrc = typeof textBox.src === 'string' && textBox.src.trim();
@@ -571,12 +597,41 @@ const sanitizeTextBox = (textBox) => {
   return { ...textBox, src: null };
 };
 
+const sanitizeFileBox = (textBox) => {
+  if (!textBox || typeof textBox !== 'object') return textBox;
+  const base = { ...textBox, kind: 'file', type: 'file' };
+  return sanitizeTextBox(base);
+};
+
+const sanitizeImageBox = (textBox) => {
+  if (!textBox || typeof textBox !== 'object') return textBox;
+  const base = { ...textBox, kind: 'image', type: 'image' };
+  return sanitizeTextBox(base);
+};
+
+const splitTextBoxes = (textBoxes) => {
+  const files = [];
+  const images = [];
+  const regular = [];
+  if (!Array.isArray(textBoxes)) return { files, images, textBoxes: regular };
+  textBoxes.forEach((item) => {
+    if (isFileTextBox(item)) files.push(item);
+    else if (isImageTextBox(item)) images.push(item);
+    else regular.push(item);
+  });
+  return { files, images, textBoxes: regular };
+};
+
 const sanitizeState = (state) => {
   if (!state || typeof state !== 'object') return state;
+  const rawTextBoxes = Array.isArray(state.textBoxes) ? state.textBoxes : [];
+  const split = splitTextBoxes(rawTextBoxes);
   return {
     ...state,
     comments: Array.isArray(state.comments) ? state.comments.map(sanitizeComment) : state.comments,
-    textBoxes: Array.isArray(state.textBoxes) ? state.textBoxes.map(sanitizeTextBox) : state.textBoxes,
+    textBoxes: split.textBoxes.map(sanitizeTextBox),
+    files: split.files.map(sanitizeFileBox),
+    images: split.images.map(sanitizeImageBox),
   };
 };
 
@@ -750,6 +805,11 @@ const summarizeState = (state, limit) => {
   const edges = Array.isArray(state?.edges) ? state.edges : [];
   const drawings = Array.isArray(state?.drawings) ? state.drawings : [];
   const textBoxes = Array.isArray(state?.textBoxes) ? state.textBoxes : [];
+  const files = Array.isArray(state?.files) ? state.files : null;
+  const images = Array.isArray(state?.images) ? state.images : null;
+  const split = files || images
+    ? { textBoxes, files: files ?? [], images: images ?? [] }
+    : splitTextBoxes(textBoxes);
   const comments = Array.isArray(state?.comments) ? state.comments : [];
   const layers = Array.isArray(state?.layers) ? state.layers : [];
   const orderedLayers = orderLayersForListing(layers);
@@ -766,7 +826,9 @@ const summarizeState = (state, limit) => {
       nodes: nodes.length,
       edges: edges.length,
       drawings: drawings.length,
-      textBoxes: textBoxes.length,
+      textBoxes: split.textBoxes.length,
+      files: split.files.length,
+      images: split.images.length,
       comments: comments.length,
       layers: layers.length,
     },
@@ -803,7 +865,7 @@ registerTool(
   'get_state',
   {
     title: 'Get Canvas State',
-    description: 'Fetches the current session state (nodes, edges, drawings, textBoxes, comments) and includes participants.',
+    description: 'Fetches the current session state (nodes, edges, drawings, textBoxes, files, images, comments) and includes participants.',
     inputSchema: { mode: StateMode.optional(), limit: z.number().optional() },
     outputSchema: { id: z.string(), version: z.number(), state: z.any(), meta: z.any(), participants: z.array(z.any()) },
   },
@@ -1311,11 +1373,7 @@ registerTool(
       width: z.number().optional(),
       height: z.number().optional(),
       text: z.string().optional(),
-      kind: z.enum(['text', 'image', 'file']).optional(),
-      src: z.string().optional(),
-      fileName: z.string().optional(),
-      fileMime: z.string().optional(),
-      fileSize: z.number().optional(),
+      kind: z.enum(['text']).optional(),
       patch: z.any().optional(),
       authorId: z.string().nullable().optional(),
       authorName: z.string().nullable().optional(),
@@ -1338,9 +1396,15 @@ registerTool(
       const state = await client.fetchState(input.sessionId);
       if (input.id) {
         const textBox = state?.textBoxes?.find((tb) => tb.id === input.id) ?? null;
+        if (textBox && (isFileTextBox(textBox) || isImageTextBox(textBox))) {
+          return toolResult({ action, textBox: null });
+        }
         return toolResult({ action, textBox: sanitizeTextBox(textBox) });
       }
-      const limited = limitList(state?.textBoxes ?? [], input.limit);
+      const candidates = Array.isArray(state?.textBoxes)
+        ? state.textBoxes.filter((tb) => !isFileTextBox(tb) && !isImageTextBox(tb))
+        : [];
+      const limited = limitList(candidates, input.limit);
       return toolResult({
         action,
         textBoxes: limited.items.map(sanitizeTextBox),
@@ -1356,6 +1420,11 @@ registerTool(
       if (!Number.isFinite(input.width)) throw new Error('width_required');
       if (!Number.isFinite(input.height)) throw new Error('height_required');
       if (typeof input.text !== 'string') throw new Error('text_required');
+      if (input.kind && input.kind !== 'text') throw new Error('image_requires_image_tool');
+      if (input.src) throw new Error('image_requires_image_tool');
+      if (input.fileName || input.fileMime || Number.isFinite(input.fileSize)) {
+        throw new Error('file_requires_file_tool');
+      }
       const author = resolveAuthorFromExtra(extra);
       const now = nowTs();
       const textBox = {
@@ -1366,10 +1435,6 @@ registerTool(
         height: input.height,
         text: input.text,
         kind: input.kind,
-        src: input.src,
-        fileName: input.fileName,
-        fileMime: input.fileMime,
-        fileSize: input.fileSize,
         authorId: author.authorId ?? undefined,
         authorName: author.authorName ?? undefined,
         createdAt: now,
@@ -1387,6 +1452,17 @@ registerTool(
       const state = await client.fetchState(input.sessionId);
       const current = state?.textBoxes?.find((tb) => tb.id === input.id);
       if (!current) throw new Error('textbox_not_found');
+      if (isFileTextBox(current)) throw new Error('file_not_textbox');
+      if (isImageTextBox(current)) throw new Error('image_not_textbox');
+      if (
+        (input.patch.kind && input.patch.kind !== 'text')
+        || Object.prototype.hasOwnProperty.call(input.patch, 'src')
+        || Object.prototype.hasOwnProperty.call(input.patch, 'fileName')
+        || Object.prototype.hasOwnProperty.call(input.patch, 'fileMime')
+        || Object.prototype.hasOwnProperty.call(input.patch, 'fileSize')
+      ) {
+        throw new Error('file_not_textbox');
+      }
       const next = { ...current, ...input.patch, id: input.id, updatedAt: nowTs() };
       const updatePatch = emptyPatch();
       updatePatch.textBoxes.push(next);
@@ -1399,10 +1475,236 @@ registerTool(
       const patch = emptyPatch();
       const state = await client.fetchState(input.sessionId);
       const textBox = state?.textBoxes?.find((t) => t.id === input.id);
+      if (textBox && isFileTextBox(textBox)) throw new Error('file_not_textbox');
+      if (textBox && isImageTextBox(textBox)) throw new Error('image_not_textbox');
       const now = nowTs();
       patch.tombstones.textBoxes[input.id] = tombstoneFor(now, textBox?.updatedAt);
       const result = await client.sendPatch(input.sessionId, patch);
       return toolResult({ action, deletedTextBoxId: input.id, ...result });
+    }
+
+    throw new Error('action_not_supported');
+  }
+);
+
+registerTool(
+  'file',
+  {
+    title: 'File',
+    description: 'Creates, reads, updates, or deletes file items based on the action.',
+    inputSchema: {
+      action: CrudAction,
+      limit: z.number().optional(),
+      id: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      src: z.string().optional(),
+      fileName: z.string().optional(),
+      fileMime: z.string().optional(),
+      fileSize: z.number().optional(),
+      patch: z.any().optional(),
+      authorId: z.string().nullable().optional(),
+      authorName: z.string().nullable().optional(),
+    },
+    outputSchema: {
+      action: CrudAction,
+      file: z.any().optional(),
+      files: z.array(z.any()).optional(),
+      total: z.number().optional(),
+      limit: z.number().optional(),
+      truncated: z.boolean().optional(),
+      deletedFileId: z.string().optional(),
+      sessionId: z.string().optional(),
+      requestId: z.string().optional(),
+    },
+  },
+  async (input, extra) => {
+    const action = input.action;
+    if (action === 'read') {
+      const state = await client.fetchState(input.sessionId);
+      const items = Array.isArray(state?.textBoxes)
+        ? state.textBoxes.filter((tb) => isFileTextBox(tb))
+        : [];
+      if (input.id) {
+        const file = items.find((tb) => tb.id === input.id) ?? null;
+        return toolResult({ action, file: sanitizeFileBox(file) });
+      }
+      const limited = limitList(items, input.limit);
+      return toolResult({
+        action,
+        files: limited.items.map(sanitizeFileBox),
+        total: limited.total,
+        limit: limited.limit,
+        truncated: limited.truncated,
+      });
+    }
+
+    if (action === 'create') {
+      if (!Number.isFinite(input.x)) throw new Error('x_required');
+      if (!Number.isFinite(input.y)) throw new Error('y_required');
+      if (!Number.isFinite(input.width)) throw new Error('width_required');
+      if (!Number.isFinite(input.height)) throw new Error('height_required');
+      const fileName = typeof input.fileName === 'string' ? input.fileName.trim() : '';
+      if (!fileName) throw new Error('file_name_required');
+      const author = resolveAuthorFromExtra(extra);
+      const now = nowTs();
+      const textBox = {
+        id: input.id ?? randomUUID(),
+        x: input.x,
+        y: input.y,
+        width: input.width,
+        height: input.height,
+        text: '',
+        kind: 'file',
+        src: input.src,
+        fileName,
+        fileMime: input.fileMime,
+        fileSize: input.fileSize,
+        authorId: author.authorId ?? undefined,
+        authorName: author.authorName ?? undefined,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const patch = emptyPatch();
+      patch.textBoxes.push(textBox);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, file: sanitizeFileBox(textBox), ...result });
+    }
+
+    if (action === 'update') {
+      if (!input.id) throw new Error('id_required');
+      if (!input.patch || typeof input.patch !== 'object') throw new Error('patch_required');
+      const state = await client.fetchState(input.sessionId);
+      const current = state?.textBoxes?.find((tb) => tb.id === input.id);
+      if (!current || !isFileTextBox(current)) throw new Error('file_not_found');
+      const next = { ...current, ...input.patch, id: input.id, kind: 'file', updatedAt: nowTs() };
+      const updatePatch = emptyPatch();
+      updatePatch.textBoxes.push(next);
+      const result = await client.sendPatch(input.sessionId, updatePatch);
+      return toolResult({ action, file: sanitizeFileBox(next), ...result });
+    }
+
+    if (action === 'delete') {
+      if (!input.id) throw new Error('id_required');
+      const patch = emptyPatch();
+      const state = await client.fetchState(input.sessionId);
+      const file = state?.textBoxes?.find((t) => t.id === input.id);
+      if (!file || !isFileTextBox(file)) throw new Error('file_not_found');
+      const now = nowTs();
+      patch.tombstones.textBoxes[input.id] = tombstoneFor(now, file?.updatedAt);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, deletedFileId: input.id, ...result });
+    }
+
+    throw new Error('action_not_supported');
+  }
+);
+
+registerTool(
+  'image',
+  {
+    title: 'Image',
+    description: 'Creates, reads, updates, or deletes image items based on the action.',
+    inputSchema: {
+      action: CrudAction,
+      limit: z.number().optional(),
+      id: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      src: z.string().optional(),
+      patch: z.any().optional(),
+      authorId: z.string().nullable().optional(),
+      authorName: z.string().nullable().optional(),
+    },
+    outputSchema: {
+      action: CrudAction,
+      image: z.any().optional(),
+      images: z.array(z.any()).optional(),
+      total: z.number().optional(),
+      limit: z.number().optional(),
+      truncated: z.boolean().optional(),
+      deletedImageId: z.string().optional(),
+      sessionId: z.string().optional(),
+      requestId: z.string().optional(),
+    },
+  },
+  async (input, extra) => {
+    const action = input.action;
+    if (action === 'read') {
+      const state = await client.fetchState(input.sessionId);
+      const items = Array.isArray(state?.textBoxes)
+        ? state.textBoxes.filter((tb) => isImageTextBox(tb))
+        : [];
+      if (input.id) {
+        const image = items.find((tb) => tb.id === input.id) ?? null;
+        return toolResult({ action, image: sanitizeImageBox(image) });
+      }
+      const limited = limitList(items, input.limit);
+      return toolResult({
+        action,
+        images: limited.items.map(sanitizeImageBox),
+        total: limited.total,
+        limit: limited.limit,
+        truncated: limited.truncated,
+      });
+    }
+
+    if (action === 'create') {
+      if (!Number.isFinite(input.x)) throw new Error('x_required');
+      if (!Number.isFinite(input.y)) throw new Error('y_required');
+      if (!Number.isFinite(input.width)) throw new Error('width_required');
+      if (!Number.isFinite(input.height)) throw new Error('height_required');
+      const src = typeof input.src === 'string' ? input.src.trim() : '';
+      if (!src) throw new Error('src_required');
+      const author = resolveAuthorFromExtra(extra);
+      const now = nowTs();
+      const textBox = {
+        id: input.id ?? randomUUID(),
+        x: input.x,
+        y: input.y,
+        width: input.width,
+        height: input.height,
+        text: '',
+        kind: 'image',
+        src,
+        authorId: author.authorId ?? undefined,
+        authorName: author.authorName ?? undefined,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const patch = emptyPatch();
+      patch.textBoxes.push(textBox);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, image: sanitizeImageBox(textBox), ...result });
+    }
+
+    if (action === 'update') {
+      if (!input.id) throw new Error('id_required');
+      if (!input.patch || typeof input.patch !== 'object') throw new Error('patch_required');
+      const state = await client.fetchState(input.sessionId);
+      const current = state?.textBoxes?.find((tb) => tb.id === input.id);
+      if (!current || !isImageTextBox(current)) throw new Error('image_not_found');
+      const next = { ...current, ...input.patch, id: input.id, kind: 'image', updatedAt: nowTs() };
+      const updatePatch = emptyPatch();
+      updatePatch.textBoxes.push(next);
+      const result = await client.sendPatch(input.sessionId, updatePatch);
+      return toolResult({ action, image: sanitizeImageBox(next), ...result });
+    }
+
+    if (action === 'delete') {
+      if (!input.id) throw new Error('id_required');
+      const patch = emptyPatch();
+      const state = await client.fetchState(input.sessionId);
+      const image = state?.textBoxes?.find((t) => t.id === input.id);
+      if (!image || !isImageTextBox(image)) throw new Error('image_not_found');
+      const now = nowTs();
+      patch.tombstones.textBoxes[input.id] = tombstoneFor(now, image?.updatedAt);
+      const result = await client.sendPatch(input.sessionId, patch);
+      return toolResult({ action, deletedImageId: input.id, ...result });
     }
 
     throw new Error('action_not_supported');

@@ -625,6 +625,8 @@ export const AgentWidget: React.FC = () => {
               gap: 10,
               minHeight: 0,
               boxSizing: 'border-box',
+              userSelect: 'text',
+              WebkitUserSelect: 'text',
             }}
           >
             {messages.length === 0 && (
@@ -660,6 +662,8 @@ export const AgentWidget: React.FC = () => {
                     overflowWrap: 'anywhere',
                     wordBreak: 'break-word',
                     lineHeight: 1.45,
+                    userSelect: 'text',
+                    WebkitUserSelect: 'text',
                   }}
                 >
                   {isUser ? (
