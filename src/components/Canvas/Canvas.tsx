@@ -4,7 +4,7 @@ import { Node } from '../Node/Node';
 import { Edge, ConnectionLine } from '../Edge/Edge';
 import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
-import { Link2, MessageCircle, X, Zap, ZapOff } from 'lucide-react';
+import { Link2, MessageCircle, Paperclip, X, Zap, ZapOff } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
 import type { Attachment, Comment, EdgeData, NodeData, TextBox as TextBoxType } from '../../types';
 import { debugLog } from '../../utils/debug';
@@ -83,6 +83,8 @@ export const Canvas: React.FC = () => {
     const comments = useStore((state) => state.comments);
     const commentsMode = useStore((state) => state.commentsMode);
     const me = useStore((state) => state.me);
+    const uploadPointRef = useRef<{ x: number; y: number } | null>(null);
+    const filePickerRef = useRef<HTMLInputElement | null>(null);
 
 	    // Actions
 	    const setCanvasTransform = useStore((state) => state.setCanvasTransform);
@@ -2745,72 +2747,63 @@ export const Canvas: React.FC = () => {
         });
     }, [screenToWorldLatest]);
 
-    const handleFileDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
-        if (!e.dataTransfer?.files?.length) return;
-        e.preventDefault();
-        e.stopPropagation();
-        const files = Array.from(e.dataTransfer.files);
-        if (!files.length) return;
-        const { attachments, rejected, failed } = await filesToAttachments(files, sessionId);
-        if (!attachments.length) return;
+    const clampBox = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
-        const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
-        const base = screenToWorldLatest(e.clientX, e.clientY);
+    const createImageBoxAt = useCallback((src: string, pos: { x: number; y: number }) => {
+        const maxSize = 360;
+        const minSize = 140;
+        const fallbackW = 320;
+        const fallbackH = 240;
 
-        const createImageBoxAt = (src: string, pos: { x: number; y: number }) => {
-            const maxSize = 360;
-            const minSize = 140;
-            const fallbackW = 320;
-            const fallbackH = 240;
-
-            const addImageBox = (w: number, h: number) => {
-                const width = clamp(w, minSize, maxSize);
-                const height = clamp(h, minSize, maxSize);
-                addTextBox({
-                    id: uuidv4(),
-                    x: pos.x - width / 2,
-                    y: pos.y - height / 2,
-                    width,
-                    height,
-                    text: '',
-                    kind: 'image',
-                    src,
-                });
-            };
-
-            const img = new Image();
-            img.onload = () => {
-                const w = img.naturalWidth || fallbackW;
-                const h = img.naturalHeight || fallbackH;
-                if (!w || !h) {
-                    addImageBox(fallbackW, fallbackH);
-                    return;
-                }
-                const scale = Math.min(1, maxSize / Math.max(w, h));
-                addImageBox(w * scale, h * scale);
-            };
-            img.onerror = () => addImageBox(fallbackW, fallbackH);
-            img.src = src;
+        const addImageBox = (w: number, h: number) => {
+            const width = clampBox(w, minSize, maxSize);
+            const height = clampBox(h, minSize, maxSize);
+            addTextBox({
+                id: uuidv4(),
+                x: pos.x - width / 2,
+                y: pos.y - height / 2,
+                width,
+                height,
+                text: '',
+                kind: 'image',
+                src,
+            });
         };
 
-        const createFileBoxAt = (attachment: Attachment, pos: { x: number; y: number }) => {
-            const width = clamp(280, 180, 420);
-            const height = clamp(170, 120, 300);
-                addTextBox({
-                    id: uuidv4(),
-                    x: pos.x - width / 2,
-                    y: pos.y - height / 2,
-                    width,
-                    height,
-                    text: '',
-                    kind: 'file',
-                    src: attachment.url ?? attachment.dataUrl,
-                    fileName: attachment.name,
-                    fileMime: attachment.mime,
-                    fileSize: attachment.size,
-                });
-            };
+        const img = new Image();
+        img.onload = () => {
+            const w = img.naturalWidth || fallbackW;
+            const h = img.naturalHeight || fallbackH;
+            if (!w || !h) {
+                addImageBox(fallbackW, fallbackH);
+                return;
+            }
+            const scale = Math.min(1, maxSize / Math.max(w, h));
+            addImageBox(w * scale, h * scale);
+        };
+        img.onerror = () => addImageBox(fallbackW, fallbackH);
+        img.src = src;
+    }, [addTextBox]);
 
+    const createFileBoxAt = useCallback((attachment: Attachment, pos: { x: number; y: number }) => {
+        const width = clampBox(280, 180, 420);
+        const height = clampBox(170, 120, 300);
+        addTextBox({
+            id: uuidv4(),
+            x: pos.x - width / 2,
+            y: pos.y - height / 2,
+            width,
+            height,
+            text: '',
+            kind: 'file',
+            src: attachment.url ?? attachment.dataUrl,
+            fileName: attachment.name,
+            fileMime: attachment.mime,
+            fileSize: attachment.size,
+        });
+    }, [addTextBox]);
+
+    const placeAttachmentsAt = useCallback((attachments: Attachment[], base: { x: number; y: number }) => {
         attachments.forEach((attachment, index) => {
             const nudge = index * 24;
             const pos = { x: base.x + nudge, y: base.y + nudge };
@@ -2820,14 +2813,51 @@ export const Canvas: React.FC = () => {
                 createFileBoxAt(attachment, pos);
             }
         });
+    }, [createFileBoxAt, createImageBoxAt]);
 
+    const uploadFilesAt = useCallback(async (files: File[], base: { x: number; y: number }) => {
+        if (!files.length) return;
+        const { attachments, rejected, failed } = await filesToAttachments(files, sessionId);
+        if (attachments.length) placeAttachmentsAt(attachments, base);
         if (rejected.length) {
             console.warn(`Some files were too large. Max size is ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
         }
         if (failed.length) {
             console.warn('Some files failed to upload.');
         }
-    }, [addTextBox, screenToWorldLatest, sessionId]);
+    }, [placeAttachmentsAt, sessionId]);
+
+    const handleFileDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
+        if (!e.dataTransfer?.files?.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const files = Array.from(e.dataTransfer.files);
+        if (!files.length) return;
+        const base = screenToWorldLatest(e.clientX, e.clientY);
+        await uploadFilesAt(files, base);
+    }, [screenToWorldLatest, uploadFilesAt]);
+
+    const getContextWorldPos = useCallback((menu: ContextMenuState) => {
+        if (Number.isFinite(menu.worldX) && Number.isFinite(menu.worldY)) {
+            return { x: menu.worldX as number, y: menu.worldY as number };
+        }
+        return screenToWorldLatest(menu.x, menu.y);
+    }, [screenToWorldLatest]);
+
+    const openContextUpload = useCallback((menu: ContextMenuState) => {
+        const input = filePickerRef.current;
+        if (!input) return;
+        uploadPointRef.current = getContextWorldPos(menu);
+        input.value = '';
+        input.click();
+    }, [getContextWorldPos]);
+
+    const handleContextFileInput = useCallback(async (files: FileList | null) => {
+        if (!files || files.length === 0) return;
+        const base = uploadPointRef.current ?? screenToWorldLatest(window.innerWidth / 2, window.innerHeight / 2);
+        uploadPointRef.current = null;
+        await uploadFilesAt(Array.from(files), base);
+    }, [screenToWorldLatest, uploadFilesAt]);
 
     const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
         if (Array.from(e.dataTransfer?.types ?? []).includes('Files')) {
@@ -2892,6 +2922,23 @@ export const Canvas: React.FC = () => {
             onDoubleClick={handleDoubleClick}
             style={{ cursor: textMode ? 'text' : penMode ? (penTool === 'eraser' ? 'cell' : 'crosshair') : undefined }}
         >
+            <input
+                ref={filePickerRef}
+                type="file"
+                multiple
+                style={{
+                    position: 'fixed',
+                    left: '-9999px',
+                    top: 0,
+                    width: 1,
+                    height: 1,
+                    opacity: 0,
+                }}
+                onChange={(e) => {
+                    handleContextFileInput(e.target.files);
+                    e.currentTarget.value = '';
+                }}
+            />
 	            {contextMenu && (
 	                <div
 	                    className={styles.contextMenuOverlay}
@@ -2940,6 +2987,26 @@ export const Canvas: React.FC = () => {
 	                                <MessageCircle size={18} />
 	                            </button>
 	                        )}
+                            {contextMenu.kind === 'canvas' && (
+                                <button
+                                    type="button"
+                                    className={styles.contextButton}
+                                    title="Upload file"
+                                    data-interactive="true"
+                                    onPointerDown={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                    }}
+                                    onClick={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        openContextUpload(contextMenu);
+                                        setContextMenu(null);
+                                    }}
+                                >
+                                    <Paperclip size={18} />
+                                </button>
+                            )}
 	                        {contextMenu.kind !== 'canvas' && (
 	                            <button
 	                                type="button"
