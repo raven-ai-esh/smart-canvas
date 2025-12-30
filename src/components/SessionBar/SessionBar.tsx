@@ -490,7 +490,8 @@ export const SessionBar: React.FC = () => {
                         drawings: [],
                         textBoxes: [],
                         comments: [],
-                        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {} },
+                        layers: useStore.getState().layers,
+                        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {} },
                     },
                 }),
             });
@@ -525,6 +526,8 @@ export const SessionBar: React.FC = () => {
                         edges: s.edges,
                         drawings: s.drawings,
                         textBoxes: s.textBoxes,
+                        comments: s.comments,
+                        layers: s.layers,
                         tombstones: s.tombstones,
                     }))(useStore.getState());
                     const res = await fetch('/api/sessions', {

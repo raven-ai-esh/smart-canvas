@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { computeEffectiveEnergy } from '../utils/energy';
 import { mergeSessionState, normalizeSessionState, type SessionState } from '../utils/sessionMerge';
+import { normalizeLayers, resolveLayerId } from '../utils/layers';
 import { debugLog } from '../utils/debug';
 import html2canvas from 'html2canvas';
 
@@ -30,18 +31,23 @@ function pickSessionState(state: ReturnType<typeof useStore.getState>) {
     drawings: state.drawings,
     textBoxes: state.textBoxes,
     comments: state.comments,
+    layers: state.layers,
     tombstones: state.tombstones,
   };
 }
 
 function applySessionState(state: SessionState) {
   const monitoringMode = useStore.getState().monitoringMode;
+  const nextLayers = normalizeLayers(state.layers);
+  const activeLayerId = resolveLayerId(nextLayers, useStore.getState().activeLayerId);
   useStore.setState({
     nodes: state.nodes as any,
     edges: state.edges as any,
     drawings: state.drawings as any,
     textBoxes: state.textBoxes as any,
     comments: state.comments as any,
+    layers: nextLayers,
+    activeLayerId,
     tombstones: state.tombstones,
     effectiveEnergy: computeEffectiveEnergy(state.nodes as any, state.edges as any, { blockDoneTasks: monitoringMode }),
     selectedNode: null,
@@ -208,7 +214,9 @@ export function useSessionSync() {
         drawings: [] as any,
         textBoxes: [] as any,
         comments: [] as any,
-	        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {} },
+        layers: normalizeLayers([]),
+        activeLayerId: resolveLayerId(normalizeLayers([]), null),
+	        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {} },
 	        selectedNode: null,
 	        selectedNodes: [],
 	        selectedEdge: null,
@@ -545,6 +553,7 @@ export function useSessionSync() {
             drawings: Object.keys(next.tombstones.drawings).length,
             textBoxes: Object.keys(next.tombstones.textBoxes).length,
             comments: Object.keys(next.tombstones.comments).length,
+            layers: Object.keys(next.tombstones.layers ?? {}).length,
           },
         });
         applySessionState(next);
@@ -606,6 +615,7 @@ export function useSessionSync() {
         drawings: Object.keys(desiredStateRef.current.tombstones.drawings).length,
         textBoxes: Object.keys(desiredStateRef.current.tombstones.textBoxes).length,
         comments: Object.keys(desiredStateRef.current.tombstones.comments).length,
+        layers: Object.keys(desiredStateRef.current.tombstones.layers ?? {}).length,
       },
     });
       ws.send(

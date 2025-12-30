@@ -2044,13 +2044,14 @@ async function createSession(id, state, opts = {}) {
 }
 
 function normalizeTombstones(raw) {
-  if (!raw || typeof raw !== 'object') return { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {} };
+  if (!raw || typeof raw !== 'object') return { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {} };
   return {
     nodes: raw.nodes && typeof raw.nodes === 'object' ? raw.nodes : {},
     edges: raw.edges && typeof raw.edges === 'object' ? raw.edges : {},
     drawings: raw.drawings && typeof raw.drawings === 'object' ? raw.drawings : {},
     textBoxes: raw.textBoxes && typeof raw.textBoxes === 'object' ? raw.textBoxes : {},
     comments: raw.comments && typeof raw.comments === 'object' ? raw.comments : {},
+    layers: raw.layers && typeof raw.layers === 'object' ? raw.layers : {},
   };
 }
 
@@ -2062,6 +2063,7 @@ function normalizeState(raw) {
     drawings: Array.isArray(obj.drawings) ? obj.drawings : [],
     textBoxes: Array.isArray(obj.textBoxes) ? obj.textBoxes : [],
     comments: Array.isArray(obj.comments) ? obj.comments : [],
+    layers: Array.isArray(obj.layers) ? obj.layers : [],
     theme: obj.theme === 'light' ? 'light' : 'dark',
     tombstones: normalizeTombstones(obj.tombstones),
   };
@@ -2078,12 +2080,14 @@ function mergeTombstones(a, b) {
     drawings: { ...ta.drawings },
     textBoxes: { ...ta.textBoxes },
     comments: { ...ta.comments },
+    layers: { ...ta.layers },
   };
   for (const [id, t] of Object.entries(tb.nodes)) out.nodes[id] = Math.max(ts(out.nodes[id]), ts(t));
   for (const [id, t] of Object.entries(tb.edges)) out.edges[id] = Math.max(ts(out.edges[id]), ts(t));
   for (const [id, t] of Object.entries(tb.drawings)) out.drawings[id] = Math.max(ts(out.drawings[id]), ts(t));
   for (const [id, t] of Object.entries(tb.textBoxes)) out.textBoxes[id] = Math.max(ts(out.textBoxes[id]), ts(t));
   for (const [id, t] of Object.entries(tb.comments)) out.comments[id] = Math.max(ts(out.comments[id]), ts(t));
+  for (const [id, t] of Object.entries(tb.layers)) out.layers[id] = Math.max(ts(out.layers[id]), ts(t));
   return out;
 }
 
@@ -2127,6 +2131,7 @@ function mergeState(currentRaw, incomingRaw) {
   const drawings = mergeById(current.drawings, incoming.drawings, tombstones.drawings);
   const textBoxes = mergeById(current.textBoxes, incoming.textBoxes, tombstones.textBoxes);
   const comments = mergeById(current.comments, incoming.comments, tombstones.comments);
+  const layers = mergeById(current.layers, incoming.layers, tombstones.layers);
 
   return {
     nodes,
@@ -2134,6 +2139,7 @@ function mergeState(currentRaw, incomingRaw) {
     drawings,
     textBoxes,
     comments,
+    layers,
     theme: current.theme,
     tombstones,
   };

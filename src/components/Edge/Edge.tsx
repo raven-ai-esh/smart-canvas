@@ -12,6 +12,97 @@ interface EdgeProps {
     onRequestContextMenu?: (args: { kind: 'edge' | 'selection'; id: string; x: number; y: number }) => void;
 }
 
+interface LayerBridgeEdgeProps {
+    id: string;
+    fromId: string;
+    toId: string;
+    layerLabel: string;
+}
+
+export const LayerBridgeEdge: React.FC<LayerBridgeEdgeProps> = ({ fromId, toId, layerLabel }) => {
+    const fromNode = useStore((state) => state.nodes.find((n) => n.id === fromId));
+    const toNode = useStore((state) => state.nodes.find((n) => n.id === toId));
+    const scale = useStore((state) => state.canvas.scale);
+    const isGraphMode = scale < 0.6;
+
+    if (!fromNode || !toNode) return null;
+
+    const sx = fromNode.x;
+    const sy = fromNode.y;
+    const tx = toNode.x;
+    const ty = toNode.y;
+
+    const geom = React.useMemo(() => {
+        const getNodeDimensions = (nodeId: string) => {
+            if (isGraphMode) return { w: 32, h: 32, shape: 'circle' as const };
+            const container = document.querySelector(`[data-node-id="${nodeId}"]`);
+            if (container) {
+                const isNoteMode = scale >= 1.2;
+                const targetSelector = isNoteMode ? '[class*="noteNode"]' : '[class*="cardNode"], [class*="taskNode"]';
+                const target = container.querySelector(targetSelector) as HTMLElement | null;
+                if (target) return { w: target.offsetWidth, h: target.offsetHeight, shape: 'box' as const };
+            }
+            return { w: 240, h: 100, shape: 'box' as const };
+        };
+
+        const dx = tx - sx;
+        const dy = ty - sy;
+        const distRaw = Math.sqrt(dx * dx + dy * dy) || 1;
+        const nx = dx / distRaw;
+        const ny = dy / distRaw;
+        const stubLen = Math.min(Math.max(80, distRaw * 0.35), 140);
+        const end = { x: sx + nx * stubLen, y: sy + ny * stubLen };
+        const portal = { x: end.x, y: end.y, r: isGraphMode ? 8 : 10 };
+        const cpOffset = Math.max(stubLen * 0.6, 40);
+
+        if (isGraphMode) {
+            const radius = 16;
+            const start = { x: sx + nx * radius, y: sy + ny * radius };
+            const cp1 = { x: start.x + nx * cpOffset, y: start.y + ny * cpOffset };
+            const cp2 = { x: end.x - nx * cpOffset * 0.4, y: end.y - ny * cpOffset * 0.4 };
+            const d = `M ${start.x} ${start.y} C ${cp1.x} ${cp1.y}, ${cp2.x} ${cp2.y}, ${end.x} ${end.y}`;
+            return { d, portal };
+        }
+
+        const dims = getNodeDimensions(fromId);
+        const hW = dims.w / 2;
+        const hH = dims.h / 2;
+        const adx = Math.abs(end.x - sx) < 0.0001 ? 0.0001 : Math.abs(end.x - sx);
+        const ady = Math.abs(end.y - sy) < 0.0001 ? 0.0001 : Math.abs(end.y - sy);
+        const txPlane = hW / adx;
+        const tyPlane = hH / ady;
+        let start;
+        let normal;
+        if (txPlane < tyPlane) {
+            const sign = end.x > sx ? 1 : -1;
+            start = { x: sx + sign * hW, y: sy + (end.y - sy) * txPlane };
+            normal = { x: sign, y: 0 };
+        } else {
+            const sign = end.y > sy ? 1 : -1;
+            start = { x: sx + (end.x - sx) * tyPlane, y: sy + sign * hH };
+            normal = { x: 0, y: sign };
+        }
+        const cp1 = { x: start.x + normal.x * cpOffset, y: start.y + normal.y * cpOffset };
+        const cp2 = { x: end.x - nx * cpOffset * 0.4, y: end.y - ny * cpOffset * 0.4 };
+        const d = `M ${start.x} ${start.y} C ${cp1.x} ${cp1.y}, ${cp2.x} ${cp2.y}, ${end.x} ${end.y}`;
+        return { d, portal };
+    }, [fromId, isGraphMode, scale, sx, sy, tx, ty]);
+
+    if (!geom) return null;
+    const label = layerLabel?.trim() ? layerLabel.trim() : 'Layer';
+    const glyph = label.slice(0, 1).toUpperCase();
+
+    return (
+        <g className={styles.edgeBridgeGroup} pointerEvents="none">
+            <path className={styles.edgeBridgePath} d={geom.d} />
+            <circle className={styles.edgeBridgePortal} cx={geom.portal.x} cy={geom.portal.y} r={geom.portal.r} />
+            <text className={styles.edgeBridgeLabel} x={geom.portal.x} y={geom.portal.y}>
+                {glyph}
+            </text>
+        </g>
+    );
+};
+
 // Subscribe to store parts granularly to optimize performance
 export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestContextMenu }) => {
     const sourceNode = useStore((state) => state.nodes.find((n) => n.id === sourceId));

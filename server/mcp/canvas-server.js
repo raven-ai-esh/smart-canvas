@@ -194,12 +194,14 @@ const emptyPatch = () => ({
   drawings: [],
   textBoxes: [],
   comments: [],
+  layers: [],
   tombstones: {
     nodes: {},
     edges: {},
     drawings: {},
     textBoxes: {},
     comments: {},
+    layers: {},
   },
 });
 
@@ -221,6 +223,7 @@ const normalizeTombstones = (input) => {
     drawings: toMap(base.drawings),
     textBoxes: toMap(base.textBoxes),
     comments: toMap(base.comments),
+    layers: toMap(base.layers),
   };
 };
 
@@ -230,6 +233,7 @@ const normalizePatch = (input) => ({
   drawings: Array.isArray(input?.drawings) ? input.drawings : [],
   textBoxes: Array.isArray(input?.textBoxes) ? input.textBoxes : [],
   comments: Array.isArray(input?.comments) ? input.comments : [],
+  layers: Array.isArray(input?.layers) ? input.layers : [],
   tombstones: normalizeTombstones(input?.tombstones),
 });
 

@@ -8,3 +8,4 @@ coverage/
 .coverage
 .vite/
 .DS_Store
+vcs.xml
