@@ -78,6 +78,7 @@ export const Canvas: React.FC = () => {
     const moveMode = useStore((state) => state.moveMode);
     const snapMode = useStore((state) => state.snapMode);
     const snowEnabled = useStore((state) => state.snowEnabled);
+    const sessionId = useStore((state) => state.sessionId);
     const theme = useStore((state) => state.theme);
     const comments = useStore((state) => state.comments);
     const commentsMode = useStore((state) => state.commentsMode);
@@ -629,15 +630,16 @@ export const Canvas: React.FC = () => {
 
     const handleDraftAttachmentInput = useCallback(async (files: FileList | null) => {
         if (!files || files.length === 0) return;
-        // Convert selected files to data URLs so they can travel with the session state.
-        const { attachments, rejected } = await filesToAttachments(Array.from(files));
+        const { attachments, rejected, failed } = await filesToAttachments(Array.from(files), sessionId);
         if (attachments.length) {
             setDraftAttachments((prev) => [...prev, ...attachments]);
         }
         if (rejected.length) {
             setDraftNotice(`Max file size is ${formatBytes(MAX_ATTACHMENT_BYTES)}`);
+        } else if (failed.length) {
+            setDraftNotice('Upload failed. Please try again.');
         }
-    }, []);
+    }, [sessionId]);
 
     const submitReply = useCallback((parent: Comment) => {
         if (!me) {
@@ -1121,13 +1123,17 @@ export const Canvas: React.FC = () => {
             }
         };
 
-        const getPastePlacement = () => {
+        type Placement = { pos: { x: number; y: number }; offset: number };
+
+        const getPastePlacement = (): Placement => {
             const n = pasteCountRef.current++;
             return {
                 pos: getPasteWorldPos(),
                 offset: 36 + (n % 6) * 10,
             };
         };
+
+        const resolvePlacement = (placement?: Placement) => placement ?? getPastePlacement();
 
         const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -1194,8 +1200,8 @@ export const Canvas: React.FC = () => {
             createTextBoxFromText(url.toString());
         };
 
-        const createImageBox = (src: string) => {
-            const { pos, offset } = getPastePlacement();
+        const createImageBox = (src: string, placement?: Placement) => {
+            const { pos, offset } = resolvePlacement(placement);
             const maxSize = 360;
             const minSize = 140;
             const fallbackW = 320;
@@ -1242,48 +1248,19 @@ export const Canvas: React.FC = () => {
             }
         };
 
-        const readBlobAsDataUrl = (blob: Blob) => new Promise<string | null>((resolve) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : null);
-            reader.onerror = () => resolve(null);
-            reader.readAsDataURL(blob);
-        });
-
-        const downscaleImageBlob = async (blob: Blob) => {
-            const fallback = () => readBlobAsDataUrl(blob);
-            if (!blob.type.startsWith('image/')) return fallback();
-            if (typeof createImageBitmap !== 'function') return fallback();
-
-            try {
-                const bitmap = await createImageBitmap(blob);
-                const w = bitmap.width || 0;
-                const h = bitmap.height || 0;
-                if (!w || !h) {
-                    bitmap.close?.();
-                    return fallback();
-                }
-                const maxDim = 960;
-                const scale = Math.min(1, maxDim / Math.max(w, h));
-                if (scale >= 1) {
-                    bitmap.close?.();
-                    return fallback();
-                }
-                const canvas = document.createElement('canvas');
-                canvas.width = Math.max(1, Math.round(w * scale));
-                canvas.height = Math.max(1, Math.round(h * scale));
-                const ctx = canvas.getContext('2d');
-                if (!ctx) {
-                    bitmap.close?.();
-                    return fallback();
-                }
-                ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-                bitmap.close?.();
-                const webp = canvas.toDataURL('image/webp', 0.92);
-                if (webp.startsWith('data:image/webp')) return webp;
-                return canvas.toDataURL('image/png');
-            } catch {
-                return fallback();
+        const uploadClipboardImage = async (blob: Blob) => {
+            if (!sessionId) return null;
+            const ext = blob.type.split('/')[1] || 'png';
+            const name = `clipboard-${Date.now()}.${ext}`;
+            const file = new File([blob], name, { type: blob.type || 'image/png' });
+            const { attachments, rejected, failed } = await filesToAttachments([file], sessionId);
+            if (rejected.length) {
+                console.warn(`Clipboard image exceeded max size of ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
             }
+            if (failed.length) {
+                console.warn('Clipboard image failed to upload.');
+            }
+            return attachments[0] ?? null;
         };
 
         const doPasteSelection = (payload: ClipboardPayload | null) => {
@@ -1426,9 +1403,9 @@ export const Canvas: React.FC = () => {
             }
 
             if (imageBlob) {
-                const dataUrl = await downscaleImageBlob(imageBlob);
-                if (dataUrl) {
-                    createImageBox(dataUrl);
+                const attachment = await uploadClipboardImage(imageBlob);
+                if (attachment?.url || attachment?.dataUrl) {
+                    createImageBox(attachment.url ?? attachment.dataUrl ?? '');
                     return true;
                 }
             }
@@ -1512,9 +1489,9 @@ export const Canvas: React.FC = () => {
                     }
 
                     if (imageBlob) {
-                        const dataUrl = await downscaleImageBlob(imageBlob);
-                        if (dataUrl) {
-                            createImageBox(dataUrl);
+                        const attachment = await uploadClipboardImage(imageBlob);
+                        if (attachment?.url || attachment?.dataUrl) {
+                            createImageBox(attachment.url ?? attachment.dataUrl ?? '');
                             return;
                         }
                     }
@@ -2768,6 +2745,97 @@ export const Canvas: React.FC = () => {
         });
     }, [screenToWorldLatest]);
 
+    const handleFileDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
+        if (!e.dataTransfer?.files?.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const files = Array.from(e.dataTransfer.files);
+        if (!files.length) return;
+        const { attachments, rejected, failed } = await filesToAttachments(files, sessionId);
+        if (!attachments.length) return;
+
+        const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+        const base = screenToWorldLatest(e.clientX, e.clientY);
+
+        const createImageBoxAt = (src: string, pos: { x: number; y: number }) => {
+            const maxSize = 360;
+            const minSize = 140;
+            const fallbackW = 320;
+            const fallbackH = 240;
+
+            const addImageBox = (w: number, h: number) => {
+                const width = clamp(w, minSize, maxSize);
+                const height = clamp(h, minSize, maxSize);
+                addTextBox({
+                    id: uuidv4(),
+                    x: pos.x - width / 2,
+                    y: pos.y - height / 2,
+                    width,
+                    height,
+                    text: '',
+                    kind: 'image',
+                    src,
+                });
+            };
+
+            const img = new Image();
+            img.onload = () => {
+                const w = img.naturalWidth || fallbackW;
+                const h = img.naturalHeight || fallbackH;
+                if (!w || !h) {
+                    addImageBox(fallbackW, fallbackH);
+                    return;
+                }
+                const scale = Math.min(1, maxSize / Math.max(w, h));
+                addImageBox(w * scale, h * scale);
+            };
+            img.onerror = () => addImageBox(fallbackW, fallbackH);
+            img.src = src;
+        };
+
+        const createFileBoxAt = (attachment: Attachment, pos: { x: number; y: number }) => {
+            const width = clamp(280, 180, 420);
+            const height = clamp(170, 120, 300);
+                addTextBox({
+                    id: uuidv4(),
+                    x: pos.x - width / 2,
+                    y: pos.y - height / 2,
+                    width,
+                    height,
+                    text: '',
+                    kind: 'file',
+                    src: attachment.url ?? attachment.dataUrl,
+                    fileName: attachment.name,
+                    fileMime: attachment.mime,
+                    fileSize: attachment.size,
+                });
+            };
+
+        attachments.forEach((attachment, index) => {
+            const nudge = index * 24;
+            const pos = { x: base.x + nudge, y: base.y + nudge };
+            if (attachment.kind === 'image') {
+                createImageBoxAt(attachment.url ?? attachment.dataUrl ?? '', pos);
+            } else {
+                createFileBoxAt(attachment, pos);
+            }
+        });
+
+        if (rejected.length) {
+            console.warn(`Some files were too large. Max size is ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
+        }
+        if (failed.length) {
+            console.warn('Some files failed to upload.');
+        }
+    }, [addTextBox, screenToWorldLatest, sessionId]);
+
+    const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+        if (Array.from(e.dataTransfer?.types ?? []).includes('Files')) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+        }
+    }, []);
+
     // Helper to generate SVG path from points
     const getSvgPath = (points: { x: number; y: number }[]) => {
         if (points.length === 0) return '';
@@ -2813,11 +2881,13 @@ export const Canvas: React.FC = () => {
             ref={containerRef}
             className={`${styles.canvasContainer} ${mode === 'panning' ? styles.panning : ''}`}
             data-canvas-root="true"
-	    onPointerDown={handlePointerDown}
+            onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerLeave={handlePointerLeave}
             onPointerCancel={handlePointerCancel}
+            onDragOver={handleDragOver}
+            onDrop={handleFileDrop}
             onContextMenu={handleContextMenu}
             onDoubleClick={handleDoubleClick}
             style={{ cursor: textMode ? 'text' : penMode ? (penTool === 'eraser' ? 'cell' : 'crosshair') : undefined }}
@@ -3117,7 +3187,7 @@ export const Canvas: React.FC = () => {
                                                 {comment.attachments.map((attachment) => (
                                                     <a
                                                         key={attachment.id}
-                                                        href={attachment.dataUrl}
+                                                        href={attachment.url ?? attachment.dataUrl ?? ''}
                                                         download={attachment.name}
                                                         className={styles.commentAttachmentFile}
                                                     >

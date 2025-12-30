@@ -545,7 +545,8 @@ const sanitizeComment = (comment) => {
 const sanitizeTextBox = (textBox) => {
   if (!textBox || typeof textBox !== 'object') return textBox;
   const hasSrc = typeof textBox.src === 'string' && textBox.src.trim();
-  if (!hasSrc && textBox.kind !== 'image') return textBox;
+  const isMediaKind = textBox.kind === 'image' || textBox.kind === 'file';
+  if (!hasSrc || !isMediaKind) return textBox;
   return { ...textBox, src: null };
 };
 
@@ -1062,8 +1063,11 @@ registerTool(
       width: z.number().optional(),
       height: z.number().optional(),
       text: z.string().optional(),
-      kind: z.enum(['text', 'image']).optional(),
+      kind: z.enum(['text', 'image', 'file']).optional(),
       src: z.string().optional(),
+      fileName: z.string().optional(),
+      fileMime: z.string().optional(),
+      fileSize: z.number().optional(),
       patch: z.any().optional(),
       authorId: z.string().nullable().optional(),
       authorName: z.string().nullable().optional(),
@@ -1115,6 +1119,9 @@ registerTool(
         text: input.text,
         kind: input.kind,
         src: input.src,
+        fileName: input.fileName,
+        fileMime: input.fileMime,
+        fileSize: input.fileSize,
         authorId: author.authorId ?? undefined,
         authorName: author.authorName ?? undefined,
         createdAt: now,
@@ -1175,7 +1182,8 @@ registerTool(
         name: z.string(),
         size: z.number(),
         mime: z.string(),
-        dataUrl: z.string(),
+        url: z.string().optional(),
+        dataUrl: z.string().optional(),
       })).optional(),
       patch: z.any().optional(),
       authorId: z.string().nullable().optional(),

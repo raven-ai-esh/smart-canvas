@@ -827,7 +827,7 @@ export const useStore = create<AppState>()(
                         ...pushHistoryReducer(state),
                         textBoxes,
                         tombstones,
-                        editingTextBoxId: normalized.kind === 'image' ? null : normalized.id,
+                        editingTextBoxId: normalized.kind === 'image' || normalized.kind === 'file' ? null : normalized.id,
                         selectedTextBoxId: normalized.id,
                         selectedTextBoxes: [normalized.id],
                         selectedNode: null,

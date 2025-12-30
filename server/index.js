@@ -4,6 +4,9 @@ import cors from 'cors';
 import { Pool } from 'pg';
 import { WebSocketServer } from 'ws';
 import { randomUUID, createHash, randomBytes, createHmac } from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import Busboy from 'busboy';
 import cookieParser from 'cookie-parser';
 import cookie from 'cookie';
 import bcrypt from 'bcryptjs';
@@ -79,6 +82,11 @@ const ASSISTANT_TOKEN_ESTIMATE_CHARS = Number(process.env.ASSISTANT_TOKEN_ESTIMA
 const ASSISTANT_OUTPUT_RESERVE_TOKENS = Number(process.env.ASSISTANT_OUTPUT_RESERVE_TOKENS ?? 0);
 const ALERT_WEBHOOK_TIMEOUT_MS = Number(process.env.ALERT_WEBHOOK_TIMEOUT_MS ?? 5000);
 const ALERT_PUBLIC_BASE_URL = normalizeEnvValue(process.env.ALERT_PUBLIC_BASE_URL) || APP_ORIGIN || '';
+const ATTACHMENTS_DIR = process.env.ATTACHMENTS_DIR ?? path.join(process.cwd(), 'data', 'attachments');
+const ATTACHMENTS_MAX_BYTES_RAW = Number(process.env.ATTACHMENTS_MAX_BYTES ?? 33554432);
+const ATTACHMENTS_MAX_BYTES = Number.isFinite(ATTACHMENTS_MAX_BYTES_RAW) && ATTACHMENTS_MAX_BYTES_RAW > 0
+  ? Math.floor(ATTACHMENTS_MAX_BYTES_RAW)
+  : 33554432;
 const ENTITY_COUNT_INTERVAL_MS = Number(process.env.ENTITY_COUNT_INTERVAL_MS ?? 60000);
 const REDIS_URL = process.env.REDIS_URL ?? '';
 const EMBEDDING_DIM = Number(process.env.OPENAI_EMBEDDING_DIM ?? 1536);
@@ -256,6 +264,24 @@ async function initDb() {
   `);
   try {
     await pool.query('CREATE INDEX IF NOT EXISTS session_savers_user_idx ON session_savers (user_id)');
+  } catch {
+    // ignore
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS attachments (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      name TEXT NOT NULL,
+      mime TEXT NOT NULL,
+      size BIGINT NOT NULL,
+      storage_path TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS attachments_session_idx ON attachments (session_id)');
   } catch {
     // ignore
   }
@@ -519,6 +545,49 @@ async function initDbWithRetry() {
 async function getSession(id) {
   const res = await pool.query(
     'SELECT id, state, version, name, owner_id, saved_at, expires_at FROM sessions WHERE id = $1 AND (expires_at IS NULL OR expires_at > NOW())',
+    [id],
+  );
+  return res.rows[0] ?? null;
+}
+
+const ensureDir = async (dirPath) => {
+  await fs.promises.mkdir(dirPath, { recursive: true });
+};
+
+const safeUnlink = async (filePath) => {
+  if (!filePath) return;
+  try {
+    await fs.promises.unlink(filePath);
+  } catch {
+    // ignore
+  }
+};
+
+const sanitizeFilename = (name) => {
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  const base = trimmed ? path.basename(trimmed) : 'attachment';
+  const normalized = base.replace(/[^\w.\- ]+/g, '_').slice(0, 180);
+  return normalized || 'attachment';
+};
+
+const buildStorageName = (id, originalName) => {
+  const ext = path.extname(originalName || '').slice(0, 12);
+  return ext ? `${id}${ext}` : id;
+};
+
+async function createAttachment({ id, sessionId, userId, name, mime, size, storagePath }) {
+  const res = await pool.query(
+    `INSERT INTO attachments (id, session_id, user_id, name, mime, size, storage_path)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id, session_id, user_id, name, mime, size, storage_path, created_at`,
+    [id, sessionId, userId ?? null, name, mime, size, storagePath],
+  );
+  return res.rows[0] ?? null;
+}
+
+async function getAttachmentById(id) {
+  const res = await pool.query(
+    'SELECT id, session_id, user_id, name, mime, size, storage_path FROM attachments WHERE id = $1',
     [id],
   );
   return res.rows[0] ?? null;
@@ -4398,6 +4467,177 @@ app.get('/api/sessions/:id', async (req, res) => {
   res.json(serializeSession(access.session));
 });
 
+app.post('/api/attachments', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+
+  let sessionId = typeof req.query?.sessionId === 'string' ? req.query.sessionId.trim() : '';
+  const tmpDir = path.join(ATTACHMENTS_DIR, 'tmp');
+  await ensureDir(tmpDir);
+
+  let fileMeta = null;
+  let uploadError = null;
+  let writePromise = null;
+
+  try {
+    await new Promise((resolve, reject) => {
+      const bb = Busboy({
+        headers: req.headers,
+        limits: { files: 1, fileSize: ATTACHMENTS_MAX_BYTES },
+      });
+
+      bb.on('field', (name, value) => {
+        if (name === 'sessionId' && !sessionId) {
+          sessionId = String(value ?? '').trim();
+        }
+      });
+
+      bb.on('file', (name, file, info) => {
+        if (name !== 'file') {
+          file.resume();
+          return;
+        }
+        if (fileMeta) {
+          file.resume();
+          return;
+        }
+        const filename = sanitizeFilename(info?.filename || 'attachment');
+        const mime = info?.mimeType || 'application/octet-stream';
+        const tmpId = randomUUID();
+        const tmpPath = path.join(tmpDir, `${tmpId}.upload`);
+        const writeStream = fs.createWriteStream(tmpPath);
+        let size = 0;
+
+        writePromise = new Promise((resolveWrite, rejectWrite) => {
+          writeStream.on('finish', resolveWrite);
+          writeStream.on('error', rejectWrite);
+        });
+
+        file.on('data', (chunk) => {
+          size += chunk.length;
+        });
+        file.on('limit', () => {
+          uploadError = 'file_too_large';
+          file.unpipe(writeStream);
+          writeStream.destroy();
+        });
+        file.on('error', () => {
+          uploadError = 'file_stream_failed';
+        });
+        writeStream.on('error', () => {
+          uploadError = 'file_write_failed';
+        });
+        file.on('end', () => {
+          fileMeta = { filename, mime, size, tmpPath };
+        });
+
+        file.pipe(writeStream);
+      });
+
+      bb.on('error', reject);
+      bb.on('finish', resolve);
+      req.pipe(bb);
+    });
+  } catch {
+    return res.status(400).json({ error: 'upload_failed' });
+  }
+
+  try {
+    if (writePromise) await writePromise;
+  } catch {
+    uploadError = uploadError ?? 'file_write_failed';
+  }
+
+  if (uploadError === 'file_too_large') {
+    await safeUnlink(fileMeta?.tmpPath);
+    return res.status(413).json({ error: 'file_too_large' });
+  }
+
+  if (uploadError) {
+    await safeUnlink(fileMeta?.tmpPath);
+    return res.status(400).json({ error: uploadError });
+  }
+
+  if (!fileMeta) {
+    return res.status(400).json({ error: 'file_required' });
+  }
+  if (!sessionId) {
+    await safeUnlink(fileMeta.tmpPath);
+    return res.status(400).json({ error: 'session_id_required' });
+  }
+
+  const access = await resolveSessionAccess({ sessionId, auth });
+  if (access.error === 'unauthorized') {
+    await safeUnlink(fileMeta.tmpPath);
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  if (access.error === 'forbidden') {
+    await safeUnlink(fileMeta.tmpPath);
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  if (access.error === 'not_found') {
+    await safeUnlink(fileMeta.tmpPath);
+    return res.status(404).json({ error: 'not_found' });
+  }
+
+  await ensureDir(ATTACHMENTS_DIR);
+  const id = randomUUID();
+  const storageName = buildStorageName(id, fileMeta.filename);
+  const finalPath = path.join(ATTACHMENTS_DIR, storageName);
+  try {
+    await fs.promises.rename(fileMeta.tmpPath, finalPath);
+  } catch {
+    await safeUnlink(fileMeta.tmpPath);
+    return res.status(500).json({ error: 'storage_failed' });
+  }
+
+  const row = await createAttachment({
+    id,
+    sessionId,
+    userId: auth.userId,
+    name: fileMeta.filename,
+    mime: fileMeta.mime,
+    size: fileMeta.size,
+    storagePath: storageName,
+  });
+  if (!row) return res.status(500).json({ error: 'storage_failed' });
+
+  res.status(201).json({
+    id: row.id,
+    url: `/api/attachments/${row.id}`,
+    name: row.name,
+    size: row.size,
+    mime: row.mime,
+  });
+});
+
+app.get('/api/attachments/:id', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  const id = String(req.params.id || '').trim();
+  if (!id) return res.status(400).json({ error: 'bad_request' });
+
+  const attachment = await getAttachmentById(id);
+  if (!attachment) return res.status(404).json({ error: 'not_found' });
+
+  const access = await resolveSessionAccess({ sessionId: attachment.session_id, auth });
+  if (access.error === 'unauthorized') return res.status(401).json({ error: 'unauthorized' });
+  if (access.error === 'forbidden') return res.status(403).json({ error: 'forbidden' });
+  if (access.error === 'not_found') return res.status(404).json({ error: 'not_found' });
+
+  const filePath = path.join(ATTACHMENTS_DIR, attachment.storage_path);
+  try {
+    await fs.promises.access(filePath, fs.constants.R_OK);
+  } catch {
+    return res.status(404).json({ error: 'not_found' });
+  }
+
+  const safeName = (attachment.name || 'attachment').replace(/"/g, '');
+  const encoded = encodeURIComponent(safeName);
+  res.setHeader('Content-Type', attachment.mime || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `inline; filename="${safeName}"; filename*=UTF-8''${encoded}`);
+  res.sendFile(filePath);
+});
+
 app.get('/api/sessions/:id/savers', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
@@ -4576,6 +4816,7 @@ const ENTITY_COUNT_QUERIES = [
   { entity: 'assistant_summaries', sql: 'SELECT COUNT(*)::int AS count FROM assistant_summaries' },
   { entity: 'assistant_contexts', sql: 'SELECT COUNT(*)::int AS count FROM assistant_contexts' },
   { entity: 'assistant_memories', sql: 'SELECT COUNT(*)::int AS count FROM assistant_memories' },
+  { entity: 'attachments', sql: 'SELECT COUNT(*)::int AS count FROM attachments' },
 ];
 
 const normalizeIntervalMs = (value, fallback) => {

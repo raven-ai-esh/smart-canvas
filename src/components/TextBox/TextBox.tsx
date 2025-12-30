@@ -1,6 +1,11 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
+import { Download, FileText, X } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { TextBox as TextBoxType } from '../../types';
 import { useStore } from '../../store/useStore';
+import { formatBytes } from '../../utils/attachments';
 import styles from './TextBox.module.css';
 
 const MIN_W = 80;
@@ -11,6 +16,17 @@ const INNER_PAD_Y = 16; // top+bottom (8+8)
 const BORDER_BOX_SHRINK = 2; // 1px border on each side with box-sizing: border-box
 const LONG_PRESS_MS = 500;
 const TOUCH_DRAG_THRESHOLD = 8;
+const MAX_PDF_PREVIEW_BYTES = 10 * 1024 * 1024;
+const MAX_MARKDOWN_RENDER_CHARS = 20_000;
+
+type PreviewState =
+  | { status: 'idle' }
+  | { status: 'loading'; kind: string }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; kind: 'pdf'; src: string }
+  | { status: 'ready'; kind: 'text' | 'markdown' | 'json'; text: string; truncated?: boolean }
+  | { status: 'ready'; kind: 'table'; rows: string[][]; truncated: boolean }
+  | { status: 'ready'; kind: 'html'; html: string };
 
 type SnapAnchor = 'center' | 'topleft';
 type SnapRequest = {
@@ -22,6 +38,18 @@ type SnapRequest = {
   excludeNodeIds?: string[];
   excludeTextBoxIds?: string[];
 };
+
+const getFileExtension = (name: string) => {
+  const trimmed = name.trim();
+  const idx = trimmed.lastIndexOf('.');
+  if (idx === -1) return '';
+  return trimmed.slice(idx + 1).toLowerCase();
+};
+
+const yieldToUi = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+const createPreviewWorker = () =>
+  new Worker(new URL('../../workers/filePreview.worker.ts', import.meta.url), { type: 'module' });
 
 export function TextBox({
   box,
@@ -48,7 +76,15 @@ export function TextBox({
 
   const isEditing = editingId === box.id;
   const isImage = box.kind === 'image' && typeof box.src === 'string' && box.src.length > 0;
+  const isFile = box.kind === 'file' && typeof box.src === 'string' && box.src.length > 0;
+  const isMedia = isImage || isFile;
   const isSelected = selectedId === box.id || selectedIds.includes(box.id);
+  const fileName = typeof box.fileName === 'string' ? box.fileName.trim() : '';
+  const fileMime = typeof box.fileMime === 'string' ? box.fileMime.trim() : '';
+  const fileSize = Number.isFinite(box.fileSize) ? Number(box.fileSize) : null;
+  const fileExt = getFileExtension(fileName);
+  const fileBadge = fileExt ? fileExt.toUpperCase() : 'FILE';
+  const fileDisplayName = fileName || 'Document';
   const authorLabel = typeof box.authorName === 'string' ? box.authorName.trim() : '';
   const [isHovered, setIsHovered] = React.useState(false);
   const showAuthor = authorshipMode && !!authorLabel && (isHovered || isSelected);
@@ -58,6 +94,10 @@ export function TextBox({
   const lastTapRef = React.useRef<{ t: number; x: number; y: number } | null>(null);
 
   const [fontSize, setFontSize] = React.useState(14);
+  const [previewOpen, setPreviewOpen] = React.useState(false);
+  const [previewState, setPreviewState] = React.useState<PreviewState>({ status: 'idle' });
+  const previewWorkerRef = React.useRef<Worker | null>(null);
+  const previewRequestRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     if (!isEditing) editHistoryRef.current = false;
@@ -83,10 +123,135 @@ export function TextBox({
     }
   }, [isEditing]);
 
+  React.useEffect(() => {
+    if (!previewOpen || !isFile || !box.src) {
+      if (previewWorkerRef.current) {
+        previewWorkerRef.current.terminate();
+        previewWorkerRef.current = null;
+      }
+      previewRequestRef.current = null;
+      setPreviewState({ status: 'idle' });
+      return;
+    }
+    const src = box.src;
+    let cancelled = false;
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const run = async () => {
+      const ext = getFileExtension(fileName);
+      const mime = fileMime.toLowerCase();
+      const isPdf = mime === 'application/pdf' || ext === 'pdf';
+      const isMarkdown = ext === 'md' || mime === 'text/markdown' || mime === 'text/x-markdown';
+      const isText = ext === 'txt' || mime.startsWith('text/plain');
+      const isJson = ext === 'json' || mime === 'application/json';
+      const isCsv = ext === 'csv' || mime === 'text/csv';
+      const isDocx = ext === 'docx' || mime.includes('wordprocessingml');
+      const isDoc = ext === 'doc' || mime === 'application/msword';
+      const isXlsx = ext === 'xlsx' || mime.includes('spreadsheet') || mime.includes('excel');
+
+      try {
+        if (isPdf) {
+          if (!cancelled) {
+            if (Number.isFinite(fileSize) && fileSize && fileSize > MAX_PDF_PREVIEW_BYTES) {
+              setPreviewState({ status: 'error', message: 'Preview is disabled for large PDF files. Download instead.' });
+            } else {
+              setPreviewState({ status: 'ready', kind: 'pdf', src });
+            }
+          }
+          return;
+        }
+        if (isDoc) {
+          if (!cancelled) setPreviewState({ status: 'error', message: 'Preview is not available for .doc files.' });
+          return;
+        }
+        if (!cancelled) {
+          setPreviewState({ status: 'loading', kind: isXlsx ? 'xlsx' : isDocx ? 'docx' : isCsv ? 'table' : isJson ? 'json' : isMarkdown ? 'markdown' : isText ? 'text' : 'file' });
+        }
+        await yieldToUi();
+        if (cancelled) return;
+
+        if (previewWorkerRef.current) {
+          previewWorkerRef.current.terminate();
+        }
+        const worker = createPreviewWorker();
+        previewWorkerRef.current = worker;
+        const requestId = typeof crypto?.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        previewRequestRef.current = requestId;
+
+        worker.onmessage = (evt) => {
+          const msg = evt.data;
+          if (!msg || msg.id !== previewRequestRef.current) return;
+          if (msg.status === 'error') {
+            setPreviewState({ status: 'error', message: msg.message || 'Failed to load preview.' });
+            return;
+          }
+          if (msg.status === 'ready' && msg.kind === 'pdf') {
+            setPreviewState({ status: 'ready', kind: 'pdf', src: msg.src });
+            return;
+          }
+          if (msg.status === 'ready' && (msg.kind === 'text' || msg.kind === 'markdown' || msg.kind === 'json')) {
+            setPreviewState({ status: 'ready', kind: msg.kind, text: msg.text ?? '', truncated: !!msg.truncated });
+            return;
+          }
+          if (msg.status === 'ready' && msg.kind === 'table') {
+            setPreviewState({ status: 'ready', kind: 'table', rows: Array.isArray(msg.rows) ? msg.rows : [], truncated: !!msg.truncated });
+            return;
+          }
+          if (msg.status === 'ready' && msg.kind === 'html') {
+            setPreviewState({ status: 'ready', kind: 'html', html: msg.html ?? '' });
+            return;
+          }
+          setPreviewState({ status: 'error', message: 'Failed to load preview.' });
+        };
+
+        worker.onerror = () => {
+          if (!cancelled) setPreviewState({ status: 'error', message: 'Failed to load preview.' });
+        };
+
+        worker.postMessage({
+          id: requestId,
+          src,
+          fileName,
+          fileMime,
+          fileSize,
+          kind: isXlsx ? 'xlsx' : isDocx ? 'docx' : isCsv ? 'csv' : isJson ? 'json' : isMarkdown ? 'markdown' : isText ? 'text' : 'file',
+        });
+      } catch (err) {
+        const aborted = (err instanceof DOMException && err.name === 'AbortError') || signal.aborted;
+        if (!cancelled && !aborted) {
+          setPreviewState({ status: 'error', message: 'Failed to load preview.' });
+        }
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (previewWorkerRef.current) {
+        previewWorkerRef.current.terminate();
+        previewWorkerRef.current = null;
+      }
+      previewRequestRef.current = null;
+    };
+  }, [previewOpen, isFile, box.src, fileName, fileMime]);
+
+  React.useEffect(() => {
+    if (!previewOpen) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPreviewOpen(false);
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [previewOpen]);
+
   // Auto-fit font size to the current box (smooth updates, no jumping).
   React.useEffect(() => {
     const el = measureRef.current;
-    if (isImage) return;
+    if (isMedia) return;
     if (!el) return;
 
     // The container uses `box-sizing: border-box` and has a 1px border even when transparent.
@@ -126,7 +291,7 @@ export function TextBox({
     });
 
     return () => cancelAnimationFrame(raf);
-  }, [box.width, box.height, box.text]);
+  }, [box.width, box.height, box.text, isMedia]);
 
   // Auto-expand box height while editing (so text doesn't get cut off and doesn't require scrolling).
   React.useEffect(() => {
@@ -457,6 +622,10 @@ export function TextBox({
 
   const onDoubleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (isFile) {
+      setPreviewOpen(true);
+      return;
+    }
     if (isImage) return;
     setEditingId(box.id);
     selectTextBox(box.id);
@@ -589,7 +758,7 @@ export function TextBox({
         />
       ) : (
         <div
-          className={`${styles.display} ${(!isImage && !box.text) ? styles.placeholder : ''}`}
+          className={`${styles.display} ${(!isMedia && !box.text) ? styles.placeholder : ''}`}
           style={{ fontSize, lineHeight: 1.25 }}
           onPointerMove={onDragMove}
           onPointerUp={endDrag}
@@ -597,6 +766,30 @@ export function TextBox({
         >
           {isImage ? (
             <img className={styles.imageDisplay} src={box.src} alt="" draggable={false} />
+          ) : isFile ? (
+            <div className={styles.fileCard}>
+              <div className={styles.fileIcon}>
+                <FileText size={26} />
+                <span className={styles.fileBadge}>{fileBadge}</span>
+              </div>
+              <div className={styles.fileInfo}>
+                <div className={styles.fileName}>{fileDisplayName}</div>
+                <div className={styles.fileMeta}>
+                  {fileSize !== null ? formatBytes(fileSize) : 'Unknown size'}
+                </div>
+              </div>
+              <button
+                type="button"
+                className={styles.fileOpenButton}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPreviewOpen(true);
+                }}
+              >
+                Open
+              </button>
+            </div>
           ) : (
             (box.text || 'Type…')
           )}
@@ -611,6 +804,109 @@ export function TextBox({
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
         />
+      )}
+      {previewOpen && isFile && typeof document !== 'undefined' && box.src && createPortal(
+        <div className={styles.previewOverlay}>
+          <div
+            className={styles.previewModal}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className={styles.previewHeader}>
+              <div className={styles.previewTitle}>
+                {fileDisplayName}
+                {fileSize !== null ? ` · ${formatBytes(fileSize)}` : ''}
+              </div>
+              <div className={styles.previewActions}>
+                <a
+                  className={styles.previewButton}
+                  href={box.src}
+                  download={fileDisplayName}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Download size={14} />
+                  Download
+                </a>
+                <button
+                  type="button"
+                  className={styles.previewButton}
+                  onClick={() => setPreviewOpen(false)}
+                >
+                  <X size={14} />
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className={styles.previewBody}>
+              {previewState.status === 'loading' && (
+                <div className={styles.previewLoading}>
+                  <span className={styles.previewSpinner} aria-hidden="true" />
+                  Loading preview…
+                </div>
+              )}
+              {previewState.status === 'error' && (
+                <div className={styles.previewError}>{previewState.message}</div>
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'pdf' && (
+                <iframe className={styles.previewFrame} src={previewState.src} title={fileDisplayName} />
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'text' && (
+                <>
+                  <pre className={styles.previewText}>{previewState.text}</pre>
+                  {previewState.truncated && (
+                    <div className={styles.previewNotice}>Preview truncated. Download for full content.</div>
+                  )}
+                </>
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'json' && (
+                <>
+                  <pre className={styles.previewText}>{previewState.text}</pre>
+                  {previewState.truncated && (
+                    <div className={styles.previewNotice}>Preview truncated. Download for full content.</div>
+                  )}
+                </>
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'markdown' && (
+                <>
+                  {previewState.text.length > MAX_MARKDOWN_RENDER_CHARS ? (
+                    <pre className={styles.previewText}>{previewState.text}</pre>
+                  ) : (
+                    <div className={styles.previewMarkdown}>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewState.text}</ReactMarkdown>
+                    </div>
+                  )}
+                  {previewState.truncated && (
+                    <div className={styles.previewNotice}>Preview truncated. Download for full content.</div>
+                  )}
+                </>
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'html' && (
+                <div
+                  className={styles.previewDoc}
+                  dangerouslySetInnerHTML={{ __html: previewState.html }}
+                />
+              )}
+              {previewState.status === 'ready' && previewState.kind === 'table' && (
+                <div className={styles.previewTableWrap}>
+                  <table className={styles.previewTable}>
+                    <tbody>
+                      {previewState.rows.map((row, rowIdx) => (
+                        <tr key={`${rowIdx}`}>
+                          {row.map((cell, cellIdx) => (
+                            <td key={`${rowIdx}-${cellIdx}`}>{cell}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {previewState.truncated && (
+                    <div className={styles.previewNotice}>Showing first 200 rows / 30 columns.</div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
