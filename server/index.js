@@ -747,6 +747,29 @@ const resolveSessionAccess = async ({ sessionId, auth }) => {
   return { session, access: 'member' };
 };
 
+const resolveSessionAccessFromRequest = async ({ sessionId, req }) => {
+  const session = await getSession(sessionId);
+  if (!session) return { error: 'not_found' };
+  if (!isSessionRestricted(session)) return { session, access: 'public' };
+  const auth = authUserFromRequest(req);
+  if (auth?.userId) {
+    const member = await isSessionMember(sessionId, auth.userId, session.owner_id);
+    if (!member) return { error: 'forbidden' };
+    return { session, access: 'member' };
+  }
+  const token = getBearerToken(req);
+  if (!token) return { error: 'unauthorized' };
+  const info = await resolveMcpTokenInfo(token);
+  if (!info || info?.error) return { error: 'unauthorized' };
+  const accessOk = await ensureSessionAccessForUser({
+    session,
+    userId: info.userId ?? null,
+    allowTech: info.kind === 'tech',
+  });
+  if (!accessOk) return { error: 'forbidden' };
+  return { session, access: info.kind === 'tech' ? 'tech' : 'member' };
+};
+
 const ensureSessionAccessForUser = async ({ session, userId, allowTech }) => {
   if (!session) return false;
   if (!isSessionRestricted(session)) return true;
@@ -4578,8 +4601,7 @@ app.post('/api/sessions/:id/clone', async (req, res) => {
 });
 
 app.get('/api/sessions/:id', async (req, res) => {
-  const auth = authUserFromRequest(req);
-  const access = await resolveSessionAccess({ sessionId: req.params.id, auth });
+  const access = await resolveSessionAccessFromRequest({ sessionId: req.params.id, req });
   if (access.error === 'unauthorized') return res.status(401).json({ error: 'unauthorized' });
   if (access.error === 'forbidden') return res.status(403).json({ error: 'forbidden' });
   if (access.error === 'not_found') return res.status(404).json({ error: 'not_found' });
@@ -5075,6 +5097,14 @@ function authUserFromCookieHeader(cookieHeader) {
   }
 }
 
+function getMcpTokenFromWsRequest(req, url) {
+  const headerToken = getBearerToken(req);
+  if (headerToken) return headerToken;
+  const queryToken = url?.searchParams?.get('mcpToken') || url?.searchParams?.get('token');
+  if (typeof queryToken === 'string' && queryToken.trim()) return queryToken.trim();
+  return null;
+}
+
 function guestNameFromClientId(clientId) {
   if (!clientId || typeof clientId !== 'string') return 'Guest';
   return `Guest ${clientId.slice(0, 4)}`;
@@ -5132,6 +5162,12 @@ wss.on('connection', async (ws, req) => {
   const url = new URL(req.url ?? '', `http://${req.headers.host}`);
   const sessionId = url.searchParams.get('sessionId');
   const clientId = url.searchParams.get('clientId');
+  const mcpToken = getMcpTokenFromWsRequest(req, url);
+  let mcpInfo = null;
+  if (mcpToken) {
+    const info = await resolveMcpTokenInfo(mcpToken);
+    if (info && !info?.error) mcpInfo = info;
+  }
   if (!sessionId) {
     ws.close(1008, 'sessionId_required');
     return;
@@ -5146,31 +5182,49 @@ wss.on('connection', async (ws, req) => {
   const connId = randomUUID();
   const auth = authUserFromCookieHeader(req.headers.cookie);
   if (isSessionRestricted(session)) {
-    if (!auth?.userId) {
+    if (auth?.userId) {
+      const member = await isSessionMember(sessionId, auth.userId, session.owner_id);
+      if (!member) {
+        ws.close(1008, 'forbidden');
+        return;
+      }
+    } else if (mcpInfo) {
+      const accessOk = await ensureSessionAccessForUser({
+        session,
+        userId: mcpInfo.userId ?? null,
+        allowTech: mcpInfo.kind === 'tech',
+      });
+      if (!accessOk) {
+        ws.close(1008, 'forbidden');
+        return;
+      }
+    } else {
       ws.close(1008, 'unauthorized');
-      return;
-    }
-    const member = await isSessionMember(sessionId, auth.userId, session.owner_id);
-    if (!member) {
-      ws.close(1008, 'forbidden');
       return;
     }
   }
   let user = null;
-  if (auth?.userId) {
+  let userId = auth?.userId ?? null;
+  let usingMcpUser = false;
+  if (!userId && mcpInfo?.user) {
+    user = mcpInfo.user;
+    userId = mcpInfo.user.id ?? null;
+    usingMcpUser = true;
+  }
+  if (userId && !usingMcpUser) {
     try {
-      user = await getUserById(auth.userId);
+      user = await getUserById(userId);
     } catch {
       user = null;
     }
   }
 
   const name = user?.name ?? guestNameFromClientId(clientId);
-  const avatarSeed = user?.avatar_seed ?? (clientId || connId);
-  const avatarUrl = user?.avatar_url ?? null;
-  const avatarAnimal = user?.avatar_animal ?? null;
-  const avatarColor = user?.avatar_color ?? null;
-  ws._meta = { sessionId, connId, clientId, userId: user?.id ?? null, name, avatarSeed, avatarUrl, avatarAnimal, avatarColor };
+  const avatarSeed = user?.avatar_seed ?? user?.avatarSeed ?? (clientId || connId);
+  const avatarUrl = user?.avatar_url ?? user?.avatarUrl ?? null;
+  const avatarAnimal = user?.avatar_animal ?? user?.avatarAnimal ?? null;
+  const avatarColor = user?.avatar_color ?? user?.avatarColor ?? null;
+  ws._meta = { sessionId, connId, clientId, userId, name, avatarSeed, avatarUrl, avatarAnimal, avatarColor };
   logger.info({ sessionId, userId: user?.id ?? null, clientId, connId }, 'ws_connect');
 
   roomFor(sessionId).add(ws);

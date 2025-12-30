@@ -25,6 +25,7 @@ const ts = (value) => (typeof value === 'number' && Number.isFinite(value) ? val
 const tombstoneFor = (now, updatedAt) => Math.max(now, ts(updatedAt) + 1);
 const AI_AUTHOR_NAME = 'Raven';
 const DEFAULT_LAYER_ID = 'layer-default';
+const DEFAULT_LAYER_NAME = 'Base';
 const MCP_TECH_USER_ID = process.env.MCP_TECH_USER_ID ?? 'raven-bot';
 const MCP_WS_ACK_TIMEOUT_MS = Number(process.env.MCP_WS_ACK_TIMEOUT_MS ?? 4000);
 const MCP_AUTH_CACHE_TTL_MS = Number(process.env.MCP_AUTH_CACHE_TTL_MS ?? 60_000);
@@ -246,8 +247,14 @@ class CanvasSessionClient {
     this.clientId = clientId;
     this.ws = null;
     this.wsSessionId = null;
+    this.wsAuthToken = null;
+    this.defaultAuthToken = null;
     this.connecting = null;
     this.pendingAcks = new Map();
+  }
+
+  setAuthToken(token) {
+    this.defaultAuthToken = token ?? null;
   }
 
   async resolveSessionId(sessionId) {
@@ -259,27 +266,30 @@ class CanvasSessionClient {
     throw new Error('session_id_required');
   }
 
-  async fetchSession(sessionId) {
+  async fetchSession(sessionId, authToken) {
     const id = await this.resolveSessionId(sessionId);
-    const res = await fetch(`${this.baseUrl}/api/sessions/${encodeURIComponent(id)}`);
+    const token = authToken ?? this.defaultAuthToken;
+    const headers = token ? { authorization: `Bearer ${token}` } : undefined;
+    const res = await fetch(`${this.baseUrl}/api/sessions/${encodeURIComponent(id)}`, { headers });
     if (!res.ok) {
       throw new Error(`session_fetch_failed:${res.status}`);
     }
     return res.json();
   }
 
-  async fetchState(sessionId) {
-    const session = await this.fetchSession(sessionId);
+  async fetchState(sessionId, authToken) {
+    const session = await this.fetchSession(sessionId, authToken ?? this.defaultAuthToken);
     return session?.state ?? null;
   }
 
-  async ensureWs(sessionId) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN && this.wsSessionId === sessionId) {
+  async ensureWs(sessionId, authToken) {
+    const token = authToken ?? this.defaultAuthToken ?? null;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && this.wsSessionId === sessionId && this.wsAuthToken === token) {
       return;
     }
 
     if (this.connecting) {
-      if (this.wsSessionId === sessionId) {
+      if (this.wsSessionId === sessionId && this.wsAuthToken === token) {
         await this.connecting;
         return;
       }
@@ -302,9 +312,13 @@ class CanvasSessionClient {
       const url = new URL(this.wsUrl);
       url.searchParams.set('sessionId', sessionId);
       url.searchParams.set('clientId', this.clientId);
-      const ws = new WebSocket(url.toString());
+      if (token) url.searchParams.set('mcpToken', token);
+      const ws = token
+        ? new WebSocket(url.toString(), { headers: { authorization: `Bearer ${token}` } })
+        : new WebSocket(url.toString());
       this.ws = ws;
       this.wsSessionId = sessionId;
+      this.wsAuthToken = token;
 
       this.connecting = new Promise((resolve, reject) => {
         ws.once('open', () => resolve());
@@ -360,9 +374,9 @@ class CanvasSessionClient {
     });
   }
 
-  async sendPatch(sessionId, patch) {
+  async sendPatch(sessionId, patch, authToken) {
     const id = await this.resolveSessionId(sessionId);
-    await this.ensureWs(id);
+    await this.ensureWs(id, authToken ?? this.defaultAuthToken);
     const requestId = randomUUID();
     const payload = {
       type: 'update',
@@ -387,7 +401,7 @@ class CanvasSessionClient {
         this.pendingAcks.delete(requestId);
       }
       logEvent('patch_retry', { sessionId: id, requestId, error: err?.message ?? String(err) });
-      await this.ensureWs(id);
+      await this.ensureWs(id, authToken);
       const ack = this.waitForAck(requestId);
       sendOnce();
       await ack;
@@ -407,6 +421,8 @@ const toolResult = (output) => ({
   content: [{ type: 'text', text: JSON.stringify(output) }],
   structuredContent: output,
 });
+
+const authTokenFromExtra = (extra) => extra?.authInfo?.mcpToken ?? null;
 
 const NodeType = z.enum(['task', 'idea']);
 const NodeStatus = z.enum(['queued', 'in_progress', 'done']);
@@ -641,6 +657,7 @@ const registerTool = (name, meta, handler) => {
       inputSize: estimatePayloadSize(inputPayload),
       input: inputPayload,
     });
+    client.setAuthToken(authTokenFromExtra(extra));
     try {
       const result = await handler(resolvedInput, extra);
       const output = result?.structuredContent ?? result;
@@ -679,6 +696,16 @@ const buildLayerById = (layers) => {
   return map;
 };
 
+const orderLayersForListing = (layers) => {
+  if (!Array.isArray(layers) || layers.length <= 1) return Array.isArray(layers) ? layers : [];
+  const idx = layers.findIndex((layer) => layer?.id === DEFAULT_LAYER_ID);
+  if (idx <= 0) return layers;
+  const next = layers.slice();
+  const [baseLayer] = next.splice(idx, 1);
+  next.unshift(baseLayer);
+  return next;
+};
+
 const resolveNodeLayerId = (node) => {
   const layerId = typeof node?.layerId === 'string' ? node.layerId : null;
   return layerId || DEFAULT_LAYER_ID;
@@ -686,7 +713,7 @@ const resolveNodeLayerId = (node) => {
 
 const summarizeLayer = (layer) => ({
   id: layer?.id ?? null,
-  name: layer?.name ?? null,
+  name: layer?.name ?? (layer?.id === DEFAULT_LAYER_ID ? DEFAULT_LAYER_NAME : null),
   visible: layer?.visible !== false,
   createdAt: layer?.createdAt ?? null,
   updatedAt: layer?.updatedAt ?? null,
@@ -694,7 +721,7 @@ const summarizeLayer = (layer) => ({
 
 const summarizeNode = (node, layerById) => {
   const layerId = resolveNodeLayerId(node);
-  const layerName = layerById?.get(layerId)?.name ?? null;
+  const layerName = layerById?.get(layerId)?.name ?? (layerId === DEFAULT_LAYER_ID ? DEFAULT_LAYER_NAME : null);
   return {
     id: node.id,
     title: node.title,
@@ -725,10 +752,11 @@ const summarizeState = (state, limit) => {
   const textBoxes = Array.isArray(state?.textBoxes) ? state.textBoxes : [];
   const comments = Array.isArray(state?.comments) ? state.comments : [];
   const layers = Array.isArray(state?.layers) ? state.layers : [];
+  const orderedLayers = orderLayersForListing(layers);
   const layerById = buildLayerById(layers);
   const limitedNodes = limitList(nodes, limit);
   const limitedEdges = limitList(edges, limit);
-  const limitedLayers = limitList(layers, limit);
+  const limitedLayers = limitList(orderedLayers, limit);
   return {
     theme: state?.theme ?? 'dark',
     layers: limitedLayers.items.map(summarizeLayer),
@@ -865,7 +893,8 @@ registerTool(
         const layer = layers.find((l) => l.id === input.id) ?? null;
         return toolResult({ action, layer: layer ? summarizeLayer(layer) : null });
       }
-      const limited = limitList(layers, input.limit);
+      const ordered = orderLayersForListing(layers);
+      const limited = limitList(ordered, input.limit);
       return toolResult({
         action,
         layers: limited.items.map(summarizeLayer),
