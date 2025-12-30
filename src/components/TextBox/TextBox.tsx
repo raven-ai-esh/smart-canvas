@@ -77,6 +77,22 @@ const dataUrlToArrayBuffer = (dataUrl: string) => {
   return new TextEncoder().encode(text).buffer;
 };
 
+const isDataUrl = (value: string) => value.startsWith('data:');
+
+const sourceToText = async (src: string) => {
+  if (isDataUrl(src)) return dataUrlToText(src);
+  const res = await fetch(src, { credentials: 'include' });
+  if (!res.ok) throw new Error('preview_fetch_failed');
+  return res.text();
+};
+
+const sourceToArrayBuffer = async (src: string) => {
+  if (isDataUrl(src)) return dataUrlToArrayBuffer(src);
+  const res = await fetch(src, { credentials: 'include' });
+  if (!res.ok) throw new Error('preview_fetch_failed');
+  return res.arrayBuffer();
+};
+
 const limitRows = (rows: unknown[][], maxRows: number, maxCols: number) => {
   const limited = rows.slice(0, maxRows).map((row) =>
     row.slice(0, maxCols).map((cell) => (cell == null ? '' : String(cell))),
@@ -230,17 +246,17 @@ export function TextBox({
           return;
         }
         if (isMarkdown) {
-          const text = dataUrlToText(src);
+          const text = await sourceToText(src);
           if (!cancelled) setPreviewState({ status: 'ready', kind: 'markdown', text });
           return;
         }
         if (isText) {
-          const text = dataUrlToText(src);
+          const text = await sourceToText(src);
           if (!cancelled) setPreviewState({ status: 'ready', kind: 'text', text });
           return;
         }
         if (isJson) {
-          const raw = dataUrlToText(src);
+          const raw = await sourceToText(src);
           let text = raw;
           try {
             text = JSON.stringify(JSON.parse(raw), null, 2);
@@ -251,7 +267,7 @@ export function TextBox({
           return;
         }
         if (isCsv) {
-          const text = dataUrlToText(src);
+          const text = await sourceToText(src);
           const { rows, truncated } = parseCsvRows(text, 200, 30);
           if (!cancelled) setPreviewState({ status: 'ready', kind: 'table', rows, truncated });
           return;
@@ -262,7 +278,7 @@ export function TextBox({
         }
         if (isDocx) {
           if (!cancelled) setPreviewState({ status: 'loading', kind: 'docx' });
-          const buffer = dataUrlToArrayBuffer(src);
+          const buffer = await sourceToArrayBuffer(src);
           const mammothModule = await import('mammoth/mammoth.browser');
           const convert = typeof mammothModule.convertToHtml === 'function'
             ? mammothModule.convertToHtml
@@ -274,7 +290,7 @@ export function TextBox({
         }
         if (isXlsx) {
           if (!cancelled) setPreviewState({ status: 'loading', kind: 'xlsx' });
-          const buffer = dataUrlToArrayBuffer(src);
+          const buffer = await sourceToArrayBuffer(src);
           const xlsxModule = await import('xlsx');
           const XLSX = xlsxModule.default ?? xlsxModule;
           if (!XLSX.read || !XLSX.utils?.sheet_to_json) throw new Error('xlsx_preview_unavailable');

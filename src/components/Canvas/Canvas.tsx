@@ -78,6 +78,7 @@ export const Canvas: React.FC = () => {
     const moveMode = useStore((state) => state.moveMode);
     const snapMode = useStore((state) => state.snapMode);
     const snowEnabled = useStore((state) => state.snowEnabled);
+    const sessionId = useStore((state) => state.sessionId);
     const theme = useStore((state) => state.theme);
     const comments = useStore((state) => state.comments);
     const commentsMode = useStore((state) => state.commentsMode);
@@ -629,15 +630,16 @@ export const Canvas: React.FC = () => {
 
     const handleDraftAttachmentInput = useCallback(async (files: FileList | null) => {
         if (!files || files.length === 0) return;
-        // Convert selected files to data URLs so they can travel with the session state.
-        const { attachments, rejected } = await filesToAttachments(Array.from(files));
+        const { attachments, rejected, failed } = await filesToAttachments(Array.from(files), sessionId);
         if (attachments.length) {
             setDraftAttachments((prev) => [...prev, ...attachments]);
         }
         if (rejected.length) {
             setDraftNotice(`Max file size is ${formatBytes(MAX_ATTACHMENT_BYTES)}`);
+        } else if (failed.length) {
+            setDraftNotice('Upload failed. Please try again.');
         }
-    }, []);
+    }, [sessionId]);
 
     const submitReply = useCallback((parent: Comment) => {
         if (!me) {
@@ -1246,48 +1248,19 @@ export const Canvas: React.FC = () => {
             }
         };
 
-        const readBlobAsDataUrl = (blob: Blob) => new Promise<string | null>((resolve) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : null);
-            reader.onerror = () => resolve(null);
-            reader.readAsDataURL(blob);
-        });
-
-        const downscaleImageBlob = async (blob: Blob) => {
-            const fallback = () => readBlobAsDataUrl(blob);
-            if (!blob.type.startsWith('image/')) return fallback();
-            if (typeof createImageBitmap !== 'function') return fallback();
-
-            try {
-                const bitmap = await createImageBitmap(blob);
-                const w = bitmap.width || 0;
-                const h = bitmap.height || 0;
-                if (!w || !h) {
-                    bitmap.close?.();
-                    return fallback();
-                }
-                const maxDim = 960;
-                const scale = Math.min(1, maxDim / Math.max(w, h));
-                if (scale >= 1) {
-                    bitmap.close?.();
-                    return fallback();
-                }
-                const canvas = document.createElement('canvas');
-                canvas.width = Math.max(1, Math.round(w * scale));
-                canvas.height = Math.max(1, Math.round(h * scale));
-                const ctx = canvas.getContext('2d');
-                if (!ctx) {
-                    bitmap.close?.();
-                    return fallback();
-                }
-                ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-                bitmap.close?.();
-                const webp = canvas.toDataURL('image/webp', 0.92);
-                if (webp.startsWith('data:image/webp')) return webp;
-                return canvas.toDataURL('image/png');
-            } catch {
-                return fallback();
+        const uploadClipboardImage = async (blob: Blob) => {
+            if (!sessionId) return null;
+            const ext = blob.type.split('/')[1] || 'png';
+            const name = `clipboard-${Date.now()}.${ext}`;
+            const file = new File([blob], name, { type: blob.type || 'image/png' });
+            const { attachments, rejected, failed } = await filesToAttachments([file], sessionId);
+            if (rejected.length) {
+                console.warn(`Clipboard image exceeded max size of ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
             }
+            if (failed.length) {
+                console.warn('Clipboard image failed to upload.');
+            }
+            return attachments[0] ?? null;
         };
 
         const doPasteSelection = (payload: ClipboardPayload | null) => {
@@ -1430,9 +1403,9 @@ export const Canvas: React.FC = () => {
             }
 
             if (imageBlob) {
-                const dataUrl = await downscaleImageBlob(imageBlob);
-                if (dataUrl) {
-                    createImageBox(dataUrl);
+                const attachment = await uploadClipboardImage(imageBlob);
+                if (attachment?.url || attachment?.dataUrl) {
+                    createImageBox(attachment.url ?? attachment.dataUrl ?? '');
                     return true;
                 }
             }
@@ -1516,9 +1489,9 @@ export const Canvas: React.FC = () => {
                     }
 
                     if (imageBlob) {
-                        const dataUrl = await downscaleImageBlob(imageBlob);
-                        if (dataUrl) {
-                            createImageBox(dataUrl);
+                        const attachment = await uploadClipboardImage(imageBlob);
+                        if (attachment?.url || attachment?.dataUrl) {
+                            createImageBox(attachment.url ?? attachment.dataUrl ?? '');
                             return;
                         }
                     }
@@ -2778,7 +2751,7 @@ export const Canvas: React.FC = () => {
         e.stopPropagation();
         const files = Array.from(e.dataTransfer.files);
         if (!files.length) return;
-        const { attachments, rejected } = await filesToAttachments(files);
+        const { attachments, rejected, failed } = await filesToAttachments(files, sessionId);
         if (!attachments.length) return;
 
         const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -2823,26 +2796,26 @@ export const Canvas: React.FC = () => {
         const createFileBoxAt = (attachment: Attachment, pos: { x: number; y: number }) => {
             const width = clamp(280, 180, 420);
             const height = clamp(170, 120, 300);
-            addTextBox({
-                id: uuidv4(),
-                x: pos.x - width / 2,
-                y: pos.y - height / 2,
-                width,
-                height,
-                text: '',
-                kind: 'file',
-                src: attachment.dataUrl,
-                fileName: attachment.name,
-                fileMime: attachment.mime,
-                fileSize: attachment.size,
-            });
-        };
+                addTextBox({
+                    id: uuidv4(),
+                    x: pos.x - width / 2,
+                    y: pos.y - height / 2,
+                    width,
+                    height,
+                    text: '',
+                    kind: 'file',
+                    src: attachment.url ?? attachment.dataUrl,
+                    fileName: attachment.name,
+                    fileMime: attachment.mime,
+                    fileSize: attachment.size,
+                });
+            };
 
         attachments.forEach((attachment, index) => {
             const nudge = index * 24;
             const pos = { x: base.x + nudge, y: base.y + nudge };
             if (attachment.kind === 'image') {
-                createImageBoxAt(attachment.dataUrl, pos);
+                createImageBoxAt(attachment.url ?? attachment.dataUrl ?? '', pos);
             } else {
                 createFileBoxAt(attachment, pos);
             }
@@ -2851,7 +2824,10 @@ export const Canvas: React.FC = () => {
         if (rejected.length) {
             console.warn(`Some files were too large. Max size is ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
         }
-    }, [addTextBox, screenToWorldLatest]);
+        if (failed.length) {
+            console.warn('Some files failed to upload.');
+        }
+    }, [addTextBox, screenToWorldLatest, sessionId]);
 
     const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
         if (Array.from(e.dataTransfer?.types ?? []).includes('Files')) {
@@ -3211,7 +3187,7 @@ export const Canvas: React.FC = () => {
                                                 {comment.attachments.map((attachment) => (
                                                     <a
                                                         key={attachment.id}
-                                                        href={attachment.dataUrl}
+                                                        href={attachment.url ?? attachment.dataUrl ?? ''}
                                                         download={attachment.name}
                                                         className={styles.commentAttachmentFile}
                                                     >

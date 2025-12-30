@@ -21,6 +21,8 @@ services:
       COOKIE_SECURE: "${COOKIE_SECURE:-false}"
       APP_ORIGIN: "${APP_ORIGIN:-}"
       ALERT_PUBLIC_BASE_URL: "${ALERT_PUBLIC_BASE_URL:-}"
+      ATTACHMENTS_DIR: "${ATTACHMENTS_DIR:-/app/data/attachments}"
+      ATTACHMENTS_MAX_BYTES: "${ATTACHMENTS_MAX_BYTES:-33554432}"
       SMTP_URL: "${SMTP_URL:-}"
       MAIL_FROM: "${MAIL_FROM:-no-reply@smart-tracker.local}"
       GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
@@ -67,6 +69,8 @@ services:
       - redis
       - agent
       - otel-collector
+    volumes:
+      - attachments-data:/app/data/attachments
     restart: always
 
   agent:
@@ -209,3 +213,4 @@ volumes:
   grafana-data:
   tempo-data:
   loki-data:
+  attachments-data:

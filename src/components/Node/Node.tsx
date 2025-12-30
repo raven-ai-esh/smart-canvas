@@ -199,11 +199,15 @@ const AttachmentList: React.FC<{
         <div className={`${styles.attachmentList}${compact ? ` ${styles.attachmentListCompact}` : ''}`}>
             {attachments.map((attachment) => (
                 <div key={attachment.id} className={styles.attachmentItem}>
-                    <a href={attachment.dataUrl} download={attachment.name} className={styles.attachmentFile}>
+                    <a
+                        href={attachment.url ?? attachment.dataUrl ?? ''}
+                        download={attachment.name}
+                        className={styles.attachmentFile}
+                    >
                         <span className={styles.attachmentPreview}>
                             {attachment.kind === 'image' ? (
                                 <img
-                                    src={attachment.dataUrl}
+                                    src={attachment.url ?? attachment.dataUrl ?? ''}
                                     alt={attachment.name}
                                     className={styles.attachmentPreviewImg}
                                 />
@@ -260,6 +264,7 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
     const safeValue = typeof value === 'string' ? value : '';
     const [editing, setEditing] = useState(alwaysEditing);
     const [attachNotice, setAttachNotice] = useState<string | null>(null);
+    const sessionId = useStore((state) => state.sessionId);
     const rootRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -475,11 +480,12 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
 
     const handleAttachments = async (files: FileList | null) => {
         if (!files || files.length === 0 || !onAddAttachments) return;
-        // Attachments are stored as data URLs so they stay in sync across collaborators.
-        const { attachments: incoming, rejected } = await filesToAttachments(Array.from(files));
+        const { attachments: incoming, rejected, failed } = await filesToAttachments(Array.from(files), sessionId);
         if (incoming.length) onAddAttachments(incoming);
         if (rejected.length) {
             setAttachNotice(`Max file size is ${formatBytes(MAX_ATTACHMENT_BYTES)}`);
+        } else if (failed.length) {
+            setAttachNotice('Upload failed. Please try again.');
         }
     };
 

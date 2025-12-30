@@ -6,7 +6,8 @@ export interface Attachment {
   name: string;
   size: number;
   mime: string;
-  dataUrl: string;
+  url?: string;
+  dataUrl?: string;
 }
 
 export interface NodeData {
