@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { Comment, NodeData, EdgeData, CanvasState, Drawing, LayerData, PenToolType, Tombstones, TextBox, SessionSaver } from '../types';
-import { clampEnergy, computeEffectiveEnergy, relu } from '../utils/energy';
+import { clampEnergy, computeEffectiveEnergy } from '../utils/energy';
 import { debugLog } from '../utils/debug';
 import { getGuestIdentity } from '../utils/guestIdentity';
 import { DEFAULT_LAYER_ID, normalizeLayers, resolveLayerId } from '../utils/layers';
@@ -240,42 +240,11 @@ const pushHistoryReducer = (state: AppState, snapshot?: UndoSnapshot) => {
 };
 
 const normalizeEnergies = (nodes: NodeData[], edges: EdgeData[], opts?: { maxIterations?: number }) => {
-    const maxIterations = opts?.maxIterations ?? 15;
-
-    let working = nodes.map((n) => ({
+    const working = nodes.map((n) => ({
         ...n,
         energy: clampEnergy(Number.isFinite(n.energy) ? n.energy : 50),
     }));
-
-    let effective = computeEffectiveEnergy(working, edges);
-
-    // Enforce: base energy + incoming energy <= 100 by reducing base energy if needed.
-    // We iterate because reducing base can change effective energies, which changes incoming.
-    for (let iter = 0; iter < maxIterations; iter++) {
-        let changed = false;
-
-        const incomingById: Record<string, number> = {};
-        for (const edge of edges) {
-            if (edge.energyEnabled === false) continue;
-            const src = edge.source;
-            const tgt = edge.target;
-            const srcEff = relu(effective[src] ?? 0);
-            incomingById[tgt] = (incomingById[tgt] ?? 0) + srcEff;
-        }
-
-        const nextNodes = working.map((n) => {
-            const incoming = incomingById[n.id] ?? 0;
-            const maxBase = Math.max(0, 100 - incoming);
-            const nextEnergy = clampEnergy(Math.min(Number.isFinite(n.energy) ? n.energy : 50, maxBase));
-            if (nextEnergy !== n.energy) changed = true;
-            return nextEnergy === n.energy ? n : { ...n, energy: nextEnergy };
-        });
-
-        if (!changed) break;
-        working = nextNodes;
-        effective = computeEffectiveEnergy(working, edges);
-    }
-
+    const effective = computeEffectiveEnergy(working, edges, { maxIterations: opts?.maxIterations });
     return { nodes: working, effectiveEnergy: effective };
 };
 
