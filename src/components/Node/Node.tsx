@@ -784,17 +784,7 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
     const effectiveEnergy = useStore((state) => state.effectiveEnergy[data.id] ?? data.energy);
     const baseEnergy = clampEnergy(Number.isFinite(data.energy) ? data.energy : 50);
     const energyColor = energyToColor(effectiveEnergy);
-    const incomingEnergy = useStore((state) => {
-        let incoming = 0;
-        for (const e of state.edges) {
-            if (e.target !== data.id) continue;
-            if (e.energyEnabled === false) continue;
-            incoming += Math.max(0, state.effectiveEnergy[e.source] ?? 0);
-        }
-        return incoming;
-    });
-    const maxBaseEnergy = Math.max(0, 100 - incomingEnergy);
-    const maxAllowedBaseEnergy = Math.max(0, Math.min(100, Math.floor(maxBaseEnergy + 1e-6)));
+    const maxBaseEnergy = 100;
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
@@ -874,11 +864,6 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
         }
         if (next < 0 || next > 100) {
             showEnergyWarning('Допустимый диапазон: 0–100');
-            if (opts.closeOnError) setEnergyInputOpen(false);
-            return;
-        }
-        if (next > maxAllowedBaseEnergy) {
-            showEnergyWarning(`Максимум ${maxAllowedBaseEnergy}, иначе суммарная энергия > 100`);
             if (opts.closeOnError) setEnergyInputOpen(false);
             return;
         }
@@ -1149,17 +1134,7 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
     const effectiveEnergy = useStore((state) => state.effectiveEnergy[data.id] ?? data.energy);
     const baseEnergy = clampEnergy(Number.isFinite(data.energy) ? data.energy : 50);
     const energyColor = energyToColor(effectiveEnergy);
-    const incomingEnergy = useStore((state) => {
-        let incoming = 0;
-        for (const e of state.edges) {
-            if (e.target !== data.id) continue;
-            if (e.energyEnabled === false) continue;
-            incoming += Math.max(0, state.effectiveEnergy[e.source] ?? 0);
-        }
-        return incoming;
-    });
-    const maxBaseEnergy = Math.max(0, 100 - incomingEnergy);
-    const maxAllowedBaseEnergy = Math.max(0, Math.min(100, Math.floor(maxBaseEnergy + 1e-6)));
+    const maxBaseEnergy = 100;
     const isTask = data.type === 'task';
     const progress = clampProgress(typeof data.progress === 'number' && Number.isFinite(data.progress) ? data.progress : 0);
     const status = statusFromProgress(progress);
@@ -1260,11 +1235,6 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
         }
         if (next < 0 || next > 100) {
             showEnergyWarning('Допустимый диапазон: 0–100');
-            if (opts.closeOnError) setEnergyInputOpen(false);
-            return;
-        }
-        if (next > maxAllowedBaseEnergy) {
-            showEnergyWarning(`Максимум ${maxAllowedBaseEnergy}, иначе суммарная энергия > 100`);
             if (opts.closeOnError) setEnergyInputOpen(false);
             return;
         }

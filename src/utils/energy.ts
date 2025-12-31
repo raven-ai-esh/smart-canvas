@@ -56,12 +56,15 @@ export function computeEffectiveEnergy(
   let effective: Record<string, number> = { ...baseById };
 
   // Directed edges: source -> target; energy propagates into target.
+  const tau = 10;
+
   for (let iter = 0; iter < maxIterations; iter++) {
     let changed = false;
     const next: Record<string, number> = { ...effective };
 
     for (const node of nodes) {
-      let incoming = 0;
+      const base = baseById[node.id] ?? 0;
+      const childEnergies: number[] = [];
       for (const edge of edges) {
         if (edge.target !== node.id) continue;
         if (edge.energyEnabled === false) continue;
@@ -72,11 +75,20 @@ export function computeEffectiveEnergy(
             if (progress >= 100 || srcNode.status === 'done') continue;
           }
         }
-        incoming += relu(effective[edge.source] ?? baseById[edge.source] ?? 0);
+        const sourceEnergy = effective[edge.source] ?? baseById[edge.source] ?? 0;
+        childEnergies.push(clampEnergy(sourceEnergy));
       }
-      const base = baseById[node.id] ?? 0;
-      const incomingCapped = Math.min(incoming, Math.max(0, 100 - base));
-      const computed = clampEnergy(base + incomingCapped);
+      let computed = base;
+      if (childEnergies.length > 0) {
+        let maxVal = -Infinity;
+        for (const v of childEnergies) maxVal = Math.max(maxVal, v);
+        let expSum = 0;
+        for (const v of childEnergies) {
+          expSum += Math.exp((v - maxVal) / tau);
+        }
+        const logSumExp = maxVal + tau * Math.log(expSum);
+        computed = clampEnergy(base + logSumExp);
+      }
       if (computed !== (effective[node.id] ?? 0)) changed = true;
       next[node.id] = computed;
     }
