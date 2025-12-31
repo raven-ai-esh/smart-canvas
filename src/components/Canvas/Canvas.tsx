@@ -63,6 +63,30 @@ const shouldAllowWheelScroll = (start: HTMLElement, boundary: HTMLElement | null
     return false;
 };
 
+const hasStylusTouch = (touches: TouchList | null | undefined) => {
+    if (!touches) return false;
+    for (const touch of Array.from(touches)) {
+        if ((touch as { touchType?: string }).touchType === 'stylus') return true;
+    }
+    return false;
+};
+
+const getStylusTouch = (touches: TouchList | null | undefined) => {
+    if (!touches) return null;
+    for (const touch of Array.from(touches)) {
+        if ((touch as { touchType?: string }).touchType === 'stylus') return touch;
+    }
+    return null;
+};
+
+const getTouchById = (touches: TouchList | null | undefined, id: number) => {
+    if (!touches) return null;
+    for (const touch of Array.from(touches)) {
+        if (touch.identifier === id) return touch;
+    }
+    return null;
+};
+
     type InteractionMode = 'idle' | 'panning' | 'draggingNode' | 'connecting' | 'textPlacing' | 'selecting';
 type AlignmentGuide = { axis: 'x' | 'y'; pos: number; length: number };
 type SnapAnchor = 'center' | 'topleft';
@@ -307,6 +331,8 @@ export const Canvas: React.FC = () => {
     const drawingPointerIdRef = useRef<number | null>(null);
     const drawingPointerTypeRef = useRef<string | null>(null);
     const penStrokeActiveRef = useRef(false);
+    const stylusTouchIdRef = useRef<number | null>(null);
+    const lastPenPointerDownAtRef = useRef<number | null>(null);
     const currentStrokePointsRef = useRef<{ x: number; y: number }[]>([]);
     const pendingStrokePointsRef = useRef<{ x: number; y: number }[]>([]);
     const lastStrokePointRef = useRef<{ x: number; y: number } | null>(null);
@@ -1061,8 +1087,60 @@ export const Canvas: React.FC = () => {
 
         // Touch start - track for double-tap and pinch
 	        const handleTouchStart = (e: TouchEvent) => {
+                const attachPenTouch = () => {
+                    if (!penMode || !penStrokeActiveRef.current || !isDrawing.current) return false;
+                    if (stylusTouchIdRef.current !== null) return false;
+                    if (e.touches.length !== 1) return false;
+                    const candidate = getStylusTouch(e.changedTouches) ?? getStylusTouch(e.touches) ?? e.touches[0];
+                    if (!candidate) return false;
+                    stylusTouchIdRef.current = candidate.identifier;
+                    const worldPos = screenToWorldLatest(candidate.clientX, candidate.clientY);
+                    if (penTool === 'eraser') {
+                        handleEraser(worldPos);
+                    } else {
+                        pendingStrokePointsRef.current.push(worldPos);
+                        scheduleLiveStrokeFlush();
+                    }
+                    e.preventDefault();
+                    return true;
+                };
+
+                if (attachPenTouch()) return;
+
+                const stylusTouch = getStylusTouch(e.changedTouches) ?? getStylusTouch(e.touches);
+                if (stylusTouch) {
+                    if (penMode) {
+                        const target = e.target as HTMLElement | null;
+                        const isInteractive = target?.closest?.(
+                            'button, input, textarea, select, [data-interactive="true"], [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]'
+                        );
+                        if (!isInteractive) {
+                            const lastPenDownAt = lastPenPointerDownAtRef.current ?? 0;
+                            if (performance.now() - lastPenDownAt > 250 && stylusTouchIdRef.current === null) {
+                                stylusTouchIdRef.current = stylusTouch.identifier;
+                                isDrawing.current = true;
+                                penStrokeActiveRef.current = true;
+                                drawingPointerTypeRef.current = 'touch';
+                                clearLiveStroke();
+                                const worldPos = screenToWorldLatest(stylusTouch.clientX, stylusTouch.clientY);
+                                if (penTool === 'eraser') {
+                                    handleEraser(worldPos);
+                                } else {
+                                    applyLiveStrokeStyle({
+                                        stroke: penTool === 'highlighter' ? 'var(--accent-primary)' : 'var(--text-primary)',
+                                        width: penTool === 'highlighter' ? 20 : 3,
+                                        opacity: penTool === 'highlighter' ? 0.3 : 1,
+                                    });
+                                    pendingStrokePointsRef.current.push(worldPos);
+                                    scheduleLiveStrokeFlush();
+                                }
+                            }
+                            e.preventDefault();
+                        }
+                    }
+                    return;
+                }
 	            if (penStrokeActiveRef.current) {
-	                e.preventDefault();
 	                return;
 	            }
 	            if (modeRef.current === 'connecting') {
@@ -1093,8 +1171,37 @@ export const Canvas: React.FC = () => {
 
         // Touch move - handle pinch-to-zoom
 	        const handleTouchMove = (e: TouchEvent) => {
+                if (
+                    stylusTouchIdRef.current === null
+                    && penMode
+                    && penStrokeActiveRef.current
+                    && isDrawing.current
+                    && e.touches.length === 1
+                ) {
+                    const candidate = getStylusTouch(e.touches) ?? e.touches[0];
+                    if (candidate) {
+                        stylusTouchIdRef.current = candidate.identifier;
+                    }
+                }
+                if (stylusTouchIdRef.current !== null) {
+                    const touch =
+                        getTouchById(e.touches, stylusTouchIdRef.current)
+                        ?? getTouchById(e.changedTouches, stylusTouchIdRef.current);
+                    if (!touch) return;
+                    const worldPos = screenToWorldLatest(touch.clientX, touch.clientY);
+                    if (penTool === 'eraser') {
+                        handleEraser(worldPos);
+                    } else {
+                        pendingStrokePointsRef.current.push(worldPos);
+                        scheduleLiveStrokeFlush();
+                    }
+                    e.preventDefault();
+                    return;
+                }
+	            if (hasStylusTouch(e.touches) || hasStylusTouch(e.changedTouches)) {
+	                return;
+	            }
 	            if (penStrokeActiveRef.current) {
-	                e.preventDefault();
 	                return;
 	            }
 	            // Fallback for iOS: during an active connection drag, some pointermove streams don't fire reliably.
@@ -1140,6 +1247,17 @@ export const Canvas: React.FC = () => {
 
         // Touch end - detect double-tap
 	        const handleTouchEnd = (e: TouchEvent) => {
+                if (stylusTouchIdRef.current !== null) {
+                    const ended = getTouchById(e.changedTouches, stylusTouchIdRef.current);
+                    if (ended) {
+                        stylusTouchIdRef.current = null;
+                        finalizeDrawing();
+                    }
+                    return;
+                }
+	            if (hasStylusTouch(e.touches) || hasStylusTouch(e.changedTouches)) {
+	                return;
+	            }
 	            if (penStrokeActiveRef.current) return;
 	            if (modeRef.current === 'connecting') return;
 	            if (penMode || textMode) return;
@@ -1192,17 +1310,29 @@ export const Canvas: React.FC = () => {
             }
         };
 
+        const handleTouchCancel = (e: TouchEvent) => {
+            if (stylusTouchIdRef.current === null) return;
+            const ended =
+                getTouchById(e.changedTouches, stylusTouchIdRef.current)
+                ?? getTouchById(e.touches, stylusTouchIdRef.current);
+            if (!ended) return;
+            stylusTouchIdRef.current = null;
+            finalizeDrawing();
+        };
+
         container.addEventListener('touchstart', handleTouchStart, { passive: false });
         container.addEventListener('touchmove', handleTouchMove, { passive: false });
         container.addEventListener('touchend', handleTouchEnd, { passive: true });
+        container.addEventListener('touchcancel', handleTouchCancel, { passive: true });
 
         return () => {
             container.removeEventListener('wheel', handleWheel);
             container.removeEventListener('touchstart', handleTouchStart);
             container.removeEventListener('touchmove', handleTouchMove);
             container.removeEventListener('touchend', handleTouchEnd);
+            container.removeEventListener('touchcancel', handleTouchCancel);
         };
-    }, [handleWheel, penMode, textMode, addNode, screenToWorldLatest]);
+    }, [handleWheel, penMode, penTool, textMode, addNode, screenToWorldLatest]);
 
     // Handle Hotkeys
     useEffect(() => {
@@ -2019,6 +2149,10 @@ export const Canvas: React.FC = () => {
 	            e.preventDefault();
 	            return;
 	        }
+            if (stylusTouchIdRef.current !== null && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
+                e.preventDefault();
+                return;
+            }
         shiftPressCandidate.current = null;
 
         const target = e.target as HTMLElement;
@@ -2049,6 +2183,7 @@ export const Canvas: React.FC = () => {
 
 	        // Mark an active pen interaction only once we know the canvas is handling the pointer.
 	        if (e.pointerType === 'pen') {
+                lastPenPointerDownAtRef.current = performance.now();
 	            penStrokeActiveRef.current = true;
 	        }
 
@@ -2277,7 +2412,8 @@ export const Canvas: React.FC = () => {
     const handleEraser = (pos: { x: number, y: number }) => {
         // Simple radius check
         const ERASER_RADIUS = 20; // World units
-        drawings.forEach(d => {
+        const currentDrawings = useStore.getState().drawings;
+        currentDrawings.forEach(d => {
             // Check if any point in drawing is close
             const hit = d.points.some(p => Math.hypot(p.x - pos.x, p.y - pos.y) < ERASER_RADIUS);
             if (hit) {
@@ -2286,9 +2422,47 @@ export const Canvas: React.FC = () => {
         });
     };
 
+    const finalizeDrawing = (releasePointer?: { pointerId: number; pointerType: string }) => {
+        if (!isDrawing.current) return;
+        isDrawing.current = false;
+        flushPendingStrokePoints();
+        const points = currentStrokePointsRef.current;
+        if (points.length > 1 && penTool !== 'eraser') {
+            addDrawing({
+                id: uuidv4(),
+                ...(() => {
+                    const { points: beautifiedPoints, path } = beautifyStroke(points);
+                    return { points: beautifiedPoints, path };
+                })(),
+                color: penTool === 'highlighter' ? 'var(--accent-primary)' : 'var(--text-primary)',
+                width: penTool === 'highlighter' ? 20 : 3,
+                opacity: penTool === 'highlighter' ? 0.3 : 1,
+                tool: penTool,
+            });
+        }
+        clearLiveStroke();
+        drawingPointerIdRef.current = null;
+        drawingPointerTypeRef.current = null;
+        penStrokeActiveRef.current = false;
+        if (releasePointer && (releasePointer.pointerType === 'mouse' || releasePointer.pointerType === 'pen')) {
+            try {
+                const el = containerRef.current as any;
+                if (el?.hasPointerCapture?.(releasePointer.pointerId)) {
+                    el.releasePointerCapture(releasePointer.pointerId);
+                }
+            } catch {
+                // ignore
+            }
+        }
+    };
+
     const handlePointerMove = (e: React.PointerEvent) => {
         // Palm rejection: ignore touch pointers while a pencil stroke is active.
         if (penStrokeActiveRef.current && e.pointerType === 'touch') return;
+        if (stylusTouchIdRef.current !== null && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
+            e.preventDefault();
+            return;
+        }
 
         const screenDeltaX = e.clientX - lastPointerPos.current.x;
         const screenDeltaY = e.clientY - lastPointerPos.current.y;
@@ -2558,6 +2732,10 @@ export const Canvas: React.FC = () => {
 		    const handlePointerUp = (e: React.PointerEvent) => {
         // Palm rejection: ignore touch pointers while a pencil stroke is active.
         if (penStrokeActiveRef.current && e.pointerType === 'touch') return;
+        if (stylusTouchIdRef.current !== null && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
+            e.preventDefault();
+            return;
+        }
         clearCanvasLongPress();
 
 	        if (mode === 'selecting') {
@@ -2704,36 +2882,7 @@ export const Canvas: React.FC = () => {
 
         if (isDrawing.current) {
             if (drawingPointerIdRef.current !== null && e.pointerId !== drawingPointerIdRef.current) return;
-            isDrawing.current = false;
-            flushPendingStrokePoints();
-            // Finish drawing
-            const points = currentStrokePointsRef.current;
-            if (points.length > 1 && penTool !== 'eraser') {
-                const isHighlighter = penTool === 'highlighter';
-                addDrawing({
-                    id: uuidv4(),
-                    ...(() => {
-                        const { points: beautifiedPoints, path } = beautifyStroke(points);
-                        return { points: beautifiedPoints, path };
-                    })(),
-                    color: isHighlighter ? 'var(--accent-primary)' : 'var(--text-primary)',
-                    width: isHighlighter ? 20 : 3,
-                    opacity: isHighlighter ? 0.3 : 1,
-                    tool: penTool
-                });
-            }
-            clearLiveStroke();
-            drawingPointerIdRef.current = null;
-            drawingPointerTypeRef.current = null;
-            penStrokeActiveRef.current = false;
-            if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
-                try {
-                    const el = containerRef.current as any;
-                    if (el?.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
-                } catch {
-                    // ignore
-                }
-            }
+            finalizeDrawing({ pointerId: e.pointerId, pointerType: e.pointerType });
             return;
         }
 
@@ -2824,6 +2973,9 @@ export const Canvas: React.FC = () => {
 
 	    // Handle pointer cancel - iOS Safari fires this when it decides to handle a gesture
 		    const handlePointerCancel = (e: React.PointerEvent) => {
+            if (stylusTouchIdRef.current !== null && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
+                return;
+            }
 		        // If a touch-based context connection drag is active, ignore pointercancel;
 		        // some browsers emit cancel when UI overlays unmount, but touchend will finalize/cleanup.
 		        if (e.pointerType === 'touch' && contextConnectActiveRef.current) return;
@@ -2839,6 +2991,7 @@ export const Canvas: React.FC = () => {
 	        drawingPointerIdRef.current = null;
 	        drawingPointerTypeRef.current = null;
 	        penStrokeActiveRef.current = false;
+            stylusTouchIdRef.current = null;
         useStore.getState().setConnectionTargetId(null);
 	        clearLongPress();
         shiftPressCandidate.current = null;
