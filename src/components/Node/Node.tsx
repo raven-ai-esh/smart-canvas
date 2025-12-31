@@ -9,6 +9,7 @@ import { numberLines, prefixLines, wrapSelection } from '../../utils/textEditing
 import { clampEnergy, energyToColor } from '../../utils/energy';
 import { EnergySvgLiquidGauge } from './EnergySvgLiquidGauge';
 import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES } from '../../utils/attachments';
+import { getIncomingProgress } from '../../utils/childProgress';
 
 // View Components
 const GraphView: React.FC<{ data: NodeData; energyColor: string; fillRatio: number }> = ({ data, energyColor, fillRatio }) => (
@@ -1116,6 +1117,8 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
     const updateNode = useStore((state) => state.updateNode);
     const monitoringMode = useStore((state) => state.monitoringMode);
     const sessionSavers = useStore((state) => state.sessionSavers);
+    const edges = useStore((state) => state.edges);
+    const nodes = useStore((state) => state.nodes);
     // NoteView is explicitly for "Dive in", so maybe we allow direct editing?
     // User requested "Double click for renaming".
     // Let's keep NoteView title as double-click, but Content as direct?
@@ -1161,9 +1164,29 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
     const progress = clampProgress(typeof data.progress === 'number' && Number.isFinite(data.progress) ? data.progress : 0);
     const status = statusFromProgress(progress);
     const shouldPulse = monitoringMode && isTask && status === 'in_progress';
+    const incomingProgress = React.useMemo(
+        () => getIncomingProgress(nodes, edges, data.id),
+        [nodes, edges, data.id],
+    );
+    const canUseChildProgress = incomingProgress.count > 0;
+    const childProgressEnabled = isTask && data.childProgress === true;
+    const childProgressActive = childProgressEnabled && canUseChildProgress;
     const nodeAttachments = Array.isArray(data.attachments) ? data.attachments : [];
     const mentionParticipants = resolveMentionParticipants(data.mentions, sessionSavers);
     const authorLabel = typeof data.authorName === 'string' ? data.authorName.trim() : '';
+
+    React.useEffect(() => {
+        if (!childProgressEnabled) return;
+        if (canUseChildProgress) return;
+        updateNode(data.id, { childProgress: false });
+    }, [childProgressEnabled, canUseChildProgress, updateNode, data.id]);
+
+    React.useEffect(() => {
+        if (!childProgressActive) return;
+        const next = incomingProgress.value;
+        if (Math.abs(progress - next) < 0.1) return;
+        updateNode(data.id, { progress: next });
+    }, [childProgressActive, incomingProgress.value, progress, updateNode, data.id]);
 
     React.useEffect(() => {
         if (!showEnergyPanel) return;
@@ -1287,7 +1310,7 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
         const rect = el.getBoundingClientRect();
         const t = (clientX - rect.left) / rect.width;
         const next = clampProgress(t * 100);
-        updateNode(data.id, { progress: next });
+        updateNode(data.id, { progress: next, childProgress: false });
     };
 
     const startProgressDrag = (clientX: number, el: HTMLElement, pointerId: number) => {
@@ -1327,9 +1350,20 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
         const next = clampProgress(value);
         if (Math.round(progress) === next) return;
         useStore.getState().pushHistory();
-        updateNode(data.id, { progress: next });
+        updateNode(data.id, { progress: next, childProgress: false });
     };
     const quickProgressOptions = [25, 50, 75, 100];
+    const toggleChildProgress = (e?: React.SyntheticEvent) => {
+        e?.preventDefault?.();
+        e?.stopPropagation?.();
+        if (!canUseChildProgress) return;
+        useStore.getState().pushHistory();
+        if (childProgressEnabled) {
+            updateNode(data.id, { childProgress: false });
+            return;
+        }
+        updateNode(data.id, { childProgress: true, progress: incomingProgress.value });
+    };
 
 
     return (
@@ -1482,6 +1516,19 @@ const NoteView = React.memo(({ data }: { data: NodeData }) => {
                                         </button>
                                     );
                                 })}
+                                <button
+                                    type="button"
+                                    className={`${styles.noteProgressToggle}${childProgressEnabled ? ` ${styles.noteProgressToggleActive}` : ''}`}
+                                    onClick={toggleChildProgress}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    disabled={!canUseChildProgress}
+                                    aria-pressed={childProgressEnabled}
+                                    title={canUseChildProgress ? 'Use incoming nodes progress' : 'No incoming nodes'}
+                                    data-interactive="true"
+                                >
+                                    <span className={styles.noteProgressToggleLabel}>Child Progress</span>
+                                    <span className={styles.noteProgressToggleSwitch} aria-hidden="true" />
+                                </button>
                             </div>
                         </>
                     )}

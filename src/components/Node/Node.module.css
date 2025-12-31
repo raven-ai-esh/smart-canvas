@@ -478,6 +478,69 @@
     box-shadow: 0 0 10px color-mix(in srgb, var(--progress-color, var(--accent-task)) 55%, transparent);
 }
 
+.noteProgressToggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-primary);
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.noteProgressToggle:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.noteProgressToggleLabel {
+    letter-spacing: 0.02em;
+}
+
+.noteProgressToggleSwitch {
+    position: relative;
+    width: 30px;
+    height: 16px;
+    border-radius: 999px;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255, 255, 255, 0.06);
+    transition: border-color 160ms ease, background 160ms ease;
+}
+
+.noteProgressToggleSwitch::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.8);
+    transform: translate(0, -50%);
+    transition: transform 160ms ease, background 160ms ease;
+}
+
+.noteProgressToggleActive {
+    border-color: var(--progress-color, var(--accent-task));
+    color: var(--progress-color, var(--accent-task));
+    background: rgba(255, 255, 255, 0.1);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--progress-color, var(--accent-task)) 45%, transparent);
+}
+
+.noteProgressToggleActive .noteProgressToggleSwitch {
+    border-color: var(--progress-color, var(--accent-task));
+    background: color-mix(in srgb, var(--progress-color, var(--accent-task)) 28%, transparent);
+}
+
+.noteProgressToggleActive .noteProgressToggleSwitch::after {
+    transform: translate(14px, -50%);
+    background: var(--progress-color, var(--accent-task));
+}
+
 :global(body.light-theme) .noteProgressTrack {
     background: rgba(0, 0, 0, 0.08);
 }

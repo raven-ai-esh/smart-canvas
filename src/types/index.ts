@@ -39,6 +39,7 @@ export interface NodeData {
   endDate?: string;
   status?: 'queued' | 'in_progress' | 'done';
   progress?: number;
+  childProgress?: boolean;
   attachments?: Attachment[];
   mentions?: MentionToken[];
 }
