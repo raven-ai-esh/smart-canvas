@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { computeEffectiveEnergy } from '../utils/energy';
+import { applyChildProgress } from '../utils/childProgress';
 import { mergeSessionState, normalizeSessionState, type SessionState } from '../utils/sessionMerge';
 import { normalizeLayers, resolveLayerId } from '../utils/layers';
 import { debugLog } from '../utils/debug';
@@ -40,8 +41,10 @@ function applySessionState(state: SessionState) {
   const monitoringMode = useStore.getState().monitoringMode;
   const nextLayers = normalizeLayers(state.layers);
   const activeLayerId = resolveLayerId(nextLayers, useStore.getState().activeLayerId);
+  const childProgressResult = applyChildProgress(state.nodes as any, state.edges as any);
+  const nextNodes = childProgressResult.nodes as any;
   useStore.setState({
-    nodes: state.nodes as any,
+    nodes: nextNodes,
     edges: state.edges as any,
     drawings: state.drawings as any,
     textBoxes: state.textBoxes as any,
@@ -49,7 +52,7 @@ function applySessionState(state: SessionState) {
     layers: nextLayers,
     activeLayerId,
     tombstones: state.tombstones,
-    effectiveEnergy: computeEffectiveEnergy(state.nodes as any, state.edges as any, { blockDoneTasks: monitoringMode }),
+    effectiveEnergy: computeEffectiveEnergy(nextNodes, state.edges as any, { blockDoneTasks: monitoringMode }),
     selectedNode: null,
     selectedNodes: [],
     selectedEdge: null,

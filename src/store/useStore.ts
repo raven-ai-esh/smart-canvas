@@ -6,6 +6,7 @@ import { debugLog } from '../utils/debug';
 import { getGuestIdentity } from '../utils/guestIdentity';
 import { DEFAULT_LAYER_ID, normalizeLayers, resolveLayerId } from '../utils/layers';
 import { collectLayerStackEntries, sortLayerStackEntries, type StackKind } from '../utils/stacking';
+import { applyChildProgress } from '../utils/childProgress';
 
 type UndoSnapshot = {
     nodes: NodeData[];
@@ -702,10 +703,16 @@ export const useStore = create<AppState>()(
                 };
                 delete tombstones.nodes[normalized.id];
                 const normalizedEnergy = normalizeEnergies(nodes, state.edges);
-                const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, state.edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
+                const childProgressResult = applyChildProgress(normalizedEnergy.nodes, state.edges);
+                const effectiveEnergy = effectiveForMode(
+                    childProgressResult.nodes,
+                    state.edges,
+                    state.monitoringMode,
+                    normalizedEnergy.effectiveEnergy,
+                );
                 return {
                     ...pushHistoryReducer(state),
-                    nodes: normalizedEnergy.nodes,
+                    nodes: childProgressResult.nodes,
                     tombstones,
                     effectiveEnergy,
                 };
@@ -743,21 +750,34 @@ export const useStore = create<AppState>()(
                     nextData.progress = progress;
                     nextData.status = statusFromProgress(progress);
                 }
-                const nodes = state.nodes.map((node) => (node.id === id ? { ...node, ...nextData, updatedAt: now } : node));
                 const hasEnergyUpdate = Object.prototype.hasOwnProperty.call(nextData, 'energy');
+                const nodes = state.nodes.map((node) => (node.id === id ? { ...node, ...nextData, updatedAt: now } : node));
+                let workingNodes = nodes;
+                let normalizedEnergy: ReturnType<typeof normalizeEnergies> | null = null;
+                if (hasEnergyUpdate) {
+                    normalizedEnergy = normalizeEnergies(nodes, state.edges);
+                    workingNodes = normalizedEnergy.nodes;
+                }
+                const childProgressResult = applyChildProgress(workingNodes, state.edges);
+                const finalNodes = childProgressResult.nodes;
                 const affectsMonitoring = state.monitoringMode && (
                     Object.prototype.hasOwnProperty.call(nextData, 'progress')
                     || Object.prototype.hasOwnProperty.call(nextData, 'status')
                     || Object.prototype.hasOwnProperty.call(nextData, 'type')
+                    || childProgressResult.progressChanged
                 );
-                if (!hasEnergyUpdate && !affectsMonitoring) return { nodes };
+                if (!hasEnergyUpdate && !affectsMonitoring) return { nodes: finalNodes };
                 if (hasEnergyUpdate) {
-                    const normalizedEnergy = normalizeEnergies(nodes, state.edges);
-                    const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, state.edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
-                    return { nodes: normalizedEnergy.nodes, effectiveEnergy };
+                    const effectiveEnergy = effectiveForMode(
+                        finalNodes,
+                        state.edges,
+                        state.monitoringMode,
+                        normalizedEnergy?.effectiveEnergy,
+                    );
+                    return { nodes: finalNodes, effectiveEnergy };
                 }
-                const effectiveEnergy = effectiveForMode(nodes, state.edges, state.monitoringMode, state.effectiveEnergy);
-                return { nodes, effectiveEnergy };
+                const effectiveEnergy = effectiveForMode(finalNodes, state.edges, state.monitoringMode, state.effectiveEnergy);
+                return { nodes: finalNodes, effectiveEnergy };
             }),
 
             deleteNode: (id) => set((state) => {
@@ -780,12 +800,14 @@ export const useStore = create<AppState>()(
                     tombstones.edges[e.id] = tombstoneFor(now, e.updatedAt);
                 }
                 debugLog({ type: 'delete_call', t: performance.now(), kind: 'node', id, now, updatedAt: node?.updatedAt, tombstone: tombstoneNode });
+                const childProgressResult = applyChildProgress(nodes, edges);
+                const effectiveEnergy = effectiveForMode(childProgressResult.nodes, edges, state.monitoringMode);
                 return {
                     ...pushHistoryReducer(state),
-                    nodes,
+                    nodes: childProgressResult.nodes,
                     edges,
                     tombstones,
-                    effectiveEnergy: effectiveForMode(nodes, edges, state.monitoringMode),
+                    effectiveEnergy,
                 };
             }),
 
@@ -807,11 +829,17 @@ export const useStore = create<AppState>()(
                 };
                 delete tombstones.edges[normalized.id];
                 const normalizedEnergy = normalizeEnergies(state.nodes, edges);
-                const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
+                const childProgressResult = applyChildProgress(normalizedEnergy.nodes, edges);
+                const effectiveEnergy = effectiveForMode(
+                    childProgressResult.nodes,
+                    edges,
+                    state.monitoringMode,
+                    normalizedEnergy.effectiveEnergy,
+                );
                 return {
                     ...pushHistoryReducer(state),
                     edges,
-                    nodes: normalizedEnergy.nodes,
+                    nodes: childProgressResult.nodes,
                     tombstones,
                     effectiveEnergy,
                 };
@@ -822,10 +850,16 @@ export const useStore = create<AppState>()(
                     const now = Date.now();
                     const edges = state.edges.map((e) => (e.id === id ? { ...e, ...data, updatedAt: now } : e));
                     const normalizedEnergy = normalizeEnergies(state.nodes, edges);
-                    const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
+                    const childProgressResult = applyChildProgress(normalizedEnergy.nodes, edges);
+                    const effectiveEnergy = effectiveForMode(
+                        childProgressResult.nodes,
+                        edges,
+                        state.monitoringMode,
+                        normalizedEnergy.effectiveEnergy,
+                    );
                     return {
                         edges,
-                        nodes: normalizedEnergy.nodes,
+                        nodes: childProgressResult.nodes,
                         effectiveEnergy,
                     };
                 }),
@@ -843,11 +877,17 @@ export const useStore = create<AppState>()(
                 };
                 debugLog({ type: 'delete_call', t: performance.now(), kind: 'edge', id, now, updatedAt: edge?.updatedAt, tombstone: tombstoneEdge });
                 const normalizedEnergy = normalizeEnergies(state.nodes, edges);
-                const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
+                const childProgressResult = applyChildProgress(normalizedEnergy.nodes, edges);
+                const effectiveEnergy = effectiveForMode(
+                    childProgressResult.nodes,
+                    edges,
+                    state.monitoringMode,
+                    normalizedEnergy.effectiveEnergy,
+                );
                 return {
                     ...pushHistoryReducer(state),
                     edges,
-                    nodes: normalizedEnergy.nodes,
+                    nodes: childProgressResult.nodes,
                     tombstones,
                     effectiveEnergy,
                 };
