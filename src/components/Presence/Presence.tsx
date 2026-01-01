@@ -31,6 +31,18 @@ type AiKeyInfo = {
   updatedAt: string | null;
   lastUsedAt: string | null;
 };
+type RavenAiSettings = {
+  model: string | null;
+  webSearchEnabled: boolean;
+  baseUrl: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+type RavenAiDefaults = {
+  model: string;
+  webSearchEnabled: boolean;
+  baseUrl: string | null;
+};
 type AlertingSettings = {
   channels: {
     email: { enabled: boolean };
@@ -606,11 +618,20 @@ export const Presence: React.FC = () => {
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [settingsNoticeVisible, setSettingsNoticeVisible] = useState(false);
+  const [ravenAiOpen, setRavenAiOpen] = useState(false);
+  const [ravenAiBusy, setRavenAiBusy] = useState(false);
+  const [ravenAiMessage, setRavenAiMessage] = useState<string | null>(null);
+  const [ravenAiNoticeVisible, setRavenAiNoticeVisible] = useState(false);
+  const [ravenAiDefaults, setRavenAiDefaults] = useState<RavenAiDefaults | null>(null);
+  const [ravenAiModel, setRavenAiModel] = useState('');
+  const [ravenAiWebSearch, setRavenAiWebSearch] = useState(false);
+  const [ravenAiBaseUrl, setRavenAiBaseUrl] = useState('');
+  const [ravenAiAdvancedOpen, setRavenAiAdvancedOpen] = useState(false);
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [integrationsBusy, setIntegrationsBusy] = useState(false);
   const [integrationsMessage, setIntegrationsMessage] = useState<string | null>(null);
   const [integrationsNoticeVisible, setIntegrationsNoticeVisible] = useState(false);
-  const [integrationsTab, setIntegrationsTab] = useState<'mcp' | 'ai' | 'alerting'>('mcp');
+  const [integrationsTab, setIntegrationsTab] = useState<'mcp' | 'alerting'>('mcp');
   const [mcpTokenInfo, setMcpTokenInfo] = useState<McpTokenInfo | null>(null);
   const [mcpTokenValue, setMcpTokenValue] = useState<string | null>(null);
   const [mcpExpiryChoice, setMcpExpiryChoice] = useState('90');
@@ -646,6 +667,8 @@ export const Presence: React.FC = () => {
   const myGuestSeed = !me ? mySeed : '';
   const mcpStatusLabel = mcpTokenInfo ? 'Active' : 'Not generated';
   const aiStatusLabel = aiKeyInfo ? 'Active' : 'Not set';
+  const ravenAiModelHint = `Default: ${ravenAiDefaults?.model ?? 'gpt-5.2'}`;
+  const ravenAiBaseUrlHint = `Default: ${ravenAiDefaults?.baseUrl ?? 'https://api.openai.com/v1'}`;
   const isTelegramLinked = !!alertingMeta?.telegramLinkedId;
   const telegramBotLink = alertingMeta?.telegramBotLink
     || (alertingMeta?.telegramBotUsername ? `https://t.me/${alertingMeta.telegramBotUsername}` : null);
@@ -712,6 +735,12 @@ export const Presence: React.FC = () => {
     setIntegrationsOpen(true);
   };
 
+  const openRavenAi = () => {
+    if (!me) return;
+    setOpen(false);
+    setRavenAiOpen(true);
+  };
+
   const closeSettings = () => {
     setSettingsOpen(false);
     setSettingsMessage(null);
@@ -729,13 +758,26 @@ export const Presence: React.FC = () => {
     setSettingsNoticeVisible(false);
   };
 
+  const closeRavenAi = () => {
+    setRavenAiOpen(false);
+    setRavenAiBusy(false);
+    setRavenAiMessage(null);
+    setRavenAiNoticeVisible(false);
+    setRavenAiDefaults(null);
+    setRavenAiModel('');
+    setRavenAiWebSearch(false);
+    setRavenAiBaseUrl('');
+    setRavenAiAdvancedOpen(false);
+    setAiKeyInfo(null);
+    setAiKeyInput('');
+  };
+
   const closeIntegrations = () => {
     setIntegrationsOpen(false);
     setIntegrationsBusy(false);
     setIntegrationsMessage(null);
     setIntegrationsNoticeVisible(false);
     setMcpTokenValue(null);
-    setAiKeyInput('');
     setAlertingMeta(null);
     setAlertingChannels({
       email: false,
@@ -834,22 +876,93 @@ export const Presence: React.FC = () => {
     }
   };
 
-  const loadAiKey = async () => {
-    setIntegrationsBusy(true);
-    setIntegrationsMessage(null);
+  const loadRavenAiKey = async ({ skipBusy = false }: { skipBusy?: boolean } = {}) => {
+    if (!skipBusy) setRavenAiBusy(true);
+    setRavenAiMessage(null);
     setAiKeyInfo(null);
     try {
-      const res = await fetch('/api/integrations/ai/key');
+      const res = await fetch('/api/raven-ai/key');
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setIntegrationsMessage('Failed to load AI key');
+        setRavenAiMessage('Failed to load AI key');
         return;
       }
       setAiKeyInfo(data?.key ?? null);
     } catch {
-      setIntegrationsMessage('Failed to load AI key');
+      setRavenAiMessage('Failed to load AI key');
     } finally {
-      setIntegrationsBusy(false);
+      if (!skipBusy) setRavenAiBusy(false);
+    }
+  };
+
+  const loadRavenAiSettings = async ({ skipBusy = false }: { skipBusy?: boolean } = {}) => {
+    if (!skipBusy) setRavenAiBusy(true);
+    setRavenAiMessage(null);
+    setRavenAiDefaults(null);
+    try {
+      const res = await fetch('/api/raven-ai/settings');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setRavenAiMessage('Failed to load Raven AI settings');
+        return;
+      }
+      const settings: RavenAiSettings | null = data?.settings ?? null;
+      const defaults: RavenAiDefaults | null = data?.defaults ?? null;
+      setRavenAiDefaults(defaults);
+      setRavenAiModel(settings?.model ?? '');
+      setRavenAiWebSearch(settings?.webSearchEnabled ?? defaults?.webSearchEnabled ?? false);
+      setRavenAiBaseUrl(settings?.baseUrl ?? '');
+    } catch {
+      setRavenAiMessage('Failed to load Raven AI settings');
+    } finally {
+      if (!skipBusy) setRavenAiBusy(false);
+    }
+  };
+
+  const loadRavenAiData = async () => {
+    setRavenAiBusy(true);
+    setRavenAiMessage(null);
+    setAiKeyInput('');
+    try {
+      await Promise.all([
+        loadRavenAiKey({ skipBusy: true }),
+        loadRavenAiSettings({ skipBusy: true }),
+      ]);
+    } finally {
+      setRavenAiBusy(false);
+    }
+  };
+
+  const saveRavenAiSettings = async () => {
+    setRavenAiBusy(true);
+    setRavenAiMessage(null);
+    try {
+      const payload = {
+        model: ravenAiModel.trim() || null,
+        webSearchEnabled: ravenAiWebSearch,
+        baseUrl: ravenAiBaseUrl.trim() || null,
+      };
+      const res = await fetch('/api/raven-ai/settings', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setRavenAiMessage(data?.error === 'bad_base_url' ? 'Enter a valid base URL' : 'Failed to save Raven AI settings');
+        return;
+      }
+      const settings: RavenAiSettings | null = data?.settings ?? null;
+      const defaults: RavenAiDefaults | null = data?.defaults ?? null;
+      setRavenAiDefaults(defaults);
+      setRavenAiModel(settings?.model ?? '');
+      setRavenAiWebSearch(settings?.webSearchEnabled ?? defaults?.webSearchEnabled ?? false);
+      setRavenAiBaseUrl(settings?.baseUrl ?? '');
+      setRavenAiMessage('Raven AI settings saved');
+    } catch {
+      setRavenAiMessage('Failed to save Raven AI settings');
+    } finally {
+      setRavenAiBusy(false);
     }
   };
 
@@ -1012,49 +1125,49 @@ export const Presence: React.FC = () => {
   };
 
 
-  const saveAiKey = async () => {
+  const saveRavenAiKey = async () => {
     const key = aiKeyInput.trim();
     if (!key) return;
-    setIntegrationsBusy(true);
-    setIntegrationsMessage(null);
+    setRavenAiBusy(true);
+    setRavenAiMessage(null);
     try {
-      const res = await fetch('/api/integrations/ai/key', {
+      const res = await fetch('/api/raven-ai/key', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ apiKey: key }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setIntegrationsMessage('Failed to save AI key');
+        setRavenAiMessage('Failed to save AI key');
         return;
       }
       setAiKeyInfo(data?.key ?? null);
       setAiKeyInput('');
-      setIntegrationsMessage('AI key saved');
+      setRavenAiMessage('AI key saved');
     } catch {
-      setIntegrationsMessage('Failed to save AI key');
+      setRavenAiMessage('Failed to save AI key');
     } finally {
-      setIntegrationsBusy(false);
+      setRavenAiBusy(false);
     }
   };
 
-  const revokeAiKey = async () => {
+  const revokeRavenAiKey = async () => {
     if (!window.confirm('Remove the saved OpenAI key?')) return;
-    setIntegrationsBusy(true);
-    setIntegrationsMessage(null);
+    setRavenAiBusy(true);
+    setRavenAiMessage(null);
     try {
-      const res = await fetch('/api/integrations/ai/key', { method: 'DELETE' });
+      const res = await fetch('/api/raven-ai/key', { method: 'DELETE' });
       if (!res.ok) {
-        setIntegrationsMessage('Failed to remove AI key');
+        setRavenAiMessage('Failed to remove AI key');
         return;
       }
       setAiKeyInfo(null);
       setAiKeyInput('');
-      setIntegrationsMessage('AI key removed');
+      setRavenAiMessage('AI key removed');
     } catch {
-      setIntegrationsMessage('Failed to remove AI key');
+      setRavenAiMessage('Failed to remove AI key');
     } finally {
-      setIntegrationsBusy(false);
+      setRavenAiBusy(false);
     }
   };
 
@@ -1086,20 +1199,18 @@ export const Presence: React.FC = () => {
   }, [settingsOpen, me]);
 
   useEffect(() => {
-    const modalOpen = settingsOpen || integrationsOpen || (open && !me);
+    const modalOpen = settingsOpen || integrationsOpen || ravenAiOpen || (open && !me);
     document.body.classList.toggle('modal-open', modalOpen);
     return () => {
       document.body.classList.remove('modal-open');
     };
-  }, [integrationsOpen, me, open, settingsOpen]);
+  }, [integrationsOpen, me, open, ravenAiOpen, settingsOpen]);
 
   useEffect(() => {
     if (!integrationsOpen) return;
     setMcpTokenValue(null);
     if (integrationsTab === 'mcp') {
       loadMcpToken();
-    } else if (integrationsTab === 'ai') {
-      loadAiKey();
     } else if (integrationsTab === 'alerting') {
       loadAlertingSettings();
     }
@@ -1111,10 +1222,21 @@ export const Presence: React.FC = () => {
   }, [integrationsOpen, integrationsTab]);
 
   useEffect(() => {
+    if (!ravenAiOpen) return;
+    void loadRavenAiData();
+  }, [ravenAiOpen]);
+
+  useEffect(() => {
     if (integrationsOpen && !me) {
       closeIntegrations();
     }
   }, [integrationsOpen, me]);
+
+  useEffect(() => {
+    if (ravenAiOpen && !me) {
+      closeRavenAi();
+    }
+  }, [ravenAiOpen, me]);
 
   useEffect(() => {
     if (!settingsPassword) setSettingsPasswordConfirm('');
@@ -1170,6 +1292,20 @@ export const Presence: React.FC = () => {
       window.clearTimeout(clearTimer);
     };
   }, [integrationsMessage]);
+
+  useEffect(() => {
+    if (!ravenAiMessage) {
+      setRavenAiNoticeVisible(false);
+      return;
+    }
+    setRavenAiNoticeVisible(true);
+    const fadeTimer = window.setTimeout(() => setRavenAiNoticeVisible(false), 1600);
+    const clearTimer = window.setTimeout(() => setRavenAiMessage(null), 2000);
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(clearTimer);
+    };
+  }, [ravenAiMessage]);
 
   useEffect(() => {
     const handler = (evt: Event) => {
@@ -1605,6 +1741,21 @@ export const Presence: React.FC = () => {
               }}
             >
               Integrations
+            </button>
+            <button
+              type="button"
+              onClick={openRavenAi}
+              style={{
+                borderRadius: 10,
+                border: '1px solid var(--border-strong)',
+                background: 'transparent',
+                color: 'var(--text-primary)',
+                padding: '8px 10px',
+                cursor: 'pointer',
+                textAlign: 'left',
+              }}
+            >
+              Raven AI
             </button>
             <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.45 }} />
             <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -2209,7 +2360,6 @@ export const Presence: React.FC = () => {
               <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                 {[
                   { key: 'mcp' as const, label: 'MCP' },
-                  { key: 'ai' as const, label: 'AI' },
                   { key: 'alerting' as const, label: 'Alerting' },
                 ].map((tab) => {
                   const active = integrationsTab === tab.key;
@@ -2402,126 +2552,6 @@ export const Presence: React.FC = () => {
                       </button>
                     </div>
                   )}
-                </div>
-                )}
-
-                {integrationsTab === 'ai' && (
-                <div
-                  style={{
-                    borderRadius: 14,
-                    border: '1px solid var(--border-strong)',
-                    background: 'rgba(255,255,255,0.03)',
-                    padding: 12,
-                    display: 'grid',
-                    gap: 10,
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>AI</div>
-                    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>OpenAI API key</div>
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: 'var(--text-secondary)',
-                      padding: '10px 12px',
-                      borderRadius: 12,
-                      border: '1px solid var(--border-strong)',
-                      background: 'rgba(15, 20, 28, 0.45)',
-                      lineHeight: 1.5,
-                    }}
-                  >
-                    Store an OpenAI API key to enable the in-app assistant. The key is saved to your account.
-                  </div>
-                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
-                  <div style={{ display: 'grid', gap: 8 }}>
-                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
-                      Key status
-                    </div>
-                    <div style={{ display: 'grid', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                        <span>Status</span>
-                        <span style={{ color: aiKeyInfo ? 'var(--text-primary)' : 'var(--text-secondary)' }}>{aiStatusLabel}</span>
-                      </div>
-                      {aiKeyInfo && (
-                        <>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                            <span>Key</span>
-                            <span>{aiKeyInfo.masked}</span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                            <span>Updated</span>
-                            <span>{formatDateTime(aiKeyInfo.updatedAt ?? aiKeyInfo.createdAt)}</span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                            <span>Last used</span>
-                            <span>{formatDateTime(aiKeyInfo.lastUsedAt)}</span>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
-                  <div style={{ display: 'grid', gap: 8 }}>
-                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
-                      API key
-                    </div>
-                    <input
-                      value={aiKeyInput}
-                      onChange={(e) => setAiKeyInput(e.target.value)}
-                      type="password"
-                      placeholder="sk-..."
-                      disabled={integrationsBusy}
-                      style={{
-                        width: '100%',
-                        borderRadius: 12,
-                        border: '1px solid var(--border-strong)',
-                        background: 'rgba(15, 20, 28, 0.45)',
-                        color: 'var(--text-primary)',
-                        padding: '8px 10px',
-                        fontSize: 12,
-                        boxSizing: 'border-box',
-                      }}
-                    />
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    <button
-                      type="button"
-                      onClick={saveAiKey}
-                      disabled={integrationsBusy || !aiKeyInput.trim()}
-                      style={{
-                        borderRadius: 12,
-                        border: '1px solid var(--border-strong)',
-                        background: 'var(--accent-primary)',
-                        color: '#fff',
-                        padding: '8px 12px',
-                        cursor: integrationsBusy || !aiKeyInput.trim() ? 'not-allowed' : 'pointer',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 8,
-                      }}
-                    >
-                      <span>{aiKeyInfo ? 'Update key' : 'Save key'}</span>
-                      {integrationsBusy && <LoadingSpinner size={12} />}
-                    </button>
-                    {aiKeyInfo && (
-                      <button
-                        type="button"
-                        onClick={revokeAiKey}
-                        disabled={integrationsBusy}
-                        style={{
-                          borderRadius: 12,
-                          border: '1px solid var(--border-strong)',
-                          background: 'transparent',
-                          color: 'var(--text-primary)',
-                          padding: '8px 12px',
-                          cursor: integrationsBusy ? 'not-allowed' : 'pointer',
-                        }}
-                      >
-                        Remove key
-                      </button>
-                    )}
-                  </div>
                 </div>
                 )}
 
@@ -2786,6 +2816,321 @@ export const Presence: React.FC = () => {
                   </div>
                 </div>
                 )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Raven AI modal */}
+      {ravenAiOpen && me && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 12000,
+            background: 'rgba(0,0,0,0.45)',
+            display: 'grid',
+            placeItems: isCompactAuth ? 'end center' : 'center',
+            padding:
+              'calc(12px + env(safe-area-inset-top, 0px)) calc(12px + env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px))',
+          }}
+          onPointerDown={closeRavenAi}
+        >
+          <div style={{ display: 'grid', justifyItems: 'center', position: 'relative' }}>
+            <div
+              style={{
+                width: isCompactAuth ? 'min(680px, 100%)' : 'min(520px, 92vw)',
+                borderRadius: isCompactAuth ? '16px 16px 14px 14px' : 16,
+                background: 'var(--bg-node)',
+                border: '1px solid var(--border-strong)',
+                boxShadow: '0 20px 70px rgba(0,0,0,0.55)',
+                padding: 16,
+                boxSizing: 'border-box',
+                maxHeight: isCompactAuth ? 'calc(var(--visual-height, 100vh) - env(safe-area-inset-top, 0px) - 12px)' : undefined,
+                overflowY: isCompactAuth ? 'auto' : undefined,
+                paddingBottom: isCompactAuth ? 'calc(16px + env(safe-area-inset-bottom, 0px))' : 16,
+                WebkitOverflowScrolling: isCompactAuth ? 'touch' : undefined,
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>Raven AI</div>
+                <button
+                  type="button"
+                  onClick={closeRavenAi}
+                  style={{
+                    borderRadius: 10,
+                    border: '1px solid var(--border-strong)',
+                    background: 'transparent',
+                    color: 'var(--text-primary)',
+                    padding: '6px 10px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+              {ravenAiMessage && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 48,
+                    left: '50%',
+                    transform: `translate(-50%, ${ravenAiNoticeVisible ? 0 : -6}px)`,
+                    padding: '8px 12px',
+                    borderRadius: 999,
+                    border: '1px solid var(--border-strong)',
+                    background: 'var(--bg-node)',
+                    color: 'var(--text-primary)',
+                    fontSize: 12,
+                    boxShadow: '0 10px 24px rgba(0,0,0,0.35)',
+                    opacity: ravenAiNoticeVisible ? 0.72 : 0,
+                    transition: 'opacity 220ms ease, transform 220ms ease',
+                    pointerEvents: 'none',
+                    zIndex: 2,
+                  }}
+                >
+                  {ravenAiMessage}
+                </div>
+              )}
+
+              <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
+                <div
+                  style={{
+                    borderRadius: 14,
+                    border: '1px solid var(--border-strong)',
+                    background: 'rgba(255,255,255,0.03)',
+                    padding: 12,
+                    display: 'grid',
+                    gap: 10,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>OpenAI</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Key + model</div>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-secondary)',
+                      padding: '10px 12px',
+                      borderRadius: 12,
+                      border: '1px solid var(--border-strong)',
+                      background: 'rgba(15, 20, 28, 0.45)',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    Configure the OpenAI key, model, and search capability used by Raven.
+                  </div>
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                      Key status
+                    </div>
+                    <div style={{ display: 'grid', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                        <span>Status</span>
+                        <span style={{ color: aiKeyInfo ? 'var(--text-primary)' : 'var(--text-secondary)' }}>{aiStatusLabel}</span>
+                      </div>
+                      {aiKeyInfo && (
+                        <>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                            <span>Key</span>
+                            <span>{aiKeyInfo.masked}</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                            <span>Updated</span>
+                            <span>{formatDateTime(aiKeyInfo.updatedAt ?? aiKeyInfo.createdAt)}</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                            <span>Last used</span>
+                            <span>{formatDateTime(aiKeyInfo.lastUsedAt)}</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                      API key
+                    </div>
+                    <input
+                      value={aiKeyInput}
+                      onChange={(e) => setAiKeyInput(e.target.value)}
+                      type="password"
+                      placeholder="sk-..."
+                      disabled={ravenAiBusy}
+                      style={{
+                        width: '100%',
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'rgba(15, 20, 28, 0.45)',
+                        color: 'var(--text-primary)',
+                        padding: '8px 10px',
+                        fontSize: 12,
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      onClick={saveRavenAiKey}
+                      disabled={ravenAiBusy || !aiKeyInput.trim()}
+                      style={{
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'var(--accent-primary)',
+                        color: '#fff',
+                        padding: '8px 12px',
+                        cursor: ravenAiBusy || !aiKeyInput.trim() ? 'not-allowed' : 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 8,
+                      }}
+                    >
+                      <span>{aiKeyInfo ? 'Update key' : 'Save key'}</span>
+                      {ravenAiBusy && <LoadingSpinner size={12} />}
+                    </button>
+                    {aiKeyInfo && (
+                      <button
+                        type="button"
+                        onClick={revokeRavenAiKey}
+                        disabled={ravenAiBusy}
+                        style={{
+                          borderRadius: 12,
+                          border: '1px solid var(--border-strong)',
+                          background: 'transparent',
+                          color: 'var(--text-primary)',
+                          padding: '8px 12px',
+                          cursor: ravenAiBusy ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        Remove key
+                      </button>
+                    )}
+                  </div>
+
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                      Model
+                    </div>
+                    <input
+                      value={ravenAiModel}
+                      onChange={(e) => setRavenAiModel(e.target.value)}
+                      placeholder={ravenAiDefaults?.model ?? 'gpt-5.2'}
+                      disabled={ravenAiBusy}
+                      style={{
+                        width: '100%',
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'rgba(15, 20, 28, 0.45)',
+                        color: 'var(--text-primary)',
+                        padding: '8px 10px',
+                        fontSize: 12,
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{ravenAiModelHint}</div>
+                  </div>
+
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Internet search</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Allow the agent to call the web_search tool.</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setRavenAiWebSearch((prev) => !prev)}
+                      disabled={ravenAiBusy}
+                      style={{
+                        borderRadius: 999,
+                        border: '1px solid var(--border-strong)',
+                        background: ravenAiWebSearch ? 'var(--accent-glow)' : 'transparent',
+                        color: 'var(--text-primary)',
+                        padding: '6px 12px',
+                        fontSize: 12,
+                        cursor: ravenAiBusy ? 'not-allowed' : 'pointer',
+                        minWidth: 64,
+                      }}
+                    >
+                      {ravenAiWebSearch ? 'On' : 'Off'}
+                    </button>
+                  </div>
+
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <button
+                    type="button"
+                    onClick={() => setRavenAiAdvancedOpen((prev) => !prev)}
+                    disabled={ravenAiBusy}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 10,
+                      borderRadius: 12,
+                      border: '1px solid var(--border-strong)',
+                      background: 'transparent',
+                      color: 'var(--text-primary)',
+                      padding: '8px 10px',
+                      cursor: ravenAiBusy ? 'not-allowed' : 'pointer',
+                      fontSize: 12,
+                    }}
+                  >
+                    <span>Advanced settings</span>
+                    {ravenAiAdvancedOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                  </button>
+                  {ravenAiAdvancedOpen && (
+                    <div style={{ display: 'grid', gap: 8 }}>
+                      <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                        Base URL
+                      </div>
+                      <input
+                        value={ravenAiBaseUrl}
+                        onChange={(e) => setRavenAiBaseUrl(e.target.value)}
+                        placeholder={ravenAiDefaults?.baseUrl ?? 'https://api.openai.com/v1'}
+                        disabled={ravenAiBusy}
+                        style={{
+                          width: '100%',
+                          borderRadius: 12,
+                          border: '1px solid var(--border-strong)',
+                          background: 'rgba(15, 20, 28, 0.45)',
+                          color: 'var(--text-primary)',
+                          padding: '8px 10px',
+                          fontSize: 12,
+                          boxSizing: 'border-box',
+                        }}
+                      />
+                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{ravenAiBaseUrlHint}</div>
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      onClick={saveRavenAiSettings}
+                      disabled={ravenAiBusy}
+                      style={{
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'var(--accent-primary)',
+                        color: '#fff',
+                        padding: '8px 12px',
+                        cursor: ravenAiBusy ? 'not-allowed' : 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 8,
+                      }}
+                    >
+                      <span>Save settings</span>
+                      {ravenAiBusy && <LoadingSpinner size={12} />}
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

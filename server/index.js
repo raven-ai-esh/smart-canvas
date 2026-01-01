@@ -391,6 +391,22 @@ async function initDb() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS raven_ai_settings (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      model TEXT,
+      web_search_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      base_url TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS raven_ai_settings_user_id_idx ON raven_ai_settings (user_id)');
+  } catch {
+    // ignore
+  }
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS alerting_settings (
       user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       channels JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -1112,6 +1128,62 @@ async function touchOpenAiKey(userId) {
   await pool.query('UPDATE openai_keys SET last_used_at = NOW() WHERE user_id = $1', [userId]);
 }
 
+function normalizeRavenAiSettings(raw) {
+  const modelRaw = typeof raw?.model === 'string' ? raw.model.trim() : '';
+  const baseUrlRaw = typeof raw?.baseUrl === 'string' ? raw.baseUrl.trim() : '';
+  return {
+    model: modelRaw ? modelRaw.slice(0, 120) : null,
+    webSearchEnabled: coerceBool(raw?.webSearchEnabled, false),
+    baseUrl: baseUrlRaw ? sanitizeWebhookUrl(baseUrlRaw) : null,
+  };
+}
+
+function serializeRavenAiSettingsRow(row) {
+  if (!row) return null;
+  return {
+    model: row.model ?? null,
+    webSearchEnabled: row.web_search_enabled ?? false,
+    baseUrl: row.base_url ?? null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+  };
+}
+
+function resolveRavenAiSettings(settings) {
+  const baseUrl = OPENAI_API_BASE_URL ? String(OPENAI_API_BASE_URL) : null;
+  return {
+    model: settings?.model ?? OPENAI_MODEL,
+    webSearchEnabled: typeof settings?.webSearchEnabled === 'boolean' ? settings.webSearchEnabled : false,
+    baseUrl: settings?.baseUrl ?? baseUrl,
+  };
+}
+
+async function getRavenAiSettings(userId) {
+  const res = await pool.query(
+    `SELECT user_id, model, web_search_enabled, base_url, created_at, updated_at
+       FROM raven_ai_settings
+      WHERE user_id = $1`,
+    [userId],
+  );
+  return res.rows[0] ? serializeRavenAiSettingsRow(res.rows[0]) : null;
+}
+
+async function upsertRavenAiSettings({ userId, settings }) {
+  const normalized = normalizeRavenAiSettings(settings ?? {});
+  const res = await pool.query(
+    `INSERT INTO raven_ai_settings (user_id, model, web_search_enabled, base_url)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id) DO UPDATE
+       SET model = EXCLUDED.model,
+           web_search_enabled = EXCLUDED.web_search_enabled,
+           base_url = EXCLUDED.base_url,
+           updated_at = NOW()
+     RETURNING user_id, model, web_search_enabled, base_url, created_at, updated_at`,
+    [userId, normalized.model, normalized.webSearchEnabled, normalized.baseUrl],
+  );
+  return res.rows[0] ? serializeRavenAiSettingsRow(res.rows[0]) : null;
+}
+
 const coerceBool = (value, fallback = false) => {
   if (typeof value === 'boolean') return value;
   if (value === 0 || value === 1) return Boolean(value);
@@ -1472,6 +1544,18 @@ const normalizeMessageContent = (value) => {
   return trimmed.slice(0, MAX_MESSAGE_CHARS);
 };
 
+const stripAssistantCitations = (value) => {
+  if (typeof value !== 'string') return '';
+  const stripped = value.replace(/[\uE000-\uF8FF]cite[\uE000-\uF8FF][^\s]*/g, '');
+  return stripped.replace(/\s{2,}/g, ' ').trim();
+};
+
+const normalizeAssistantOutput = (value) => {
+  const normalized = normalizeMessageContent(value);
+  if (!normalized) return '';
+  return stripAssistantCitations(normalized);
+};
+
 const normalizeAssistantContext = (value) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return value;
@@ -1575,11 +1659,53 @@ const normalizeSelectionContext = (value) => {
   return { sessionId, nodes, edges, textBoxes, comments };
 };
 
+const normalizeAssistantTraceValue = (value, maxLength) => {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string') return clampText(value, maxLength) || undefined;
+  try {
+    const encoded = JSON.stringify(value);
+    if (encoded.length <= maxLength) return value;
+    return `${encoded.slice(0, maxLength)}...`;
+  } catch {
+    return clampText(String(value), maxLength) || undefined;
+  }
+};
+
+const normalizeAssistantTrace = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const reasoning = clampText(value.reasoning, 2400) || undefined;
+  const rawTools = Array.isArray(value.tools) ? value.tools : [];
+  const tools = rawTools.slice(0, 30).map((tool) => {
+    if (!tool || typeof tool !== 'object') return null;
+    const name = clampText(tool.name, 160);
+    if (!name) return null;
+    const callId = clampText(tool.callId ?? tool.id, 200) || undefined;
+    const args = normalizeAssistantTraceValue(tool.arguments ?? tool.args, 2400);
+    const output = normalizeAssistantTraceValue(tool.output ?? tool.result, 8000);
+    return {
+      name,
+      callId,
+      arguments: args,
+      output,
+      isError: tool.isError === true,
+    };
+  }).filter(Boolean);
+  if (!reasoning && !tools.length) return null;
+  return {
+    reasoning,
+    tools,
+  };
+};
+
 const normalizeAssistantMessageMeta = (value) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const selectionContext = normalizeSelectionContext(value.selectionContext ?? value.selection ?? value);
-  if (!selectionContext) return null;
-  return { selectionContext };
+  const trace = normalizeAssistantTrace(value.trace);
+  if (!selectionContext && !trace) return null;
+  const meta = {};
+  if (selectionContext) meta.selectionContext = selectionContext;
+  if (trace) meta.trace = trace;
+  return meta;
 };
 
 const formatSelectionContextForAgent = (selectionContext) => {
@@ -1640,9 +1766,9 @@ const formatSelectionContextForAgent = (selectionContext) => {
   return lines.join('\n');
 };
 
-const createOpenAiClient = (apiKey) => new OpenAI({
+const createOpenAiClient = (apiKey, baseUrl) => new OpenAI({
   apiKey,
-  baseURL: OPENAI_API_BASE_URL,
+  baseURL: baseUrl || OPENAI_API_BASE_URL,
   timeout: OPENAI_TIMEOUT_MS,
 });
 
@@ -1652,19 +1778,32 @@ const getAgentContextUrl = () => {
   return `${AGENT_SERVICE_URL.replace(/\/+$/, '')}/context`;
 };
 
-const callAgentService = async ({ apiKey, sessionId, userName, userId, inputItems }) => {
+const callAgentService = async ({
+  apiKey,
+  sessionId,
+  userName,
+  userId,
+  inputItems,
+  model,
+  openaiBaseUrl,
+  webSearchEnabled,
+  abortSignal,
+}) => {
   const allowedTools = (MCP_AGENT_ALLOWED_TOOLS || '')
     .split(',')
     .map((v) => v.trim())
     .filter(Boolean);
+  const resolvedModel = model || OPENAI_MODEL;
+  const resolvedBaseUrl = openaiBaseUrl || OPENAI_API_BASE_URL;
   const payload = {
     apiKey,
-    model: OPENAI_MODEL,
+    model: resolvedModel,
     userName,
     input: inputItems,
     temperature: 0.3,
-    openaiBaseUrl: OPENAI_API_BASE_URL,
+    openaiBaseUrl: resolvedBaseUrl,
     openaiTimeoutMs: OPENAI_TIMEOUT_MS,
+    webSearchEnabled: !!webSearchEnabled,
     mcp: MCP_SERVER_URL
       ? {
           url: MCP_SERVER_URL,
@@ -1676,6 +1815,14 @@ const callAgentService = async ({ apiKey, sessionId, userName, userId, inputItem
       : null,
   };
   const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (abortSignal) {
+    if (abortSignal.aborted) {
+      controller.abort();
+    } else {
+      abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
+  }
   const timeout = setTimeout(() => controller.abort(), AGENT_SERVICE_TIMEOUT_MS);
   try {
     const res = await fetch(AGENT_SERVICE_URL, {
@@ -1695,9 +1842,13 @@ const callAgentService = async ({ apiKey, sessionId, userName, userId, inputItem
     return {
       output: typeof body?.output === 'string' ? body.output : '',
       context: body?.context ?? null,
+      trace: body?.trace ?? null,
     };
   } finally {
     clearTimeout(timeout);
+    if (abortSignal) {
+      abortSignal.removeEventListener?.('abort', onAbort);
+    }
   }
 };
 
@@ -1941,15 +2092,16 @@ async function findAssistantMemories({ userId, threadId, embedding, limit }) {
   return res.rows.map((row) => row.content);
 }
 
-async function embedText(apiKey, text) {
+async function embedText(apiKey, text, baseUrl) {
   const input = normalizeMessageContent(text);
   if (!input) return null;
-  const cacheKey = `emb:${OPENAI_EMBEDDING_MODEL}:${hashText(input)}`;
+  const cacheBaseUrl = baseUrl || OPENAI_API_BASE_URL || '';
+  const cacheKey = `emb:${OPENAI_EMBEDDING_MODEL}:${hashText(`${cacheBaseUrl}:${input}`)}`;
   const cached = await cacheGetJson(cacheKey);
   if (Array.isArray(cached)) return cached;
 
   try {
-    const client = createOpenAiClient(apiKey);
+    const client = createOpenAiClient(apiKey, baseUrl);
     const res = await client.embeddings.create({
       model: OPENAI_EMBEDDING_MODEL,
       input,
@@ -2030,8 +2182,8 @@ const getMaxInputTokens = (modelName = OPENAI_MODEL) => {
   return Math.max(1, budgetTokens - reserve);
 };
 
-const shouldRefreshSummary = ({ summaryChars, messageChars }) => {
-  const budgetTokens = getContextBudgetTokens(OPENAI_MODEL);
+const shouldRefreshSummary = ({ summaryChars, messageChars, modelName }) => {
+  const budgetTokens = getContextBudgetTokens(modelName || OPENAI_MODEL);
   if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return false;
   const usedTokens = estimateTokensFromChars((summaryChars ?? 0) + (messageChars ?? 0));
   const remainingRatio = (budgetTokens - usedTokens) / budgetTokens;
@@ -2086,13 +2238,20 @@ const buildSummaryTranscript = async ({ threadId, maxTokens }) => {
   return lines.reverse().join('\n');
 };
 
-const buildAssistantContext = async ({ threadId, userId, apiKey, includeMemories = true }) => {
+const buildAssistantContext = async ({
+  threadId,
+  userId,
+  apiKey,
+  includeMemories = true,
+  model,
+  openaiBaseUrl,
+}) => {
   const summaryRow = await getAssistantSummary(threadId);
   const summary = summaryRow?.summary ? summaryRow.summary.trim() : '';
   const lastUserMessage = await getLastUserMessage(threadId);
   let memories = [];
   if (includeMemories && apiKey) {
-    const embedding = await embedText(apiKey, lastUserMessage);
+    const embedding = await embedText(apiKey, lastUserMessage, openaiBaseUrl);
     if (embedding) {
       memories = await findAssistantMemories({
         userId,
@@ -2105,7 +2264,7 @@ const buildAssistantContext = async ({ threadId, userId, apiKey, includeMemories
 
   let summaryText = summary ? `Conversation summary:\n${summary}` : '';
   let memoryBlock = buildMemoryBlock(memories);
-  const maxInputTokens = getMaxInputTokens(OPENAI_MODEL);
+  const maxInputTokens = getMaxInputTokens(model || OPENAI_MODEL);
 
   if (maxInputTokens > 0) {
     const summaryTokens = estimateTokensFromChars(summaryText.length);
@@ -2143,7 +2302,7 @@ const buildAssistantContext = async ({ threadId, userId, apiKey, includeMemories
   return { items };
 };
 
-const refreshAssistantSummary = async ({ threadId, apiKey, remainingRatio }) => {
+const refreshAssistantSummary = async ({ threadId, apiKey, remainingRatio, openaiBaseUrl, model }) => {
   const summaryRow = await getAssistantSummary(threadId);
   const existing = summaryRow?.summary ? summaryRow.summary.trim() : '';
   const stats = await getAssistantMessageStats(threadId);
@@ -2152,7 +2311,7 @@ const refreshAssistantSummary = async ({ threadId, apiKey, remainingRatio }) => 
   if (!Number.isFinite(remainingRatio)) {
     const summaryChars = (existing ? `Conversation summary:\n${existing}` : '').length;
     const messageChars = stats.totalChars;
-    if (!shouldRefreshSummary({ summaryChars, messageChars })) return;
+    if (!shouldRefreshSummary({ summaryChars, messageChars, modelName: model })) return;
   }
 
   const maxInputTokens = getMaxInputTokens(OPENAI_SUMMARY_MODEL);
@@ -2173,7 +2332,7 @@ const refreshAssistantSummary = async ({ threadId, apiKey, remainingRatio }) => 
     `New conversation:\n${transcript}`,
   ].filter(Boolean).join('\n\n');
 
-  const client = createOpenAiClient(apiKey);
+  const client = createOpenAiClient(apiKey, openaiBaseUrl);
   const response = await client.responses.create({
     model: OPENAI_SUMMARY_MODEL,
     input: prompt,
@@ -2185,17 +2344,24 @@ const refreshAssistantSummary = async ({ threadId, apiKey, remainingRatio }) => 
   }
 };
 
-const scheduleSummaryRefresh = ({ threadId, apiKey, remainingRatio }) => {
+const scheduleSummaryRefresh = ({ threadId, apiKey, remainingRatio, openaiBaseUrl, model }) => {
   setTimeout(() => {
-    refreshAssistantSummary({ threadId, apiKey, remainingRatio }).catch((err) => {
+    refreshAssistantSummary({ threadId, apiKey, remainingRatio, openaiBaseUrl, model }).catch((err) => {
       console.warn('[assistant] summary refresh failed', err?.message ?? err);
     });
   }, 0);
 };
 
-const addAssistantMemory = async ({ threadId, userId, apiKey, userText, assistantText }) => {
+const addAssistantMemory = async ({
+  threadId,
+  userId,
+  apiKey,
+  userText,
+  assistantText,
+  openaiBaseUrl,
+}) => {
   const combined = `User: ${userText}\nAssistant: ${assistantText}`.slice(0, ASSISTANT_MEMORY_MAX_CHARS);
-  const embedding = await embedText(apiKey, combined);
+  const embedding = await embedText(apiKey, combined, openaiBaseUrl);
   if (!embedding) return;
   await insertAssistantMemory({
     userId,
@@ -2205,7 +2371,17 @@ const addAssistantMemory = async ({ threadId, userId, apiKey, userText, assistan
   });
 };
 
-const runAssistantTurn = async ({ apiKey, sessionId, userName, userId, inputItems }) => {
+const runAssistantTurn = async ({
+  apiKey,
+  sessionId,
+  userName,
+  userId,
+  inputItems,
+  model,
+  openaiBaseUrl,
+  webSearchEnabled,
+  abortSignal,
+}) => {
   try {
     const result = await callAgentService({
       apiKey,
@@ -2213,10 +2389,15 @@ const runAssistantTurn = async ({ apiKey, sessionId, userName, userId, inputItem
       userName,
       userId,
       inputItems,
+      model,
+      openaiBaseUrl,
+      webSearchEnabled,
+      abortSignal,
     });
     return {
-      output: normalizeMessageContent(result?.output ?? '') || '',
+      output: normalizeAssistantOutput(result?.output ?? '') || '',
       context: result?.context ?? null,
+      trace: result?.trace ?? null,
     };
   } catch (err) {
     logAssistantEvent('agent_response_error', {
@@ -3490,6 +3671,66 @@ app.delete('/api/integrations/mcp/token', async (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/raven-ai/key', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const row = await getOpenAiKeyForUser(auth.userId);
+  res.json({ key: row ? serializeOpenAiKeyRow(row) : null });
+});
+
+app.post('/api/raven-ai/key', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const rawKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+  if (!rawKey || rawKey.length < 10) return res.status(400).json({ error: 'bad_api_key' });
+  const row = await upsertOpenAiKey({ userId: auth.userId, apiKey: rawKey });
+  res.json({ key: serializeOpenAiKeyRow(row) });
+});
+
+app.delete('/api/raven-ai/key', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  await deleteOpenAiKey(auth.userId);
+  res.json({ ok: true });
+});
+
+app.get('/api/raven-ai/settings', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const settings = await getRavenAiSettings(auth.userId);
+  res.json({
+    settings,
+    defaults: resolveRavenAiSettings(null),
+  });
+});
+
+app.post('/api/raven-ai/settings', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const hasModel = Object.prototype.hasOwnProperty.call(body, 'model');
+  const hasWebSearch = Object.prototype.hasOwnProperty.call(body, 'webSearchEnabled');
+  const hasBaseUrl = Object.prototype.hasOwnProperty.call(body, 'baseUrl');
+  const rawBaseUrl = typeof body.baseUrl === 'string' ? body.baseUrl.trim() : '';
+  const baseUrl = rawBaseUrl ? sanitizeWebhookUrl(rawBaseUrl) : null;
+  if (hasBaseUrl && rawBaseUrl && !baseUrl) {
+    return res.status(400).json({ error: 'bad_base_url' });
+  }
+
+  const current = await getRavenAiSettings(auth.userId);
+  const normalized = normalizeRavenAiSettings(body);
+  const merged = {
+    model: hasModel ? normalized.model : current?.model ?? null,
+    webSearchEnabled: hasWebSearch ? normalized.webSearchEnabled : current?.webSearchEnabled ?? false,
+    baseUrl: hasBaseUrl ? baseUrl : current?.baseUrl ?? null,
+  };
+  const saved = await upsertRavenAiSettings({ userId: auth.userId, settings: merged });
+  res.json({
+    settings: saved,
+    defaults: resolveRavenAiSettings(null),
+  });
+});
+
 app.get('/api/integrations/ai/key', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
@@ -3795,6 +4036,8 @@ app.get('/api/assistant/threads/:id/messages', async (req, res) => {
   const parsedLimit = typeof rawLimit === 'string' ? Number(rawLimit) : Number(rawLimit ?? NaN);
   const limit = Number.isFinite(parsedLimit) ? parsedLimit : ASSISTANT_CONTEXT_LIMIT;
   const messages = await listAssistantMessages(threadId, limit);
+  const aiSettings = await getRavenAiSettings(auth.userId);
+  const resolvedAi = resolveRavenAiSettings(aiSettings);
   let context = await getAssistantContext(threadId);
   if (!context) {
     const user = await getUserById(auth.userId);
@@ -3803,9 +4046,10 @@ app.get('/api/assistant/threads/:id/messages', async (req, res) => {
       userId: auth.userId,
       apiKey: null,
       includeMemories: false,
+      model: resolvedAi.model,
     });
     context = await callAgentContext({
-      model: OPENAI_MODEL,
+      model: resolvedAi.model,
       input: items,
       userName: user?.name ?? null,
     }).catch(() => null);
@@ -3855,6 +4099,15 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
   const keyRow = await getOpenAiKeyForUser(auth.userId);
   const apiKey = keyRow?.api_key ?? OPENAI_API_KEY;
   if (!apiKey) return res.status(400).json({ error: 'openai_key_required' });
+  const aiSettings = await getRavenAiSettings(auth.userId);
+  const resolvedAi = resolveRavenAiSettings(aiSettings);
+  const requestAbort = new AbortController();
+  let connectionClosed = false;
+  req.on('close', () => {
+    if (res.writableEnded) return;
+    connectionClosed = true;
+    requestAbort.abort();
+  });
 
   try {
     logAssistantEvent('message_start', {
@@ -3873,6 +4126,8 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
       threadId,
       userId: auth.userId,
       apiKey,
+      model: resolvedAi.model,
+      openaiBaseUrl: resolvedAi.baseUrl,
     });
     const assistantResult = await runAssistantTurn({
       apiKey,
@@ -3880,13 +4135,19 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
       userName: user?.name ?? null,
       userId: auth.userId,
       inputItems,
+      model: resolvedAi.model,
+      openaiBaseUrl: resolvedAi.baseUrl,
+      webSearchEnabled: resolvedAi.webSearchEnabled,
+      abortSignal: requestAbort.signal,
     });
     const assistantText = assistantResult?.output ?? '';
     const reply = assistantText || 'No response returned.';
+    const assistantTrace = assistantResult?.trace ? { trace: assistantResult.trace } : null;
     const assistantMessage = await insertAssistantMessage({
       threadId,
       role: 'assistant',
       content: reply,
+      meta: assistantTrace,
     });
     void notifyAgentReply({
       userId: auth.userId,
@@ -3899,7 +4160,7 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
     if (!context) {
       const contextItems = inputItems.concat({ role: 'assistant', content: reply });
       context = await callAgentContext({
-        model: OPENAI_MODEL,
+        model: resolvedAi.model,
         input: contextItems,
         userName: user?.name ?? null,
       }).catch(() => null);
@@ -3911,7 +4172,13 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
     }
     const remainingRatio = Number.isFinite(context?.remainingRatio) ? context.remainingRatio : null;
     if (remainingRatio !== null && remainingRatio <= getSummaryRemainingRatio()) {
-      scheduleSummaryRefresh({ threadId, apiKey, remainingRatio });
+      scheduleSummaryRefresh({
+        threadId,
+        apiKey,
+        remainingRatio,
+        openaiBaseUrl: resolvedAi.baseUrl,
+        model: resolvedAi.model,
+      });
     }
     if (userText && reply) {
       await addAssistantMemory({
@@ -3920,6 +4187,7 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
         apiKey,
         userText,
         assistantText: reply,
+        openaiBaseUrl: resolvedAi.baseUrl,
       });
     }
     if (keyRow) {
@@ -3930,6 +4198,7 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
       threadId,
       assistantMessageId: assistantMessage?.id ?? null,
     });
+    if (connectionClosed) return;
     res.json({
       message: reply,
       userMessage,
@@ -3937,6 +4206,7 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
       context,
     });
   } catch (err) {
+    if (connectionClosed || err?.name === 'AbortError') return;
     const status = err?.statusCode ?? err?.status;
     logAssistantEvent('message_error', {
       userId: auth.userId,

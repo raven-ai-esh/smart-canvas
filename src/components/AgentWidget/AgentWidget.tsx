@@ -1,9 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Link2, MessageCircle, X } from 'lucide-react';
+import { Bot, ChevronDown, ChevronUp, Link2, MessageCircle, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/useStore';
 import type { AssistantSelectionContext } from '../../types/assistant';
+
+type AssistantTrace = {
+  reasoning?: string | null;
+  tools?: Array<{
+    name: string;
+    callId?: string;
+    arguments?: unknown;
+    output?: unknown;
+    isError?: boolean;
+  }>;
+};
 
 type ChatMessage = {
   id?: string;
@@ -11,6 +22,7 @@ type ChatMessage = {
   content: string;
   createdAt?: string | null;
   selectionContext?: AssistantSelectionContext | null;
+  trace?: AssistantTrace | null;
 };
 
 const MAX_VISIBLE_MESSAGES = 120;
@@ -37,10 +49,10 @@ const trimMessages = (messages: ChatMessage[], max = MAX_VISIBLE_MESSAGES) => {
 
 const mapErrorMessage = (code?: string) => {
   if (code === 'openai_key_required') {
-    return 'OpenAI API key is missing. Add it in Integrations > AI.';
+    return 'OpenAI API key is missing. Add it in Raven AI.';
   }
   if (code === 'invalid_openai_key') {
-    return 'OpenAI API key is invalid. Update it in Integrations > AI.';
+    return 'OpenAI API key is invalid. Update it in Raven AI.';
   }
   if (code === 'openai_rate_limited') {
     return 'OpenAI rate limit reached. Please try again later.';
@@ -76,6 +88,7 @@ export const AgentWidget: React.FC = () => {
   const clearSelectionContext = useStore((s) => s.clearAssistantSelectionContext);
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [expandedDetails, setExpandedDetails] = useState<Record<string, boolean>>({});
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -88,6 +101,7 @@ export const AgentWidget: React.FC = () => {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const requestAbortRef = useRef<AbortController | null>(null);
   const resizeStartRef = useRef<{
     x: number;
     y: number;
@@ -114,6 +128,16 @@ export const AgentWidget: React.FC = () => {
     const width = Math.max(PANEL_MIN_WIDTH, Math.min(size.width, maxWidth));
     const height = Math.max(PANEL_MIN_HEIGHT, Math.min(size.height, maxHeight));
     return { width, height };
+  }, []);
+
+  const toggleDetails = useCallback((key: string) => {
+    setExpandedDetails((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+
+  const stopRequest = useCallback(() => {
+    if (requestAbortRef.current) {
+      requestAbortRef.current.abort();
+    }
   }, []);
 
   useEffect(() => {
@@ -184,6 +208,7 @@ export const AgentWidget: React.FC = () => {
       setThreadId(null);
       setMessages([]);
       setContextInfo(null);
+      setExpandedDetails({});
       return;
     }
     const sessionKey = sessionId ?? 'default';
@@ -198,6 +223,7 @@ export const AgentWidget: React.FC = () => {
     setThreadId(stored);
     setMessages([]);
     setContextInfo(null);
+    setExpandedDetails({});
   }, [lastSessionKey, sessionId, threadKey]);
 
   const persistPanelSize = useCallback((size: { width: number; height: number }) => {
@@ -300,6 +326,7 @@ export const AgentWidget: React.FC = () => {
       content: msg.content,
       createdAt: msg.createdAt ?? null,
       selectionContext: (msg?.meta?.selectionContext ?? null) as AssistantSelectionContext | null,
+      trace: msg?.meta?.trace ?? null,
     }));
     const context = data?.context && typeof data.context === 'object' ? data.context : null;
     return { messages: mapped, context };
@@ -329,6 +356,7 @@ export const AgentWidget: React.FC = () => {
     }
     setThreadId(null);
     setContextInfo(null);
+    setExpandedDetails({});
   }, [threadKey]);
 
   useEffect(() => {
@@ -387,6 +415,8 @@ export const AgentWidget: React.FC = () => {
   const sendMessage = async () => {
     const text = input.trim();
     if (!text || pending || loadingThread || !me || !sessionReady) return;
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
     const selectionSnapshot = selectionContext ? { ...selectionContext } : null;
     const nextMessages = trimMessages([
       ...messages,
@@ -406,6 +436,7 @@ export const AgentWidget: React.FC = () => {
         const res = await fetch(`/api/assistant/threads/${id}/messages`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'x-assistant-client': 'widget-v2' },
+          signal: controller.signal,
           body: JSON.stringify({
             content: text,
             sessionId,
@@ -435,7 +466,18 @@ export const AgentWidget: React.FC = () => {
         const reply = typeof data?.message === 'string' && data.message.trim()
           ? data.message.trim()
           : 'No response returned.';
-        setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: reply }]));
+        const assistantMeta = data?.assistantMessage?.meta ?? null;
+        const assistantTrace = assistantMeta?.trace ?? null;
+        setMessages((prev) => trimMessages([
+          ...prev,
+          {
+            role: 'assistant',
+            content: reply,
+            trace: assistantTrace,
+            id: data?.assistantMessage?.id,
+            createdAt: data?.assistantMessage?.createdAt ?? null,
+          },
+        ]));
         if (data?.context && typeof data.context === 'object') {
           setContextInfo(data.context);
         }
@@ -446,6 +488,9 @@ export const AgentWidget: React.FC = () => {
         await attempt();
       }
     } catch (err) {
+      if (err && typeof err === 'object' && (err as { name?: string }).name === 'AbortError') {
+        return;
+      }
       const msg = isNetworkError(err)
         ? NETWORK_ERROR_MESSAGE
         : (err instanceof Error ? err.message : 'Assistant request failed. Please try again.');
@@ -453,6 +498,7 @@ export const AgentWidget: React.FC = () => {
       setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: msg }]));
     } finally {
       setPending(false);
+      requestAbortRef.current = null;
     }
   };
 
@@ -494,6 +540,8 @@ export const AgentWidget: React.FC = () => {
     const comments = selectionContext.comments?.length ?? 0;
     return nodes + edges + textBoxes + comments;
   }, [selectionContext]);
+
+  const sendDisabled = !input.trim() || pending || loadingThread || !me || !sessionReady;
 
   const markdownComponents = useMemo(() => ({
     p: ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
@@ -684,9 +732,16 @@ export const AgentWidget: React.FC = () => {
                 + (msg.selectionContext.textBoxes?.length ?? 0)
                 + (msg.selectionContext.comments?.length ?? 0)
               ) > 0;
+              const trace = msg.trace ?? null;
+              const hasTrace = !isUser && !!trace && (
+                !!(trace.reasoning && trace.reasoning.trim())
+                || ((trace.tools?.length ?? 0) > 0)
+              );
+              const messageKey = msg.id ?? `${msg.role}-${idx}`;
+              const detailsOpen = expandedDetails[messageKey] ?? false;
               return (
                 <div
-                  key={`${msg.role}-${idx}`}
+                  key={messageKey}
                   style={{
                     alignSelf: isUser ? 'flex-end' : 'flex-start',
                     display: 'flex',
@@ -708,6 +763,81 @@ export const AgentWidget: React.FC = () => {
                     >
                       <Link2 size={12} />
                       <span>Selected objects attached</span>
+                    </div>
+                  )}
+                  {hasTrace && (
+                    <button
+                      type="button"
+                      onClick={() => toggleDetails(messageKey)}
+                      style={{
+                        alignSelf: 'flex-start',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        fontSize: 11,
+                        color: 'var(--text-secondary)',
+                        borderRadius: 999,
+                        border: '1px solid var(--border-strong)',
+                        background: 'rgba(15, 20, 28, 0.55)',
+                        padding: '4px 10px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <span>Details</span>
+                      {trace?.tools?.length ? (
+                        <span>{`(${trace.tools.length} tools)`}</span>
+                      ) : null}
+                      {detailsOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                    </button>
+                  )}
+                  {hasTrace && detailsOpen && (
+                    <div
+                      style={{
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'rgba(10, 12, 18, 0.55)',
+                        padding: '8px 10px',
+                        display: 'grid',
+                        gap: 8,
+                        color: 'var(--text-secondary)',
+                        fontSize: 12,
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      {trace?.reasoning && trace.reasoning.trim() && (
+                        <div style={{ display: 'grid', gap: 4 }}>
+                          <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase' }}>
+                            Reasoning
+                          </div>
+                          <div style={{ whiteSpace: 'pre-wrap', color: 'var(--text-primary)' }}>
+                            {trace.reasoning}
+                          </div>
+                        </div>
+                      )}
+                      {trace?.tools?.length ? (
+                        <div style={{ display: 'grid', gap: 6 }}>
+                          <div style={{ fontSize: 11, letterSpacing: 0.3, textTransform: 'uppercase' }}>
+                            Tools
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                            {trace.tools.map((tool, toolIdx) => (
+                              <span
+                                key={`${messageKey}-tool-${toolIdx}`}
+                                style={{
+                                  borderRadius: 999,
+                                  border: '1px solid rgba(255,255,255,0.12)',
+                                  background: 'rgba(15, 18, 26, 0.6)',
+                                  padding: '4px 8px',
+                                  fontSize: 11,
+                                  color: 'var(--text-primary)',
+                                }}
+                              >
+                                {tool.name}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   )}
                   <div
@@ -846,19 +976,19 @@ export const AgentWidget: React.FC = () => {
               </div>
               <button
                 type="button"
-                onClick={() => void sendMessage()}
-                disabled={!input.trim() || pending || loadingThread || !me || !sessionReady}
+                onClick={pending ? stopRequest : () => void sendMessage()}
+                disabled={pending ? false : sendDisabled}
                 style={{
                   borderRadius: 10,
                   border: '1px solid var(--border-strong)',
-                  background: pending ? 'rgba(94,129,172,0.4)' : 'var(--accent-primary)',
+                  background: pending ? 'rgba(191,97,106,0.85)' : 'var(--accent-primary)',
                   color: '#fff',
                   padding: '6px 12px',
                   fontSize: 12,
-                  cursor: pending || loadingThread || !me ? 'not-allowed' : 'pointer',
+                  cursor: pending ? 'pointer' : (sendDisabled ? 'not-allowed' : 'pointer'),
                 }}
               >
-                Send
+                {pending ? 'Stop' : 'Send'}
               </button>
             </div>
           </div>
