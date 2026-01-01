@@ -209,6 +209,7 @@ class AgentRunRequest(BaseModel):
     temperature: float | None = 0.3
     openaiBaseUrl: str | None = None
     openaiTimeoutMs: int | None = None
+    webSearchEnabled: bool | None = None
     mcp: MCPConfig | None = None
 
 
@@ -216,6 +217,7 @@ class AgentRunResponse(BaseModel):
     output: str
     lastResponseId: str | None = None
     context: dict[str, Any] | None = None
+    trace: dict[str, Any] | None = None
 
 
 class AgentContextRequest(BaseModel):
@@ -233,6 +235,7 @@ class AgentContextResponse(BaseModel):
 
 class AssistantResponse(BaseModel):
     message: str
+    reasoning: str | None = None
 
 class PromptResponse(BaseModel):
     prompt: str
@@ -396,6 +399,23 @@ def _extract_function_calls(output: Any) -> list[Any]:
         if item_type == "function_call":
             calls.append(item)
     return calls
+
+def _extract_web_search_items(output: Any) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if not isinstance(output, list):
+        return items
+    for item in output:
+        item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+        if not isinstance(item_type, str) or "web_search" not in item_type:
+            continue
+        if isinstance(item, dict):
+            items.append(item)
+            continue
+        if hasattr(item, "model_dump"):
+            items.append(item.model_dump())
+            continue
+        items.append({"type": item_type, "value": str(item)})
+    return items
 
 def _tool_call_priority(call: Any) -> int:
     name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
@@ -793,6 +813,18 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
             )
 
     instructions = _build_instructions(req.userName, req.instructions)
+    if req.webSearchEnabled:
+        instructions = "\n\n".join([
+            instructions,
+            "You can use the web_search tool to look up current information when needed.",
+            "Use web_search only for up-to-date facts or when the user asks, and summarize the results.",
+        ])
+    instructions = "\n\n".join([
+        instructions,
+        "Include an optional `reasoning` field with a short, high-level summary of your approach.",
+        "Do not reveal chain-of-thought or internal reasoning steps.",
+    ])
+    tool_trace: list[dict[str, Any]] = []
     try:
         async with mcp_session_context(req.mcp, timeout) as (mcp_session, mcp_tools):
             function_tools = []
@@ -819,13 +851,15 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
                     len(function_tools),
                 )
 
-            tools_enabled = bool(function_tools)
+            web_search_tools = [{"type": "web_search"}] if req.webSearchEnabled else []
+            tools_payload = function_tools + web_search_tools
+            tools_enabled = bool(tools_payload)
             parse_kwargs: dict[str, Any] = {
                 "model": req.model,
                 "instructions": instructions,
                 "input": req.input,
                 "temperature": req.temperature,
-                "tools": function_tools if tools_enabled else None,
+                "tools": tools_payload if tools_enabled else None,
                 "parallel_tool_calls": tools_enabled,
                 "text_format": AssistantResponse,
             }
@@ -833,7 +867,7 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
                 logger.debug(
                     "openai_request id=%s toolCount=%s",
                     run_id,
-                    len(function_tools),
+                    len(tools_payload),
                 )
             response = await client.responses.parse(**parse_kwargs)
 
@@ -869,6 +903,10 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
                     if serialized:
                         tool_output_chunks.append(serialized)
                         last_context = _calculate_context(req.model, req.instructions, req.input, tool_output_chunks)
+                    trace_entry = {
+                        "name": name,
+                    }
+                    tool_trace.append(trace_entry)
                     if logger.isEnabledFor(logging.DEBUG):
                         logger.debug(
                             "tool_call id=%s name=%s args=%s error=%s",
@@ -886,7 +924,7 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
                     "instructions": instructions,
                     "input": outputs,
                     "temperature": req.temperature,
-                    "tools": function_tools if tools_enabled else None,
+                    "tools": tools_payload if tools_enabled else None,
                     "parallel_tool_calls": tools_enabled,
                     "text_format": AssistantResponse,
                     "previous_response_id": getattr(response, "id", None),
@@ -895,13 +933,17 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
 
             parsed = getattr(response, "output_parsed", None)
             output = ""
+            reasoning = None
             if isinstance(parsed, AssistantResponse):
                 output = parsed.message
+                reasoning = parsed.reasoning
             elif isinstance(parsed, dict) and isinstance(parsed.get("message"), str):
                 output = parsed["message"]
             if not output:
                 output = _extract_response_text(response)
             output = _format_output(output).strip()
+            if isinstance(reasoning, str):
+                reasoning = reasoning.strip() or None
             elapsed = int((time.monotonic() - started) * 1000)
             logger.info(
                 "run_done id=%s ms=%s outputSize=%s lastResponseId=%s",
@@ -922,10 +964,21 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
             if output:
                 extra_chunks.append(output)
             context = _calculate_context(req.model, instructions, req.input, extra_chunks) if extra_chunks else last_context
+            if req.webSearchEnabled:
+                web_search_items = _extract_web_search_items(getattr(response, "output", None))
+                for _item in web_search_items:
+                    tool_trace.append({"name": "web_search"})
+            trace = None
+            if tool_trace or reasoning:
+                trace = {
+                    "reasoning": reasoning,
+                    "tools": tool_trace if tool_trace else None,
+                }
             return AgentRunResponse(
                 output=output,
                 lastResponseId=getattr(response, "id", None),
                 context=context,
+                trace=trace,
             )
     except APIStatusError as exc:
         code = None
