@@ -349,9 +349,9 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
             const selNodes = st.selectedNodes?.length ? st.selectedNodes : (st.selectedNode ? [st.selectedNode] : []);
             const selEdges = st.selectedEdges?.length ? st.selectedEdges : (st.selectedEdge ? [st.selectedEdge] : []);
             const selText = st.selectedTextBoxes?.length ? st.selectedTextBoxes : (st.selectedTextBoxId ? [st.selectedTextBoxId] : []);
-            if (!selEdges.includes(id)) {
-                setMultiSelection({ nodes: selNodes, edges: [...selEdges, id], textBoxes: selText });
-            }
+            const isSelected = selEdges.includes(id);
+            const nextEdges = isSelected ? selEdges.filter((edgeId) => edgeId !== id) : [...selEdges, id];
+            setMultiSelection({ nodes: selNodes, edges: nextEdges, textBoxes: selText });
             return;
         }
 
