@@ -4,9 +4,10 @@ import { Node } from '../Node/Node';
 import { Edge, ConnectionLine, LayerBridgeEdge } from '../Edge/Edge';
 import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
-import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpToLine, Link2, MessageCircle, Paperclip, X, Zap, ZapOff } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpToLine, Bot, Link2, MessageCircle, Paperclip, X, Zap, ZapOff } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
 import type { Attachment, Comment, EdgeData, NodeData, TextBox as TextBoxType } from '../../types';
+import type { AssistantSelectionContext } from '../../types/assistant';
 import { debugLog } from '../../utils/debug';
 import { TextBox } from '../TextBox/TextBox';
 import { SnowOverlay } from '../Snow/SnowOverlay';
@@ -2853,7 +2854,10 @@ export const Canvas: React.FC = () => {
                 const selectedNodes = st.selectedNodes?.length ? st.selectedNodes : (st.selectedNode ? [st.selectedNode] : []);
                 const selectedEdges = st.selectedEdges?.length ? st.selectedEdges : (st.selectedEdge ? [st.selectedEdge] : []);
                 const selectedTextBoxes = st.selectedTextBoxes?.length ? st.selectedTextBoxes : (st.selectedTextBoxId ? [st.selectedTextBoxId] : []);
-                const nextNodes = Array.from(new Set([...selectedNodes, shiftCandidate.nodeId]));
+                const isSelected = selectedNodes.includes(shiftCandidate.nodeId);
+                const nextNodes = isSelected
+                    ? selectedNodes.filter((id) => id !== shiftCandidate.nodeId)
+                    : Array.from(new Set([...selectedNodes, shiftCandidate.nodeId]));
                 const { selectNode, selectEdge, selectTextBox, setMultiSelection, setEditingTextBoxId } = st;
 
                 setEditingTextBoxId(null);
@@ -3278,11 +3282,132 @@ export const Canvas: React.FC = () => {
         const hue = hashString(seed) % 360;
         return `hsl(${hue} 54% 45%)`;
     };
+    const buildAssistantSelectionContext = useCallback((override?: {
+        nodeIds?: string[];
+        edgeIds?: string[];
+        textBoxIds?: string[];
+        commentIds?: string[];
+    }): AssistantSelectionContext | null => {
+        const st = useStore.getState();
+        const selectedNodes = override
+            ? (override.nodeIds ?? [])
+            : (st.selectedNodes?.length ? st.selectedNodes : (st.selectedNode ? [st.selectedNode] : []));
+        const selectedEdges = override
+            ? (override.edgeIds ?? [])
+            : (st.selectedEdges?.length ? st.selectedEdges : (st.selectedEdge ? [st.selectedEdge] : []));
+        const selectedTextBoxes = override
+            ? (override.textBoxIds ?? [])
+            : (st.selectedTextBoxes?.length ? st.selectedTextBoxes : (st.selectedTextBoxId ? [st.selectedTextBoxId] : []));
+        const selectedComments = override ? (override.commentIds ?? []) : [];
+        if (
+            selectedNodes.length === 0
+            && selectedEdges.length === 0
+            && selectedTextBoxes.length === 0
+            && selectedComments.length === 0
+        ) {
+            return null;
+        }
+
+        const clipText = (value: unknown, max: number) => {
+            const text = String(value ?? '').trim();
+            if (!text) return '';
+            if (text.length <= max) return text;
+            return `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
+        };
+
+        const buildNodeLink = (nodeId: string, session: string | null) => {
+            if (!session) return null;
+            const url = new URL(window.location.origin + window.location.pathname);
+            url.searchParams.set('session', session);
+            url.searchParams.set('card', nodeId);
+            return url.toString();
+        };
+
+        const nodeById = new Map(st.nodes.map((node) => [node.id, node]));
+        const nodes = selectedNodes
+            .map((id) => nodeById.get(id))
+            .filter(Boolean)
+            .map((node) => ({
+                id: node!.id,
+                title: clipText(node!.title || 'Untitled', 120) || 'Untitled',
+                type: node!.type,
+                status: node!.status,
+                progress: typeof node!.progress === 'number' ? node!.progress : undefined,
+                energy: typeof node!.energy === 'number' ? node!.energy : undefined,
+                layerId: node!.layerId,
+                link: buildNodeLink(node!.id, st.sessionId ?? null),
+            }));
+
+        const edges = selectedEdges
+            .map((id) => st.edges.find((edge) => edge.id === id))
+            .filter(Boolean)
+            .map((edge) => {
+                const source = nodeById.get(edge!.source);
+                const target = nodeById.get(edge!.target);
+                return {
+                    id: edge!.id,
+                    source: edge!.source,
+                    target: edge!.target,
+                    sourceTitle: source ? clipText(source.title || 'Untitled', 120) || 'Untitled' : undefined,
+                    targetTitle: target ? clipText(target.title || 'Untitled', 120) || 'Untitled' : undefined,
+                    energyEnabled: edge!.energyEnabled !== false,
+                };
+            });
+
+        const textBoxes = selectedTextBoxes
+            .map((id) => st.textBoxes.find((tb) => tb.id === id))
+            .filter(Boolean)
+            .map((tb) => {
+                const text = clipText(tb!.text, 280);
+                return {
+                    id: tb!.id,
+                    kind: tb!.kind ?? 'text',
+                    text: text || undefined,
+                    fileName: tb!.fileName || undefined,
+                    fileMime: tb!.fileMime || undefined,
+                    fileSize: typeof tb!.fileSize === 'number' ? tb!.fileSize : undefined,
+                    layerId: tb!.layerId,
+                };
+            });
+
+        const comments = selectedComments
+            .map((id) => st.comments.find((comment) => comment.id === id))
+            .filter(Boolean)
+            .map((comment) => ({
+                id: comment!.id,
+                text: clipText(comment!.text, 320) || undefined,
+                layerId: comment!.layerId,
+                targetKind: comment!.targetKind,
+                targetId: comment!.targetId ?? null,
+            }));
+
+        return {
+            sessionId: st.sessionId ?? null,
+            nodes,
+            edges,
+            textBoxes,
+            comments,
+        };
+    }, []);
     const contextEdge = contextMenu?.kind === 'edge'
         ? edges.find((edge) => edge.id === contextMenu.id) ?? null
         : null;
     const contextEdgeEnergyEnabled = contextEdge?.energyEnabled !== false;
     const stackableContext = contextMenu?.kind === 'node' || contextMenu?.kind === 'textBox' || contextMenu?.kind === 'comment';
+    const canComment = contextMenu?.kind !== 'selection' && contextMenu?.kind !== 'comment';
+    const canRaven = contextMenu?.kind !== 'canvas';
+    const canDelete = contextMenu?.kind !== 'canvas';
+    const getContextMenuSelectionContext = () => {
+        if (!contextMenu) return null;
+        if (contextMenu.kind === 'selection') return buildAssistantSelectionContext();
+        const id = contextMenu.id;
+        if (!id) return null;
+        if (contextMenu.kind === 'node') return buildAssistantSelectionContext({ nodeIds: [id] });
+        if (contextMenu.kind === 'edge') return buildAssistantSelectionContext({ edgeIds: [id] });
+        if (contextMenu.kind === 'textBox') return buildAssistantSelectionContext({ textBoxIds: [id] });
+        if (contextMenu.kind === 'comment') return buildAssistantSelectionContext({ commentIds: [id] });
+        return null;
+    };
 
     return (
         <div
@@ -3336,7 +3461,7 @@ export const Canvas: React.FC = () => {
 	                        onPointerDown={(e) => e.stopPropagation()}
 	                        onClick={(e) => e.stopPropagation()}
 	                    >
-	                        {contextMenu.kind !== 'selection' && contextMenu.kind !== 'comment' && (
+                        {canComment && (
 	                            <button
 	                                type="button"
 	                                className={styles.contextButton}
@@ -3385,37 +3510,35 @@ export const Canvas: React.FC = () => {
                                     <Paperclip size={18} />
                                 </button>
                             )}
-	                        {contextMenu.kind !== 'canvas' && (
+                            {canRaven && (
+                                <button
+                                    type="button"
+                                    className={styles.contextButton}
+                                    title="Send to Raven"
+                                    data-interactive="true"
+                                    onPointerDown={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        const selectionContext = getContextMenuSelectionContext();
+                                        if (selectionContext) {
+                                            useStore.getState().setAssistantSelectionContext(selectionContext);
+                                            window.dispatchEvent(new CustomEvent('assistant-open'));
+                                        }
+                                        setContextMenu(null);
+                                    }}
+                                >
+                                    <Bot size={18} />
+                                </button>
+                            )}
+	                        {contextMenu.kind === 'node' && (
 	                            <button
 	                                type="button"
 	                                className={styles.contextButton}
-	                                title="Delete"
+	                                title="Create connection"
 	                                data-interactive="true"
-	                                onPointerDown={(e) => {
-	                                    e.preventDefault();
-	                                    e.stopPropagation();
-	                                    const st = useStore.getState() as any;
-	                                    if (contextMenu.kind === 'selection') {
-	                                        st.deleteSelection();
-	                                    } else if (contextMenu.kind === 'node' && contextMenu.id) {
-	                                        st.deleteNode(contextMenu.id);
-	                                        st.selectNode(null);
-	                                    } else if (contextMenu.kind === 'edge' && contextMenu.id) {
-	                                        st.deleteEdge(contextMenu.id);
-	                                        st.selectEdge(null);
-	                                    } else if (contextMenu.kind === 'textBox' && contextMenu.id) {
-	                                        st.deleteTextBox(contextMenu.id);
-	                                        st.selectTextBox(null);
-	                                        st.setEditingTextBoxId(null);
-	                                    } else if (contextMenu.kind === 'comment' && contextMenu.id) {
-	                                        deleteComment(contextMenu.id);
-	                                        setOpenCommentId((prev) => (prev === contextMenu.id ? null : prev));
-	                                        setHoverCommentId((prev) => (prev === contextMenu.id ? null : prev));
-	                                    }
-	                                    setContextMenu(null);
-	                                }}
+	                                onPointerDown={(e) => contextMenu.id && startContextConnectionDrag(e, contextMenu.id)}
 	                            >
-	                                <X size={18} />
+	                                <Link2 size={18} />
 	                            </button>
 	                        )}
                             {stackableContext && (
@@ -3505,15 +3628,37 @@ export const Canvas: React.FC = () => {
                                     {contextEdgeEnergyEnabled ? <ZapOff size={18} /> : <Zap size={18} />}
                                 </button>
                             )}
-	                        {contextMenu.kind === 'node' && (
+	                        {canDelete && (
 	                            <button
 	                                type="button"
 	                                className={styles.contextButton}
-	                                title="Create connection"
+	                                title="Delete"
 	                                data-interactive="true"
-	                                onPointerDown={(e) => contextMenu.id && startContextConnectionDrag(e, contextMenu.id)}
+	                                onPointerDown={(e) => {
+	                                    e.preventDefault();
+	                                    e.stopPropagation();
+	                                    const st = useStore.getState() as any;
+	                                    if (contextMenu.kind === 'selection') {
+	                                        st.deleteSelection();
+	                                    } else if (contextMenu.kind === 'node' && contextMenu.id) {
+	                                        st.deleteNode(contextMenu.id);
+	                                        st.selectNode(null);
+	                                    } else if (contextMenu.kind === 'edge' && contextMenu.id) {
+	                                        st.deleteEdge(contextMenu.id);
+	                                        st.selectEdge(null);
+	                                    } else if (contextMenu.kind === 'textBox' && contextMenu.id) {
+	                                        st.deleteTextBox(contextMenu.id);
+	                                        st.selectTextBox(null);
+	                                        st.setEditingTextBoxId(null);
+	                                    } else if (contextMenu.kind === 'comment' && contextMenu.id) {
+	                                        deleteComment(contextMenu.id);
+	                                        setOpenCommentId((prev) => (prev === contextMenu.id ? null : prev));
+	                                        setHoverCommentId((prev) => (prev === contextMenu.id ? null : prev));
+	                                    }
+	                                    setContextMenu(null);
+	                                }}
 	                            >
-	                                <Link2 size={18} />
+	                                <X size={18} />
 	                            </button>
 	                        )}
 	                    </div>

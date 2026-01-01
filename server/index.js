@@ -428,9 +428,15 @@ async function initDb() {
       thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
       role TEXT NOT NULL,
       content TEXT NOT NULL,
+      meta JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  try {
+    await pool.query("ALTER TABLE assistant_messages ADD COLUMN IF NOT EXISTS meta JSONB NOT NULL DEFAULT '{}'::jsonb");
+  } catch {
+    // ignore
+  }
   try {
     await pool.query('CREATE INDEX IF NOT EXISTS assistant_messages_thread_id_idx ON assistant_messages (thread_id)');
   } catch {
@@ -1471,6 +1477,169 @@ const normalizeAssistantContext = (value) => {
   return value;
 };
 
+const clampText = (value, max) => {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return trimmed.length > max ? trimmed.slice(0, max) : trimmed;
+};
+
+const clampNumber = (value, min, max) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  return Math.min(max, Math.max(min, num));
+};
+
+const normalizeSelectionContext = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const sessionId = clampText(value.sessionId, 160) || null;
+  const nodes = Array.isArray(value.nodes)
+    ? value.nodes.slice(0, 40).map((node) => {
+      if (!node || typeof node !== 'object') return null;
+      const id = clampText(node.id, 200);
+      if (!id) return null;
+      const type = node.type === 'idea' ? 'idea' : 'task';
+      const status = node.status === 'done' || node.status === 'in_progress' || node.status === 'queued'
+        ? node.status
+        : null;
+      const progress = clampNumber(node.progress, 0, 100);
+      const energy = clampNumber(node.energy, 0, 100);
+      return {
+        id,
+        title: clampText(node.title, 140) || 'Untitled',
+        type,
+        status: status ?? undefined,
+        progress: progress ?? undefined,
+        energy: energy ?? undefined,
+        layerId: clampText(node.layerId, 200) || undefined,
+        link: clampText(node.link, 600) || undefined,
+      };
+    }).filter(Boolean)
+    : [];
+  const edges = Array.isArray(value.edges)
+    ? value.edges.slice(0, 60).map((edge) => {
+      if (!edge || typeof edge !== 'object') return null;
+      const id = clampText(edge.id, 200);
+      const source = clampText(edge.source, 200);
+      const target = clampText(edge.target, 200);
+      if (!id || !source || !target) return null;
+      return {
+        id,
+        source,
+        target,
+        sourceTitle: clampText(edge.sourceTitle, 140) || undefined,
+        targetTitle: clampText(edge.targetTitle, 140) || undefined,
+        energyEnabled: typeof edge.energyEnabled === 'boolean' ? edge.energyEnabled : undefined,
+      };
+    }).filter(Boolean)
+    : [];
+  const textBoxes = Array.isArray(value.textBoxes)
+    ? value.textBoxes.slice(0, 40).map((tb) => {
+      if (!tb || typeof tb !== 'object') return null;
+      const id = clampText(tb.id, 200);
+      if (!id) return null;
+      const kind = tb.kind === 'image' || tb.kind === 'file' ? tb.kind : 'text';
+      const fileSize = clampNumber(tb.fileSize, 0, Number.MAX_SAFE_INTEGER);
+      return {
+        id,
+        kind,
+        text: clampText(tb.text, 320) || undefined,
+        fileName: clampText(tb.fileName, 180) || undefined,
+        fileMime: clampText(tb.fileMime, 120) || undefined,
+        fileSize: fileSize ?? undefined,
+        layerId: clampText(tb.layerId, 200) || undefined,
+      };
+    }).filter(Boolean)
+    : [];
+  const comments = Array.isArray(value.comments)
+    ? value.comments.slice(0, 40).map((comment) => {
+      if (!comment || typeof comment !== 'object') return null;
+      const id = clampText(comment.id, 200);
+      if (!id) return null;
+      const targetKind = comment.targetKind === 'canvas'
+        || comment.targetKind === 'node'
+        || comment.targetKind === 'edge'
+        || comment.targetKind === 'textBox'
+        ? comment.targetKind
+        : undefined;
+      return {
+        id,
+        text: clampText(comment.text, 320) || undefined,
+        layerId: clampText(comment.layerId, 200) || undefined,
+        targetKind,
+        targetId: clampText(comment.targetId, 200) || undefined,
+      };
+    }).filter(Boolean)
+    : [];
+  if (!nodes.length && !edges.length && !textBoxes.length && !comments.length) return null;
+  return { sessionId, nodes, edges, textBoxes, comments };
+};
+
+const normalizeAssistantMessageMeta = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const selectionContext = normalizeSelectionContext(value.selectionContext ?? value.selection ?? value);
+  if (!selectionContext) return null;
+  return { selectionContext };
+};
+
+const formatSelectionContextForAgent = (selectionContext) => {
+  if (!selectionContext) return '';
+  const nodes = Array.isArray(selectionContext.nodes) ? selectionContext.nodes : [];
+  const edges = Array.isArray(selectionContext.edges) ? selectionContext.edges : [];
+  const textBoxes = Array.isArray(selectionContext.textBoxes) ? selectionContext.textBoxes : [];
+  const comments = Array.isArray(selectionContext.comments) ? selectionContext.comments : [];
+  if (!nodes.length && !edges.length && !textBoxes.length && !comments.length) return '';
+
+  const lines = ['Selected objects:'];
+  if (nodes.length) {
+    lines.push('Nodes:');
+    nodes.forEach((node) => {
+      const parts = [`id:${node.id}`, `type:${node.type}`];
+      if (node.status) parts.push(`status:${node.status}`);
+      if (Number.isFinite(node.progress)) parts.push(`progress:${node.progress}`);
+      if (Number.isFinite(node.energy)) parts.push(`energy:${node.energy}`);
+      if (node.layerId) parts.push(`layer:${node.layerId}`);
+      if (node.link) parts.push(`link:${node.link}`);
+      lines.push(`- ${node.title} (${parts.join(', ')})`);
+    });
+  }
+  if (edges.length) {
+    lines.push('Edges:');
+    edges.forEach((edge) => {
+      const label = edge.sourceTitle && edge.targetTitle
+        ? `${edge.sourceTitle} -> ${edge.targetTitle}`
+        : `${edge.source} -> ${edge.target}`;
+      const parts = [`id:${edge.id}`];
+      if (typeof edge.energyEnabled === 'boolean') parts.push(`energy:${edge.energyEnabled ? 'on' : 'off'}`);
+      lines.push(`- ${label} (${parts.join(', ')})`);
+    });
+  }
+  if (textBoxes.length) {
+    lines.push('Text boxes:');
+    textBoxes.forEach((tb) => {
+      const parts = [`id:${tb.id}`, `kind:${tb.kind || 'text'}`];
+      if (tb.fileName) parts.push(`file:${tb.fileName}`);
+      if (tb.fileMime) parts.push(`mime:${tb.fileMime}`);
+      if (Number.isFinite(tb.fileSize)) parts.push(`size:${tb.fileSize}`);
+      if (tb.layerId) parts.push(`layer:${tb.layerId}`);
+      const text = tb.text ? ` "${tb.text}"` : '';
+      lines.push(`- ${parts.join(', ')}${text}`);
+    });
+  }
+  if (comments.length) {
+    lines.push('Comments:');
+    comments.forEach((comment) => {
+      const parts = [`id:${comment.id}`];
+      if (comment.targetKind) parts.push(`target:${comment.targetKind}`);
+      if (comment.targetId) parts.push(`targetId:${comment.targetId}`);
+      if (comment.layerId) parts.push(`layer:${comment.layerId}`);
+      const text = comment.text ? ` "${comment.text}"` : '';
+      lines.push(`- ${parts.join(', ')}${text}`);
+    });
+  }
+  return lines.join('\n');
+};
+
 const createOpenAiClient = (apiKey) => new OpenAI({
   apiKey,
   baseURL: OPENAI_API_BASE_URL,
@@ -1576,6 +1745,7 @@ const serializeAssistantMessageRow = (row) => ({
   id: row.id,
   role: row.role,
   content: row.content,
+  meta: normalizeAssistantMessageMeta(row.meta) ?? null,
   createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
 });
 
@@ -1603,7 +1773,7 @@ async function getAssistantThread(userId, threadId) {
 async function listAssistantMessages(threadId, limit = ASSISTANT_CONTEXT_LIMIT) {
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(200, Math.floor(limit)) : ASSISTANT_CONTEXT_LIMIT;
   const res = await pool.query(
-    `SELECT id, role, content, created_at
+    `SELECT id, role, content, meta, created_at
        FROM assistant_messages
       WHERE thread_id = $1
       ORDER BY created_at DESC
@@ -1670,7 +1840,7 @@ async function listAssistantMessagesPage(threadId, limit, offset) {
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(500, Math.floor(limit)) : 200;
   const safeOffset = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
   const res = await pool.query(
-    `SELECT id, role, content, created_at
+    `SELECT id, role, content, meta, created_at
        FROM assistant_messages
       WHERE thread_id = $1
       ORDER BY created_at DESC
@@ -1694,12 +1864,13 @@ async function getLastUserMessage(threadId) {
   return typeof content === 'string' ? content : '';
 }
 
-async function insertAssistantMessage({ threadId, role, content }) {
+async function insertAssistantMessage({ threadId, role, content, meta }) {
+  const normalizedMeta = normalizeAssistantMessageMeta(meta) ?? {};
   const res = await pool.query(
-    `INSERT INTO assistant_messages (id, thread_id, role, content)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id, role, content, created_at`,
-    [randomUUID(), threadId, role, content],
+    `INSERT INTO assistant_messages (id, thread_id, role, content, meta)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, role, content, meta, created_at`,
+    [randomUUID(), threadId, role, content, normalizedMeta],
   );
   await pool.query(
     `UPDATE assistant_threads
@@ -1964,7 +2135,10 @@ const buildAssistantContext = async ({ threadId, userId, apiKey, includeMemories
       });
       continue;
     }
-    items.push({ role: message.role, content: message.content });
+    const selectionContext = message?.meta?.selectionContext ?? null;
+    const selectionBlock = formatSelectionContextForAgent(selectionContext);
+    const content = selectionBlock ? `${message.content}\n\n${selectionBlock}` : message.content;
+    items.push({ role: message.role, content });
   }
   return { items };
 };
@@ -3675,6 +3849,7 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
 
   const userText = normalizeMessageContent(req.body?.content);
   if (!userText) return res.status(400).json({ error: 'content_required' });
+  const selectionContext = normalizeSelectionContext(req.body?.selectionContext);
 
   const user = await getUserById(auth.userId);
   const keyRow = await getOpenAiKeyForUser(auth.userId);
@@ -3692,6 +3867,7 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
       threadId,
       role: 'user',
       content: userText,
+      meta: selectionContext ? { selectionContext } : null,
     });
     const { items: inputItems } = await buildAssistantContext({
       threadId,

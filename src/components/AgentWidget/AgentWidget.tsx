@@ -1,14 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, MessageCircle, X } from 'lucide-react';
+import { Bot, Link2, MessageCircle, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/useStore';
+import type { AssistantSelectionContext } from '../../types/assistant';
 
 type ChatMessage = {
   id?: string;
   role: 'user' | 'assistant';
   content: string;
   createdAt?: string | null;
+  selectionContext?: AssistantSelectionContext | null;
 };
 
 const MAX_VISIBLE_MESSAGES = 120;
@@ -70,6 +72,8 @@ const mapErrorMessage = (code?: string) => {
 export const AgentWidget: React.FC = () => {
   const sessionId = useStore((s) => s.sessionId);
   const me = useStore((s) => s.me);
+  const selectionContext = useStore((s) => s.assistantSelectionContext);
+  const clearSelectionContext = useStore((s) => s.clearAssistantSelectionContext);
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -83,6 +87,7 @@ export const AgentWidget: React.FC = () => {
 
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const resizeStartRef = useRef<{
     x: number;
     y: number;
@@ -128,6 +133,15 @@ export const AgentWidget: React.FC = () => {
     if (!open) return;
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [open, messages, pending]);
+
+  useEffect(() => {
+    const onOpen = () => {
+      setOpen(true);
+      window.setTimeout(() => inputRef.current?.focus(), 0);
+    };
+    window.addEventListener('assistant-open', onOpen);
+    return () => window.removeEventListener('assistant-open', onOpen);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -280,11 +294,12 @@ export const AgentWidget: React.FC = () => {
       throw new Error(mapErrorMessage(data?.error));
     }
     const loaded = Array.isArray(data?.messages) ? data.messages : [];
-    const mapped = loaded.map((msg: ChatMessage) => ({
+    const mapped = loaded.map((msg: any) => ({
       id: msg.id,
       role: msg.role,
       content: msg.content,
       createdAt: msg.createdAt ?? null,
+      selectionContext: (msg?.meta?.selectionContext ?? null) as AssistantSelectionContext | null,
     }));
     const context = data?.context && typeof data.context === 'object' ? data.context : null;
     return { messages: mapped, context };
@@ -372,11 +387,18 @@ export const AgentWidget: React.FC = () => {
   const sendMessage = async () => {
     const text = input.trim();
     if (!text || pending || loadingThread || !me || !sessionReady) return;
-    const nextMessages = trimMessages([...messages, { role: 'user', content: text }]);
+    const selectionSnapshot = selectionContext ? { ...selectionContext } : null;
+    const nextMessages = trimMessages([
+      ...messages,
+      { role: 'user', content: text, selectionContext: selectionSnapshot },
+    ]);
     setMessages(nextMessages);
     setInput('');
     setPending(true);
     setError(null);
+    if (selectionSnapshot) {
+      clearSelectionContext();
+    }
 
     try {
       const attempt = async () => {
@@ -387,6 +409,7 @@ export const AgentWidget: React.FC = () => {
           body: JSON.stringify({
             content: text,
             sessionId,
+            selectionContext: selectionSnapshot,
           }),
         });
         const raw = await res.text();
@@ -462,6 +485,15 @@ export const AgentWidget: React.FC = () => {
     const clamped = Math.max(0, Math.min(100, Math.round(ratio * 100)));
     return clamped;
   }, [contextInfo]);
+
+  const selectionCount = useMemo(() => {
+    if (!selectionContext) return 0;
+    const nodes = selectionContext.nodes?.length ?? 0;
+    const edges = selectionContext.edges?.length ?? 0;
+    const textBoxes = selectionContext.textBoxes?.length ?? 0;
+    const comments = selectionContext.comments?.length ?? 0;
+    return nodes + edges + textBoxes + comments;
+  }, [selectionContext]);
 
   const markdownComponents = useMemo(() => ({
     p: ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
@@ -646,33 +678,62 @@ export const AgentWidget: React.FC = () => {
 
             {messages.map((msg, idx) => {
               const isUser = msg.role === 'user';
+              const hasSelection = isUser && !!msg.selectionContext && (
+                (msg.selectionContext.nodes?.length ?? 0)
+                + (msg.selectionContext.edges?.length ?? 0)
+                + (msg.selectionContext.textBoxes?.length ?? 0)
+                + (msg.selectionContext.comments?.length ?? 0)
+              ) > 0;
               return (
                 <div
                   key={`${msg.role}-${idx}`}
                   style={{
                     alignSelf: isUser ? 'flex-end' : 'flex-start',
-                    background: isUser ? 'rgba(94,129,172,0.22)' : 'rgba(255,255,255,0.04)',
-                    color: 'var(--text-primary)',
-                    border: '1px solid var(--border-strong)',
-                    borderRadius: 14,
-                    padding: '8px 10px',
-                    fontSize: 13,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 4,
                     maxWidth: '85%',
-                    whiteSpace: isUser ? 'pre-wrap' : 'normal',
-                    overflowWrap: 'anywhere',
-                    wordBreak: 'break-word',
-                    lineHeight: 1.45,
-                    userSelect: 'text',
-                    WebkitUserSelect: 'text',
                   }}
                 >
-                  {isUser ? (
-                    msg.content
-                  ) : (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                      {msg.content}
-                    </ReactMarkdown>
+                  {hasSelection && (
+                    <div
+                      style={{
+                        alignSelf: 'flex-end',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        fontSize: 11,
+                        color: 'var(--text-secondary)',
+                      }}
+                    >
+                      <Link2 size={12} />
+                      <span>Selected objects attached</span>
+                    </div>
                   )}
+                  <div
+                    style={{
+                      background: isUser ? 'rgba(94,129,172,0.22)' : 'rgba(255,255,255,0.04)',
+                      color: 'var(--text-primary)',
+                      border: '1px solid var(--border-strong)',
+                      borderRadius: 14,
+                      padding: '8px 10px',
+                      fontSize: 13,
+                      whiteSpace: isUser ? 'pre-wrap' : 'normal',
+                      overflowWrap: 'anywhere',
+                      wordBreak: 'break-word',
+                      lineHeight: 1.45,
+                      userSelect: 'text',
+                      WebkitUserSelect: 'text',
+                    }}
+                  >
+                    {isUser ? (
+                      msg.content
+                    ) : (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                        {msg.content}
+                      </ReactMarkdown>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -724,7 +785,22 @@ export const AgentWidget: React.FC = () => {
               background: 'rgba(12, 14, 20, 0.9)',
             }}
           >
+            {selectionCount > 0 && (
+              <div
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontSize: 11,
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                <Link2 size={12} />
+                <span>{`${selectionCount} selected object${selectionCount === 1 ? '' : 's'} attached`}</span>
+              </div>
+            )}
             <textarea
+              ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Ask Raven..."

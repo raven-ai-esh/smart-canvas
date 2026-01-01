@@ -690,9 +690,11 @@ export function TextBox({
           const selectedNodesNow = st.selectedNodes?.length ? st.selectedNodes : (st.selectedNode ? [st.selectedNode] : []);
           const selectedEdgesNow = st.selectedEdges?.length ? st.selectedEdges : (st.selectedEdge ? [st.selectedEdge] : []);
           const selectedTextBoxesNow = st.selectedTextBoxes?.length ? st.selectedTextBoxes : (st.selectedTextBoxId ? [st.selectedTextBoxId] : []);
-          if (!selectedTextBoxesNow.includes(box.id)) {
-            st.setMultiSelection({ nodes: selectedNodesNow, edges: selectedEdgesNow, textBoxes: [...selectedTextBoxesNow, box.id] });
-          }
+          const isSelected = selectedTextBoxesNow.includes(box.id);
+          const nextTextBoxes = isSelected
+            ? selectedTextBoxesNow.filter((id) => id !== box.id)
+            : [...selectedTextBoxesNow, box.id];
+          st.setMultiSelection({ nodes: selectedNodesNow, edges: selectedEdgesNow, textBoxes: nextTextBoxes });
           return;
         }
 

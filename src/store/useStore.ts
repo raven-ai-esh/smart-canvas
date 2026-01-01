@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { Comment, NodeData, EdgeData, CanvasState, Drawing, LayerData, PenToolType, Tombstones, TextBox, SessionSaver } from '../types';
+import type { AssistantSelectionContext } from '../types/assistant';
 import { clampEnergy, computeEffectiveEnergy } from '../utils/energy';
 import { debugLog } from '../utils/debug';
 import { getGuestIdentity } from '../utils/guestIdentity';
@@ -107,6 +108,9 @@ interface AppState {
     setSessionId: (id: string | null) => void;
     setSessionMeta: (meta: { name?: string | null; saved?: boolean; ownerId?: string | null; expiresAt?: string | null }) => void;
     setSessionSavers: (savers: SessionSaver[]) => void;
+    assistantSelectionContext: AssistantSelectionContext | null;
+    setAssistantSelectionContext: (context: AssistantSelectionContext | null) => void;
+    clearAssistantSelectionContext: () => void;
     canvasViewCommand: CanvasViewCommand | null;
     setCanvasViewCommand: (command: CanvasViewCommand | null) => void;
     textBoxes: TextBox[];
@@ -527,6 +531,9 @@ export const useStore = create<AppState>()(
                 sessionExpiresAt: Object.prototype.hasOwnProperty.call(meta, 'expiresAt') ? meta.expiresAt ?? null : state.sessionExpiresAt,
             })),
             setSessionSavers: (savers) => set({ sessionSavers: Array.isArray(savers) ? savers : [] }),
+            assistantSelectionContext: null,
+            setAssistantSelectionContext: (context) => set({ assistantSelectionContext: context }),
+            clearAssistantSelectionContext: () => set({ assistantSelectionContext: null }),
             canvasViewCommand: null,
             setCanvasViewCommand: (command) => set({ canvasViewCommand: command }),
             textBoxes: [],
