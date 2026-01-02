@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Plus, Save, Share2, Trash2, X } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import styles from './SessionBar.module.css';
@@ -35,6 +35,9 @@ export const SessionBar: React.FC = () => {
     const [sessions, setSessions] = useState<SessionListItem[]>([]);
     const [sessionActionBusy, setSessionActionBusy] = useState<string | null>(null);
     const [currentNameDraft, setCurrentNameDraft] = useState('');
+    const [linkPrompt, setLinkPrompt] = useState<{ title: string; url: string } | null>(null);
+
+    const linkPromptInputRef = useRef<HTMLInputElement | null>(null);
 
     useEffect(() => {
         if (!showPrompt) return;
@@ -337,11 +340,31 @@ export const SessionBar: React.FC = () => {
     useEffect(() => {
         if (!showSessions) return;
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') closeSessionsMenu();
+            if (e.key !== 'Escape') return;
+            if (linkPrompt) return;
+            closeSessionsMenu();
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-    }, [closeSessionsMenu, showSessions]);
+    }, [closeSessionsMenu, linkPrompt, showSessions]);
+
+    useEffect(() => {
+        if (!linkPrompt) return;
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setLinkPrompt(null);
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [linkPrompt]);
+
+    useEffect(() => {
+        if (!linkPrompt) return;
+        const t = window.setTimeout(() => {
+            linkPromptInputRef.current?.focus();
+            linkPromptInputRef.current?.select();
+        }, 0);
+        return () => window.clearTimeout(t);
+    }, [linkPrompt]);
 
     useEffect(() => {
         setShowSessions(false);
@@ -352,25 +375,46 @@ export const SessionBar: React.FC = () => {
         setCurrentNameDraft(sessionName ?? '');
     }, [sessionName, showSessions]);
 
-    const copyToClipboard = async (text: string) => {
+    const copyToClipboard = useCallback(async (text: string) => {
+        if (!navigator.clipboard?.writeText) return false;
         try {
             await navigator.clipboard.writeText(text);
             return true;
         } catch {
-            window.prompt('Copy session link:', text);
             return false;
         }
-    };
+    }, []);
 
     const handleShareSession = useCallback(
         async (id: string) => {
-            const url = new URL(window.location.href);
-            url.searchParams.set('session', id);
-            url.searchParams.delete('reset');
-            const ok = await copyToClipboard(url.toString());
-            setToast(ok ? 'Ссылка скопирована' : 'Ссылка для копирования открыта');
+            if (sessionActionBusy) return;
+            setSessionActionBusy(id);
+            try {
+                const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/share`, { method: 'POST' });
+                if (!res.ok) {
+                    setToast('Не удалось создать ссылку');
+                    return;
+                }
+                const data = await res.json().catch(() => ({}));
+                const url = typeof data?.url === 'string' ? data.url : null;
+                if (!url) {
+                    setToast('Не удалось создать ссылку');
+                    return;
+                }
+                const ok = await copyToClipboard(url);
+                if (!ok) {
+                    setLinkPrompt({ title: 'Share link', url });
+                } else {
+                    setLinkPrompt(null);
+                }
+                setToast(ok ? 'Ссылка скопирована' : 'Ссылка готова к копированию');
+            } catch {
+                setToast('Не удалось создать ссылку');
+            } finally {
+                setSessionActionBusy(null);
+            }
         },
-        [],
+        [copyToClipboard, sessionActionBusy],
     );
 
     const handleOpenSession = useCallback(
@@ -605,6 +649,19 @@ export const SessionBar: React.FC = () => {
         }
     }, [currentNameDraft, me, requestAuth, sessionId, sessionName, sessionOwnerId, sessionSaved, setSessionMeta]);
 
+    const handleCopyShareLink = useCallback(async () => {
+        if (!linkPrompt) return;
+        const ok = await copyToClipboard(linkPrompt.url);
+        if (ok) {
+            setToast('Ссылка скопирована');
+            setLinkPrompt(null);
+            return;
+        }
+        setToast('Скопируйте ссылку вручную');
+        linkPromptInputRef.current?.focus();
+        linkPromptInputRef.current?.select();
+    }, [copyToClipboard, linkPrompt]);
+
     return (
         <>
             <div className={styles.root}>
@@ -672,6 +729,34 @@ export const SessionBar: React.FC = () => {
                     </div>
                 )}
             </div>
+
+            {linkPrompt && (
+                <>
+                    <div className={styles.linkBackdrop} onPointerDown={() => setLinkPrompt(null)} />
+                    <div className={`${styles.prompt} ${styles.linkPrompt}`} onPointerDown={(e) => e.stopPropagation()}>
+                        <div className={styles.promptTitle}>{linkPrompt.title}</div>
+                        <input
+                            ref={linkPromptInputRef}
+                            className={styles.promptInput}
+                            value={linkPrompt.url}
+                            readOnly
+                            onFocus={(e) => e.currentTarget.select()}
+                        />
+                        <div className={styles.promptActions}>
+                            <button type="button" className={styles.promptButton} onClick={() => setLinkPrompt(null)}>
+                                Close
+                            </button>
+                            <button
+                                type="button"
+                                className={`${styles.promptButton} ${styles.promptButtonPrimary}`}
+                                onClick={handleCopyShareLink}
+                            >
+                                Copy
+                            </button>
+                        </div>
+                    </div>
+                </>
+            )}
 
             {sessionId && (
                 <>

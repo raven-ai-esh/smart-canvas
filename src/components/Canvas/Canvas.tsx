@@ -12,7 +12,7 @@ import { debugLog } from '../../utils/debug';
 import { TextBox } from '../TextBox/TextBox';
 import { SnowOverlay } from '../Snow/SnowOverlay';
 import { hashString } from '../../utils/guestIdentity';
-import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES } from '../../utils/attachments';
+import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES, resolveAttachmentUrl } from '../../utils/attachments';
 import { DEFAULT_LAYER_ID } from '../../utils/layers';
 import { collectLayerStackEntries, sortLayerStackEntries } from '../../utils/stacking';
 import { energyToColor } from '../../utils/energy';
@@ -241,6 +241,7 @@ export const Canvas: React.FC = () => {
     const snapMode = useStore((state) => state.snapMode);
     const snowEnabled = useStore((state) => state.snowEnabled);
     const sessionId = useStore((state) => state.sessionId);
+    const sessionShareToken = useStore((state) => state.sessionShareToken);
     const sessionSavers = useStore((state) => state.sessionSavers);
     const theme = useStore((state) => state.theme);
     const ganttMode = useStore((state) => state.ganttMode);
@@ -4508,17 +4509,20 @@ export const Canvas: React.FC = () => {
                                 {comment.text ? <div className={styles.commentText}>{comment.text}</div> : null}
                                 {comment.attachments && comment.attachments.length > 0 && (
                                     <div className={styles.commentAttachmentList}>
-                                        {comment.attachments.map((attachment) => (
-                                            <a
-                                                key={attachment.id}
-                                                href={attachment.url ?? attachment.dataUrl ?? ''}
-                                                download={attachment.name}
-                                                className={styles.commentAttachmentFile}
-                                            >
-                                                <span className={styles.commentAttachmentName}>{attachment.name}</span>
-                                                <span className={styles.commentAttachmentMeta}>{formatBytes(attachment.size)}</span>
-                                            </a>
-                                        ))}
+                                        {comment.attachments.map((attachment) => {
+                                            const href = resolveAttachmentUrl(attachment.url ?? attachment.dataUrl ?? '', sessionShareToken);
+                                            return (
+                                                <a
+                                                    key={attachment.id}
+                                                    href={href}
+                                                    download={attachment.name}
+                                                    className={styles.commentAttachmentFile}
+                                                >
+                                                    <span className={styles.commentAttachmentName}>{attachment.name}</span>
+                                                    <span className={styles.commentAttachmentMeta}>{formatBytes(attachment.size)}</span>
+                                                </a>
+                                            );
+                                        })}
                                     </div>
                                 )}
                                 {isOpen && replies.length > 0 && (

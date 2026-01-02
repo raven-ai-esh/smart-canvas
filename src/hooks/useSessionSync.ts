@@ -11,6 +11,11 @@ function getSessionIdFromUrl() {
   return new URLSearchParams(window.location.search).get('session');
 }
 
+function getShareTokenFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('share') || params.get('shareToken');
+}
+
 function getCardIdFromUrl() {
   return new URLSearchParams(window.location.search).get('card');
 }
@@ -22,6 +27,13 @@ function getResetFromUrl() {
 function clearResetInUrl() {
   const url = new URL(window.location.href);
   url.searchParams.delete('reset');
+  window.history.replaceState({}, '', url.toString());
+}
+
+function clearShareInUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete('share');
+  url.searchParams.delete('shareToken');
   window.history.replaceState({}, '', url.toString());
 }
 
@@ -64,12 +76,35 @@ function applySessionState(state: SessionState) {
 }
 
 function getOrCreateClientId() {
-  const key = 'living-canvas-client-id';
-  const existing = window.localStorage.getItem(key);
-  if (existing) return existing;
-  const id = crypto.randomUUID();
-  window.localStorage.setItem(key, id);
-  return id;
+  const baseKey = 'living-canvas-client-id';
+  const tabKey = 'living-canvas-client-id-tab';
+  let base = '';
+  try {
+    base = window.localStorage.getItem(baseKey) ?? '';
+  } catch {
+    base = '';
+  }
+  if (!base) {
+    base = crypto.randomUUID();
+    try {
+      window.localStorage.setItem(baseKey, base);
+    } catch {
+      // ignore
+    }
+  }
+  try {
+    const existingTab = window.sessionStorage.getItem(tabKey);
+    if (existingTab) return existingTab;
+  } catch {
+    // ignore
+  }
+  const tabId = `${base}-${crypto.randomUUID().slice(0, 8)}`;
+  try {
+    window.sessionStorage.setItem(tabKey, tabId);
+  } catch {
+    // ignore
+  }
+  return tabId;
 }
 
 function stableSerialize(x: unknown) {
@@ -95,11 +130,13 @@ function normalizeSessionMeta(raw: any): SessionMeta | null {
 
 export function useSessionSync() {
   const [sessionId, setSessionId] = useState<string | null>(() => getSessionIdFromUrl());
+  const [shareToken, setShareToken] = useState<string | null>(() => getShareTokenFromUrl());
   const [resetRequested, setResetRequested] = useState<boolean>(() => getResetFromUrl());
   const clientId = useMemo(() => getOrCreateClientId(), []);
   const setSessionIdInStore = useStore((s) => s.setSessionId);
   const setSessionMeta = useStore((s) => s.setSessionMeta);
   const setSessionSavers = useStore((s) => s.setSessionSavers);
+  const setSessionShareToken = useStore((s) => s.setSessionShareToken);
 
   const wsRef = useRef<WebSocket | null>(null);
   const applyingRemoteRef = useRef(false);
@@ -118,6 +155,10 @@ export function useSessionSync() {
   }, [resetRequested]);
 
   useEffect(() => {
+    setSessionShareToken(shareToken);
+  }, [setSessionShareToken, shareToken]);
+
+  useEffect(() => {
     setSessionIdInStore(sessionId);
   }, [sessionId, setSessionIdInStore]);
 
@@ -128,10 +169,13 @@ export function useSessionSync() {
     }
     let cancelled = false;
     setSessionSavers([]);
+    const shareHeaders = shareToken ? { 'x-session-share': shareToken } : undefined;
 
     const loadSavers = async () => {
       try {
-        const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/savers`);
+        const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/savers`, {
+          headers: shareHeaders,
+        });
         if (!res.ok) {
           if (!cancelled) setSessionSavers([]);
           return;
@@ -165,11 +209,12 @@ export function useSessionSync() {
       cancelled = true;
       window.removeEventListener('auth-changed', onAuthChanged);
     };
-  }, [sessionId, setSessionSavers]);
+  }, [sessionId, setSessionSavers, shareToken]);
 
   useEffect(() => {
     const onPopState = () => {
       setSessionId(getSessionIdFromUrl());
+      setShareToken(getShareTokenFromUrl());
       setResetRequested(getResetFromUrl());
     };
     window.addEventListener('popstate', onPopState);
@@ -178,6 +223,33 @@ export function useSessionSync() {
 
   useEffect(() => {
     if (sessionId) return;
+    if (!shareToken) return;
+
+    let cancelled = false;
+    (async () => {
+      const res = await fetch(`/api/sessions/share/${encodeURIComponent(shareToken)}`);
+      if (!res.ok) {
+        clearShareInUrl();
+        if (!cancelled) setShareToken(null);
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      const resolvedId = typeof data?.sessionId === 'string' ? data.sessionId : null;
+      if (!resolvedId || cancelled) return;
+      setSessionId(resolvedId);
+    })().catch(() => {
+      clearShareInUrl();
+      if (!cancelled) setShareToken(null);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, shareToken]);
+
+  useEffect(() => {
+    if (sessionId) return;
+    if (shareToken) return;
 
     let cancelled = false;
     (async () => {
@@ -202,12 +274,13 @@ export function useSessionSync() {
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, shareToken]);
 
   useEffect(() => {
     if (!sessionId) return;
 
     let cancelled = false;
+    const shareHeaders = shareToken ? { 'x-session-share': shareToken } : undefined;
 
     if (activeSessionIdRef.current !== sessionId) {
       activeSessionIdRef.current = sessionId;
@@ -573,7 +646,9 @@ export function useSessionSync() {
     };
 
     const fetchInitial = async () => {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+        headers: shareHeaders,
+      });
       if (!res.ok) return;
       const data = await res.json();
       if (cancelled) return;
@@ -651,7 +726,8 @@ export function useSessionSync() {
 
     const connectWs = () => {
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const wsUrl = `${proto}://${window.location.host}/ws?sessionId=${encodeURIComponent(sessionId)}&clientId=${encodeURIComponent(clientId)}`;
+      const shareParam = shareToken ? `&shareToken=${encodeURIComponent(shareToken)}` : '';
+      const wsUrl = `${proto}://${window.location.host}/ws?sessionId=${encodeURIComponent(sessionId)}&clientId=${encodeURIComponent(clientId)}${shareParam}`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -797,5 +873,5 @@ export function useSessionSync() {
       if (wsRef.current) wsRef.current.close();
       wsRef.current = null;
     };
-  }, [clientId, sessionId]);
+  }, [clientId, sessionId, shareToken]);
 }

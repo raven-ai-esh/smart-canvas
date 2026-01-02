@@ -105,7 +105,9 @@ interface AppState {
     sessionOwnerId: string | null;
     sessionExpiresAt: string | null;
     sessionSavers: SessionSaver[];
+    sessionShareToken: string | null;
     setSessionId: (id: string | null) => void;
+    setSessionShareToken: (token: string | null) => void;
     setSessionMeta: (meta: { name?: string | null; saved?: boolean; ownerId?: string | null; expiresAt?: string | null }) => void;
     setSessionSavers: (savers: SessionSaver[]) => void;
     assistantSelectionContext: AssistantSelectionContext | null;
@@ -525,7 +527,9 @@ export const useStore = create<AppState>()(
             sessionOwnerId: null,
             sessionExpiresAt: null,
             sessionSavers: [],
+            sessionShareToken: null,
             setSessionId: (id) => set({ sessionId: id }),
+            setSessionShareToken: (token) => set({ sessionShareToken: token ?? null }),
             setSessionMeta: (meta) => set((state) => ({
                 sessionName: Object.prototype.hasOwnProperty.call(meta, 'name') ? meta.name ?? null : state.sessionName,
                 sessionSaved: typeof meta.saved === 'boolean' ? meta.saved : state.sessionSaved,

@@ -8,7 +8,7 @@ import styles from './Node.module.css';
 import { numberLines, prefixLines, wrapSelection } from '../../utils/textEditing';
 import { clampEnergy, energyToColor } from '../../utils/energy';
 import { EnergySvgLiquidGauge } from './EnergySvgLiquidGauge';
-import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES } from '../../utils/attachments';
+import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES, resolveAttachmentUrl } from '../../utils/attachments';
 import { getIncomingProgress } from '../../utils/childProgress';
 
 // View Components
@@ -195,53 +195,57 @@ const AttachmentList: React.FC<{
     compact?: boolean;
     onRemoveAttachment?: (id: string) => void;
 }> = ({ attachments, compact, onRemoveAttachment }) => {
+    const sessionShareToken = useStore((state) => state.sessionShareToken);
     if (!attachments.length) return null;
     return (
         <div className={`${styles.attachmentList}${compact ? ` ${styles.attachmentListCompact}` : ''}`}>
-            {attachments.map((attachment) => (
-                <div key={attachment.id} className={styles.attachmentItem}>
-                    <a
-                        href={attachment.url ?? attachment.dataUrl ?? ''}
-                        download={attachment.name}
-                        className={styles.attachmentFile}
-                    >
-                        <span className={styles.attachmentPreview}>
-                            {attachment.kind === 'image' ? (
-                                <img
-                                    src={attachment.url ?? attachment.dataUrl ?? ''}
-                                    alt={attachment.name}
-                                    className={styles.attachmentPreviewImg}
-                                />
-                            ) : (
-                                <span className={styles.attachmentPreviewText}>
-                                    {attachment.name?.split('.').pop()?.slice(0, 4)?.toUpperCase() || 'FILE'}
-                                </span>
-                            )}
-                        </span>
-                        <span className={styles.attachmentInfo}>
-                            <span className={styles.attachmentName}>{attachment.name}</span>
-                            <span className={styles.attachmentMeta}>{formatBytes(attachment.size)}</span>
-                        </span>
-                    </a>
-                    {onRemoveAttachment && (
-                        <button
-                            type="button"
-                            className={styles.attachmentRemove}
-                            onPointerDown={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                            }}
-                            onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                onRemoveAttachment(attachment.id);
-                            }}
+            {attachments.map((attachment) => {
+                const href = resolveAttachmentUrl(attachment.url ?? attachment.dataUrl ?? '', sessionShareToken);
+                return (
+                    <div key={attachment.id} className={styles.attachmentItem}>
+                        <a
+                            href={href}
+                            download={attachment.name}
+                            className={styles.attachmentFile}
                         >
-                            <Trash2 size={14} />
-                        </button>
-                    )}
-                </div>
-            ))}
+                            <span className={styles.attachmentPreview}>
+                                {attachment.kind === 'image' ? (
+                                    <img
+                                        src={href}
+                                        alt={attachment.name}
+                                        className={styles.attachmentPreviewImg}
+                                    />
+                                ) : (
+                                    <span className={styles.attachmentPreviewText}>
+                                        {attachment.name?.split('.').pop()?.slice(0, 4)?.toUpperCase() || 'FILE'}
+                                    </span>
+                                )}
+                            </span>
+                            <span className={styles.attachmentInfo}>
+                                <span className={styles.attachmentName}>{attachment.name}</span>
+                                <span className={styles.attachmentMeta}>{formatBytes(attachment.size)}</span>
+                            </span>
+                        </a>
+                        {onRemoveAttachment && (
+                            <button
+                                type="button"
+                                className={styles.attachmentRemove}
+                                onPointerDown={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                }}
+                                onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    onRemoveAttachment(attachment.id);
+                                }}
+                            >
+                                <Trash2 size={14} />
+                            </button>
+                        )}
+                    </div>
+                );
+            })}
         </div>
     );
 };
