@@ -135,6 +135,8 @@ interface AppState {
     toggleFocusMode: () => void;
     monitoringMode: boolean;
     toggleMonitoringMode: () => void;
+    ganttMode: boolean;
+    toggleGanttMode: () => void;
     authorshipMode: boolean;
     toggleAuthorshipMode: () => void;
     commentsMode: boolean;
@@ -582,6 +584,21 @@ export const useStore = create<AppState>()(
                         effectiveEnergy: effectiveForMode(state.nodes, state.edges, next, state.effectiveEnergy),
                     };
                 }),
+            ganttMode: false,
+            toggleGanttMode: () => set((state) => {
+                const next = !state.ganttMode;
+                if (!next) return { ganttMode: false };
+                return {
+                    ganttMode: true,
+                    penMode: false,
+                    textMode: false,
+                    moveMode: false,
+                    snapMode: false,
+                    focusMode: false,
+                    monitoringMode: false,
+                    effectiveEnergy: effectiveForMode(state.nodes, state.edges, false, state.effectiveEnergy),
+                };
+            }),
             authorshipMode: false,
             toggleAuthorshipMode: () => set((state) => ({ authorshipMode: !state.authorshipMode })),
             commentsMode: false,

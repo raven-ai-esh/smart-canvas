@@ -1,12 +1,12 @@
 import React, { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useStore } from '../../store/useStore';
-import { Node } from '../Node/Node';
+import { Node, NoteView } from '../Node/Node';
 import { Edge, ConnectionLine, LayerBridgeEdge } from '../Edge/Edge';
 import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
 import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpToLine, Bot, Link2, MessageCircle, Paperclip, X, Zap, ZapOff } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
-import type { Attachment, Comment, EdgeData, NodeData, TextBox as TextBoxType } from '../../types';
+import type { Attachment, Comment, EdgeData, NodeData, SessionSaver, TextBox as TextBoxType } from '../../types';
 import type { AssistantSelectionContext } from '../../types/assistant';
 import { debugLog } from '../../utils/debug';
 import { TextBox } from '../TextBox/TextBox';
@@ -15,6 +15,7 @@ import { hashString } from '../../utils/guestIdentity';
 import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES } from '../../utils/attachments';
 import { DEFAULT_LAYER_ID } from '../../utils/layers';
 import { collectLayerStackEntries, sortLayerStackEntries } from '../../utils/stacking';
+import { energyToColor } from '../../utils/energy';
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
@@ -30,6 +31,106 @@ const GRID_SIZE = 50;
 const ALIGN_SNAP_PX = 8;
 const FOCUS_RADIUS_X = 180;
 const FOCUS_RADIUS_Y = Math.round(FOCUS_RADIUS_X * 0.7);
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const GANTT_DAY_WIDTH = 70;
+const GANTT_BAR_HEIGHT = 30;
+const GANTT_LANE_HEIGHT = 50;
+const GANTT_PARKING_DAYS = 4;
+
+const toUtcDay = (valueMs: number) => {
+    const d = new Date(valueMs);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+};
+
+const alignToWeekStart = (valueMs: number) => {
+    const dayMs = toUtcDay(valueMs);
+    const day = new Date(dayMs).getUTCDay();
+    const diff = (day + 6) % 7;
+    return dayMs - diff * MS_PER_DAY;
+};
+
+const parseDateInput = (value?: string | null) => {
+    if (!value) return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const ms = Date.parse(`${trimmed}T00:00:00Z`);
+    return Number.isFinite(ms) ? ms : null;
+};
+
+const clampPercent = (value: number) => Math.min(100, Math.max(0, value));
+const progressFromNode = (node: NodeData) => {
+    if (typeof node.progress === 'number' && Number.isFinite(node.progress)) {
+        return clampPercent(node.progress);
+    }
+    if (node.status === 'done') return 100;
+    if (node.status === 'in_progress') return 50;
+    return 0;
+};
+
+const snapGanttLane = (value: number) => Math.round(value / GANTT_LANE_HEIGHT) * GANTT_LANE_HEIGHT;
+const ganttYForNode = (node: NodeData) => (Number.isFinite(node.ganttY) ? (node.ganttY as number) : node.y);
+
+const withAlpha = (color: string, alpha: number) => {
+    if (!color.startsWith('rgb(')) return color;
+    return color.replace('rgb(', 'rgb(').replace(')', ` / ${alpha})`);
+};
+
+const mentionLabelFor = (saver: SessionSaver) => {
+    const name = String(saver.name ?? '').trim();
+    if (name) return name;
+    const email = String(saver.email ?? '').trim();
+    if (email) return email;
+    return 'User';
+};
+
+const normalizeMentions = (mentions: NodeData['mentions'] | undefined) => {
+    if (!Array.isArray(mentions)) return [];
+    return mentions.filter((mention) => (
+        mention
+        && typeof mention.id === 'string'
+        && mention.id
+        && typeof mention.label === 'string'
+        && mention.label.trim()
+    ));
+};
+
+const resolveMentionParticipants = (mentions: NodeData['mentions'] | undefined, savers: SessionSaver[] | undefined) => {
+    const normalized = normalizeMentions(mentions);
+    if (!normalized.length && (!savers || !savers.length)) return [];
+    const byId = new Map<string, SessionSaver>();
+    (savers ?? []).forEach((saver) => {
+        if (!saver?.id) return;
+        byId.set(saver.id, saver);
+    });
+    const seen = new Set<string>();
+    const out: Array<{ id: string; label: string }> = [];
+    const allMentioned = normalized.some((mention) => mention.id === 'all' || mention.label.trim().toLowerCase() === 'all');
+    if (allMentioned) {
+        (savers ?? []).forEach((saver) => {
+            if (!saver?.id || seen.has(saver.id)) return;
+            seen.add(saver.id);
+            out.push({ id: saver.id, label: mentionLabelFor(saver) });
+        });
+    }
+    for (const mention of normalized) {
+        if (seen.has(mention.id)) continue;
+        if (mention.id === 'all' || mention.label.trim().toLowerCase() === 'all') continue;
+        seen.add(mention.id);
+        const saver = byId.get(mention.id);
+        const fallback = saver ? mentionLabelFor(saver) : mention.label.trim();
+        out.push({ id: mention.id, label: mention.label.trim() || fallback });
+    }
+    return out;
+};
+
+const avatarInitials = (label: string) => {
+    const parts = label.trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return '?';
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return `${parts[0][0] ?? ''}${parts[1][0] ?? ''}`.toUpperCase();
+};
+
+const formatDateInput = (valueMs: number) => new Date(valueMs).toISOString().slice(0, 10);
 
 const canScrollInDirection = (el: HTMLElement, deltaX: number, deltaY: number) => {
     const style = window.getComputedStyle(el);
@@ -88,7 +189,7 @@ const getTouchById = (touches: TouchList | null | undefined, id: number) => {
     return null;
 };
 
-    type InteractionMode = 'idle' | 'panning' | 'draggingNode' | 'connecting' | 'textPlacing' | 'selecting';
+    type InteractionMode = 'idle' | 'panning' | 'draggingNode' | 'connecting' | 'textPlacing' | 'selecting' | 'ganttResize' | 'ganttMove';
 type AlignmentGuide = { axis: 'x' | 'y'; pos: number; length: number };
 type SnapAnchor = 'center' | 'topleft';
 type SnapRequest = {
@@ -140,12 +241,41 @@ export const Canvas: React.FC = () => {
     const snapMode = useStore((state) => state.snapMode);
     const snowEnabled = useStore((state) => state.snowEnabled);
     const sessionId = useStore((state) => state.sessionId);
+    const sessionSavers = useStore((state) => state.sessionSavers);
     const theme = useStore((state) => state.theme);
+    const ganttMode = useStore((state) => state.ganttMode);
     const comments = useStore((state) => state.comments);
     const commentsMode = useStore((state) => state.commentsMode);
     const me = useStore((state) => state.me);
+    const effectiveEnergy = useStore((state) => state.effectiveEnergy);
+    const selectedNode = useStore((state) => state.selectedNode);
+    const selectedNodes = useStore((state) => state.selectedNodes);
+    const selectedEdge = useStore((state) => state.selectedEdge);
+    const selectedEdges = useStore((state) => state.selectedEdges);
     const uploadPointRef = useRef<{ x: number; y: number } | null>(null);
     const filePickerRef = useRef<HTMLInputElement | null>(null);
+    const ganttResizeRef = useRef<{
+        nodeId: string;
+        edge: 'start' | 'end';
+        pointerId: number;
+        startMs: number;
+        endMs: number;
+    } | null>(null);
+    const ganttMoveRef = useRef<{
+        nodeId: string;
+        pointerId: number;
+        startMs: number;
+        endMs: number;
+        hadStart: boolean;
+        hadEnd: boolean;
+        startWorldX: number;
+        startWorldY: number;
+        startNodeY: number;
+        lastLaneY: number;
+        moved: boolean;
+        lastDeltaDays: number;
+    } | null>(null);
+    const [ganttDetailNodeId, setGanttDetailNodeId] = useState<string | null>(null);
 
 	    // Actions
 	    const setCanvasTransform = useStore((state) => state.setCanvasTransform);
@@ -185,6 +315,111 @@ export const Canvas: React.FC = () => {
         [textBoxes, visibleLayerIds],
     );
     const visibleTextBoxIds = useMemo(() => new Set(visibleTextBoxes.map((tb) => tb.id)), [visibleTextBoxes]);
+    const ganttTasks = useMemo(() => visibleNodes.filter((node) => node.type === 'task'), [visibleNodes]);
+    const ganttLayout = useMemo(() => {
+        if (!ganttMode) return null;
+        const dated: Array<{ node: NodeData; start: number; end: number }> = [];
+        const undated: NodeData[] = [];
+        let minMs = Number.POSITIVE_INFINITY;
+        let maxMs = Number.NEGATIVE_INFINITY;
+
+        ganttTasks.forEach((node) => {
+            const startRaw = parseDateInput(node.startDate);
+            const endRaw = parseDateInput(node.endDate);
+            if (startRaw === null && endRaw === null) {
+                undated.push(node);
+                return;
+            }
+            const start = toUtcDay(startRaw ?? endRaw ?? Date.now());
+            const end = toUtcDay(endRaw ?? startRaw ?? Date.now());
+            const normalizedStart = Math.min(start, end);
+            const normalizedEnd = Math.max(start, end);
+            dated.push({ node, start: normalizedStart, end: normalizedEnd });
+            minMs = Math.min(minMs, normalizedStart);
+            maxMs = Math.max(maxMs, normalizedEnd);
+        });
+
+        const today = toUtcDay(Date.now());
+        if (!Number.isFinite(minMs) || !Number.isFinite(maxMs)) {
+            minMs = today - 7 * MS_PER_DAY;
+            maxMs = today + 14 * MS_PER_DAY;
+        }
+
+        const paddingDays = 3;
+        const rangeStartMs = alignToWeekStart(minMs - paddingDays * MS_PER_DAY);
+        const rangeEndMs = toUtcDay(maxMs + paddingDays * MS_PER_DAY);
+        const originX = 0;
+        const dayWidth = GANTT_DAY_WIDTH;
+        const parkingWidth = dayWidth * GANTT_PARKING_DAYS;
+        const parkingX = originX - parkingWidth - dayWidth;
+        const items: Array<{
+            node: NodeData;
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+            hasDates: boolean;
+        }> = [];
+        const positionById = new Map<string, { x: number; y: number; width: number; height: number }>();
+
+        dated.forEach(({ node, start, end }) => {
+            const durationDays = Math.max(1, Math.round((end - start) / MS_PER_DAY) + 1);
+            const x = originX + ((start - rangeStartMs) / MS_PER_DAY) * dayWidth;
+            const width = durationDays * dayWidth;
+            const laneY = snapGanttLane(ganttYForNode(node));
+            const y = laneY - GANTT_BAR_HEIGHT / 2;
+            const entry = { node, x, y, width, height: GANTT_BAR_HEIGHT, hasDates: true };
+            items.push(entry);
+            positionById.set(node.id, { x, y, width, height: GANTT_BAR_HEIGHT });
+        });
+
+        undated.forEach((node) => {
+            const width = Math.max(dayWidth * 1.4, 90);
+            const x = parkingX + (parkingWidth - width) / 2;
+            const laneY = snapGanttLane(ganttYForNode(node));
+            const y = laneY - GANTT_BAR_HEIGHT / 2;
+            const entry = { node, x, y, width, height: GANTT_BAR_HEIGHT, hasDates: false };
+            items.push(entry);
+            positionById.set(node.id, { x, y, width, height: GANTT_BAR_HEIGHT });
+        });
+
+        return {
+            items,
+            positionById,
+            rangeStartMs,
+            rangeEndMs,
+            dayWidth,
+            originX,
+            parkingX,
+            parkingWidth,
+        };
+    }, [ganttMode, ganttTasks]);
+    const clampGanttTransform = useCallback((x: number, y: number, scale: number) => {
+        if (!ganttMode || !ganttLayout) return { x, y, scale };
+        const maxX = -ganttLayout.parkingX * scale;
+        return { x: Math.min(x, maxX), y, scale };
+    }, [ganttLayout, ganttMode]);
+
+    useEffect(() => {
+        if (ganttMode) return;
+        setGanttDetailNodeId(null);
+    }, [ganttMode]);
+
+    useEffect(() => {
+        if (!ganttMode) return;
+        const pending = nodes.filter((node) => node.type === 'task' && !Number.isFinite(node.ganttY));
+        if (!pending.length) return;
+        pending.forEach((node) => {
+            updateNode(node.id, { ganttY: snapGanttLane(node.y) });
+        });
+    }, [ganttMode, nodes, updateNode]);
+
+    useEffect(() => {
+        if (!ganttMode || !ganttLayout) return;
+        const next = clampGanttTransform(canvas.x, canvas.y, canvas.scale);
+        if (next.x === canvas.x && next.y === canvas.y && next.scale === canvas.scale) return;
+        setCanvasTransform(next.x, next.y, next.scale);
+    }, [canvas.scale, canvas.x, canvas.y, clampGanttTransform, ganttLayout, ganttMode, setCanvasTransform]);
     const { visibleEdges, bridgeEdges, visibleEdgeIds } = useMemo(() => {
         const visibleEdges: EdgeData[] = [];
         const bridgeEdges: Array<{ id: string; fromId: string; toId: string; layerLabel: string }> = [];
@@ -218,6 +453,28 @@ export const Canvas: React.FC = () => {
             return true;
         });
     }, [comments, visibleLayerIds, visibleNodeIds, visibleTextBoxIds, visibleEdgeIds]);
+    const ganttEdges = useMemo(() => {
+        if (!ganttLayout) return [];
+        const items: Array<{ id: string; d: string; color: string }> = [];
+        edges.forEach((edge) => {
+            const source = ganttLayout.positionById.get(edge.source);
+            const target = ganttLayout.positionById.get(edge.target);
+            if (!source || !target) return;
+            const sx = source.x + source.width;
+            const sy = source.y + source.height / 2;
+            const tx = target.x;
+            const ty = target.y + target.height / 2;
+            const midX = (sx + tx) / 2;
+            const d = `M ${sx} ${sy} C ${midX} ${sy}, ${midX} ${ty}, ${tx} ${ty}`;
+            const sourceNode = nodeById.get(edge.source);
+            const energy = Number.isFinite(effectiveEnergy[edge.source])
+                ? effectiveEnergy[edge.source]
+                : (Number.isFinite(sourceNode?.energy) ? sourceNode?.energy ?? 0 : 0);
+            const color = edge.energyEnabled === false ? 'var(--text-dim)' : energyToColor(energy);
+            items.push({ id: edge.id, d, color });
+        });
+        return items;
+    }, [edges, ganttLayout, nodeById, effectiveEnergy]);
 
     const canvasRef = useRef(canvas);
     useEffect(() => {
@@ -903,6 +1160,76 @@ export const Canvas: React.FC = () => {
         useStore.getState().setConnectionTargetId(null);
     };
 
+    const startGanttResize = useCallback((e: React.PointerEvent, nodeId: string, edge: 'start' | 'end') => {
+        if (!ganttMode || !ganttLayout) return;
+        const node = nodes.find((n) => n.id === nodeId);
+        if (!node) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const startRaw = parseDateInput(node.startDate);
+        const endRaw = parseDateInput(node.endDate);
+        const startMs = toUtcDay(startRaw ?? endRaw ?? Date.now());
+        const endMs = toUtcDay(endRaw ?? startRaw ?? startMs);
+        ganttResizeRef.current = {
+            nodeId,
+            edge,
+            pointerId: e.pointerId,
+            startMs,
+            endMs,
+        };
+        useStore.getState().pushHistory();
+        setMode('ganttResize');
+        setActiveId(nodeId);
+        if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
+            try {
+                containerRef.current?.setPointerCapture?.(e.pointerId);
+            } catch {
+                // ignore
+            }
+        }
+    }, [ganttLayout, ganttMode, nodes]);
+
+    const startGanttMove = useCallback((e: React.PointerEvent, nodeId: string) => {
+        if (!ganttMode || !ganttLayout) return;
+        const node = nodes.find((n) => n.id === nodeId);
+        if (!node) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const startRaw = parseDateInput(node.startDate);
+        const endRaw = parseDateInput(node.endDate);
+        const hadStart = startRaw !== null;
+        const hadEnd = endRaw !== null;
+        const worldPos = screenToWorld(e.clientX, e.clientY);
+        const startNodeY = snapGanttLane(ganttYForNode(node));
+        const fallbackDayIndex = Math.round((worldPos.x - ganttLayout.originX) / ganttLayout.dayWidth);
+        const fallbackMs = ganttLayout.rangeStartMs + fallbackDayIndex * MS_PER_DAY;
+        const startMs = toUtcDay(startRaw ?? endRaw ?? fallbackMs);
+        const endMs = toUtcDay(endRaw ?? startRaw ?? startMs);
+        ganttMoveRef.current = {
+            nodeId,
+            pointerId: e.pointerId,
+            startMs,
+            endMs,
+            hadStart,
+            hadEnd,
+            startWorldX: worldPos.x,
+            startWorldY: worldPos.y,
+            startNodeY,
+            lastLaneY: startNodeY,
+            moved: false,
+            lastDeltaDays: 0,
+        };
+        setMode('ganttMove');
+        setActiveId(nodeId);
+        if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
+            try {
+                containerRef.current?.setPointerCapture?.(e.pointerId);
+            } catch {
+                // ignore
+            }
+        }
+    }, [ganttLayout, ganttMode, nodes, screenToWorld]);
+
 			    const startContextConnectionDrag = (e: React.PointerEvent, nodeId: string) => {
 			        e.preventDefault();
 			        e.stopPropagation();
@@ -1065,9 +1392,9 @@ export const Canvas: React.FC = () => {
             const scaleRatio = newScale / base.scale;
             const newX = cursorX - (cursorX - base.x) * scaleRatio;
             const newY = cursorY - (cursorY - base.y) * scaleRatio;
-            wheelPendingRef.current = { x: newX, y: newY, scale: newScale };
+            wheelPendingRef.current = clampGanttTransform(newX, newY, newScale);
         } else {
-            wheelPendingRef.current = { x: base.x - e.deltaX, y: base.y - e.deltaY, scale: base.scale };
+            wheelPendingRef.current = clampGanttTransform(base.x - e.deltaX, base.y - e.deltaY, base.scale);
         }
 
         if (wheelRafRef.current == null) {
@@ -1079,7 +1406,7 @@ export const Canvas: React.FC = () => {
                 setCanvasTransform(next.x, next.y, next.scale);
             });
         }
-    }, [setCanvasTransform]);
+    }, [clampGanttTransform, setCanvasTransform]);
 
     useEffect(() => {
         const container = containerRef.current;
@@ -2215,6 +2542,22 @@ export const Canvas: React.FC = () => {
             const nodeId = nodeElement.getAttribute('data-node-id')!;
             const worldPos = screenToWorld(e.clientX, e.clientY);
             const node = nodes.find(n => n.id === nodeId)!;
+            const ganttBar = target.closest('[data-gantt-bar="true"]');
+            const ganttResizeHandle = target.closest('[data-gantt-resize]');
+
+            if (ganttMode && ganttBar) {
+                if (ganttResizeHandle instanceof HTMLElement) {
+                    const edge = ganttResizeHandle.getAttribute('data-gantt-resize') as 'start' | 'end' | null;
+                    if (edge === 'start' || edge === 'end') {
+                        startGanttResize(e, nodeId, edge);
+                        return;
+                    }
+                }
+                selectNode(nodeId);
+                setContextMenu(null);
+                startGanttMove(e, nodeId);
+                return;
+            }
 
             // Touch: allow long-press to open context menu and drag to move node
 	            if (e.pointerType === 'touch' && !penMode) {
@@ -2312,6 +2655,17 @@ export const Canvas: React.FC = () => {
             }
             e.stopPropagation();
         } else {
+            if (ganttMode) {
+                const { selectNode, selectEdge, selectTextBox } = useStore.getState();
+                selectNode(null);
+                selectEdge(null);
+                selectTextBox(null);
+                setEditingTextBoxId(null);
+                setGanttDetailNodeId(null);
+                setContextMenu(null);
+                setMode('panning');
+                return;
+            }
             if (e.pointerType === 'touch' && !penMode && !textMode) {
                 clearCanvasLongPress();
                 const worldPos = screenToWorld(e.clientX, e.clientY);
@@ -2470,6 +2824,51 @@ export const Canvas: React.FC = () => {
         lastPointerPos.current = { x: e.clientX, y: e.clientY };
         lastPointerKnownRef.current = true;
 
+        if (mode === 'ganttResize') {
+            const resize = ganttResizeRef.current;
+            if (!resize || resize.pointerId !== e.pointerId || !ganttLayout) return;
+            const worldPos = screenToWorld(e.clientX, e.clientY);
+            const dayIndex = Math.round((worldPos.x - ganttLayout.originX) / ganttLayout.dayWidth);
+            const nextMs = ganttLayout.rangeStartMs + dayIndex * MS_PER_DAY;
+            let startMs = resize.startMs;
+            let endMs = resize.endMs;
+            if (resize.edge === 'start') {
+                startMs = Math.min(nextMs, endMs);
+            } else {
+                endMs = Math.max(nextMs, startMs);
+            }
+            updateNode(resize.nodeId, {
+                startDate: formatDateInput(startMs),
+                endDate: formatDateInput(endMs),
+            });
+            ganttResizeRef.current = { ...resize, startMs, endMs };
+            return;
+        }
+        if (mode === 'ganttMove') {
+            const move = ganttMoveRef.current;
+            if (!move || move.pointerId !== e.pointerId || !ganttLayout) return;
+            const worldPos = screenToWorld(e.clientX, e.clientY);
+            const deltaDays = Math.round((worldPos.x - move.startWorldX) / ganttLayout.dayWidth);
+            const deltaY = worldPos.y - move.startWorldY;
+            const nextLaneY = snapGanttLane(move.startNodeY + deltaY);
+            const daysChanged = deltaDays !== move.lastDeltaDays;
+            const laneChanged = nextLaneY !== move.lastLaneY;
+            if (!daysChanged && !laneChanged) return;
+            const nextStartMs = move.startMs + deltaDays * MS_PER_DAY;
+            const nextEndMs = move.endMs + deltaDays * MS_PER_DAY;
+            const update: Partial<NodeData> = {};
+            if (daysChanged) {
+                if (move.hadStart || !move.hadEnd) update.startDate = formatDateInput(nextStartMs);
+                if (move.hadEnd || !move.hadStart) update.endDate = formatDateInput(nextEndMs);
+            }
+            if (laneChanged) update.ganttY = nextLaneY;
+            updateNode(move.nodeId, update);
+            if (daysChanged) move.lastDeltaDays = deltaDays;
+            if (laneChanged) move.lastLaneY = nextLaneY;
+            move.moved = true;
+            return;
+        }
+
         if (mode === 'selecting') {
             const start = marqueeStartRef.current;
             if (!start || start.pointerId !== e.pointerId) return;
@@ -2615,7 +3014,8 @@ export const Canvas: React.FC = () => {
             }
             if (penTool !== 'eraser') scheduleLiveStrokeFlush();
         } else if (mode === 'panning' && !isPinching.current) {
-            setCanvasTransform(canvas.x + screenDeltaX, canvas.y + screenDeltaY, canvas.scale);
+            const next = clampGanttTransform(canvas.x + screenDeltaX, canvas.y + screenDeltaY, canvas.scale);
+            setCanvasTransform(next.x, next.y, next.scale);
 	        } else if (mode === 'draggingNode' && activeId) {
 	            const worldPos = screenToWorld(e.clientX, e.clientY);
 	            const group = groupDragRef.current;
@@ -2738,6 +3138,51 @@ export const Canvas: React.FC = () => {
             return;
         }
         clearCanvasLongPress();
+
+        if (mode === 'ganttResize') {
+            const resize = ganttResizeRef.current;
+            if (resize && resize.pointerId === e.pointerId) {
+                ganttResizeRef.current = null;
+            }
+            setMode('idle');
+            setActiveId(null);
+            if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
+                try {
+                    const el = containerRef.current as any;
+                    if (el?.hasPointerCapture?.(e.pointerId)) {
+                        el.releasePointerCapture(e.pointerId);
+                    }
+                } catch {
+                    // ignore
+                }
+            }
+            return;
+        }
+        if (mode === 'ganttMove') {
+            const move = ganttMoveRef.current;
+            if (move && move.pointerId === e.pointerId) {
+                ganttMoveRef.current = null;
+                if (!move.moved) {
+                    selectNode(move.nodeId);
+                    setGanttDetailNodeId(move.nodeId);
+                } else {
+                    selectNode(move.nodeId);
+                }
+            }
+            setMode('idle');
+            setActiveId(null);
+            if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
+                try {
+                    const el = containerRef.current as any;
+                    if (el?.hasPointerCapture?.(e.pointerId)) {
+                        el.releasePointerCapture(e.pointerId);
+                    }
+                } catch {
+                    // ignore
+                }
+            }
+            return;
+        }
 
 	        if (mode === 'selecting') {
 	            const rect = marqueeRect;
@@ -2952,7 +3397,7 @@ export const Canvas: React.FC = () => {
     };
 
     const handleDoubleClick = (e: React.MouseEvent) => {
-        if (penMode || textMode) return;
+        if (penMode || textMode || ganttMode) return;
         // Only create if clicking on empty canvas
         const target = e.target as HTMLElement;
         // Prevent node creation when double-clicking on existing objects or interactive UI.
@@ -2985,6 +3430,8 @@ export const Canvas: React.FC = () => {
 		        if (e.pointerType === 'touch' && contextConnectActiveRef.current) return;
 		        // Reset all interaction state
 		        isDrawing.current = false;
+            ganttResizeRef.current = null;
+            ganttMoveRef.current = null;
 		        setMode('idle');
 		        setActiveId(null);
             clearCanvasLongPress();
@@ -3239,6 +3686,50 @@ export const Canvas: React.FC = () => {
 
     const noteScale = 1 / Math.max(0.0001, canvas.scale);
     const focusHintVisible = canvas.scale > 1.1;
+    const ganttHeaderTicks = useMemo(() => {
+        if (!ganttLayout) return [];
+        const viewportWidth = containerRef.current?.clientWidth ?? window.innerWidth;
+        const worldLeft = -canvas.x / canvas.scale;
+        const worldRight = (viewportWidth - canvas.x) / canvas.scale;
+        const dayWidth = ganttLayout.dayWidth;
+        const pixelsPerDay = dayWidth * canvas.scale;
+        let stepDays = 7;
+        if (pixelsPerDay >= 80) stepDays = 1;
+        else if (pixelsPerDay >= 40) stepDays = 3;
+        else if (pixelsPerDay < 14) stepDays = 28;
+        const formatter = new Intl.DateTimeFormat(
+            undefined,
+            stepDays >= 28 ? { month: 'short', year: 'numeric' } : { month: 'short', day: 'numeric' }
+        );
+        const startDayIndex = Math.floor((worldLeft - ganttLayout.originX) / dayWidth);
+        const endDayIndex = Math.ceil((worldRight - ganttLayout.originX) / dayWidth);
+        const firstIndex = Math.floor(startDayIndex / stepDays) * stepDays;
+        const ticks: Array<{ x: number; label: string }> = [];
+        for (let dayIndex = firstIndex; dayIndex <= endDayIndex; dayIndex += stepDays) {
+            const worldX = ganttLayout.originX + dayIndex * dayWidth;
+            const screenX = worldX * canvas.scale + canvas.x;
+            const labelMs = ganttLayout.rangeStartMs + dayIndex * MS_PER_DAY;
+            ticks.push({ x: screenX, label: formatter.format(new Date(labelMs)) });
+        }
+        return ticks;
+    }, [canvas.x, canvas.scale, ganttLayout]);
+    const ganttTodayX = useMemo(() => {
+        if (!ganttLayout) return null;
+        const today = toUtcDay(Date.now());
+        const offsetDays = (today - ganttLayout.rangeStartMs) / MS_PER_DAY;
+        return ganttLayout.originX + offsetDays * ganttLayout.dayWidth;
+    }, [ganttLayout]);
+    const ganttParkingRect = useMemo(() => {
+        if (!ganttLayout) return null;
+        const viewportHeight = containerRef.current?.clientHeight ?? window.innerHeight;
+        const left = ganttLayout.parkingX * canvas.scale + canvas.x;
+        const width = ganttLayout.parkingWidth * canvas.scale;
+        return { left, width, height: viewportHeight };
+    }, [canvas.x, canvas.scale, ganttLayout]);
+    const ganttDetailNode = useMemo(() => {
+        if (!ganttMode || !ganttDetailNodeId) return null;
+        return nodes.find((node) => node.id === ganttDetailNodeId) ?? null;
+    }, [ganttDetailNodeId, ganttMode, nodes]);
     const rootComments = React.useMemo(() => visibleComments.filter((c) => !c.parentId), [visibleComments]);
     const repliesByParent = React.useMemo(() => {
         const map = new Map<string, Comment[]>();
@@ -3667,13 +4158,58 @@ export const Canvas: React.FC = () => {
 
             <SnowOverlay enabled={snowEnabled} theme={theme} embedded />
 
-            <div
-                className={styles.gridPattern}
-                style={{
-                    backgroundPosition: `${canvas.x}px ${canvas.y}px`,
-                    backgroundSize: `${GRID_SIZE * canvas.scale}px ${GRID_SIZE * canvas.scale}px`
-                }}
-            />
+            {ganttMode ? (
+                <>
+                    <div
+                        className={styles.ganttGrid}
+                        style={{
+                            backgroundPosition: `${canvas.x}px ${canvas.y}px, ${canvas.x}px ${canvas.y}px, ${canvas.x}px ${canvas.y}px`,
+                            backgroundSize: `${(ganttLayout?.dayWidth ?? GRID_SIZE) * canvas.scale}px 100%, ${(ganttLayout?.dayWidth ?? GRID_SIZE) * 7 * canvas.scale}px 100%, 100% ${GANTT_LANE_HEIGHT * canvas.scale}px`,
+                        }}
+                    />
+                    {ganttParkingRect && (
+                        <div
+                            className={styles.ganttParking}
+                            style={{
+                                left: ganttParkingRect.left,
+                                width: ganttParkingRect.width,
+                                height: ganttParkingRect.height,
+                            }}
+                        />
+                    )}
+                    {ganttTodayX !== null && (
+                        <div
+                            className={styles.ganttToday}
+                            style={{ left: ganttTodayX * canvas.scale + canvas.x }}
+                        />
+                    )}
+                    {ganttHeaderTicks.length > 0 && (
+                        <div className={styles.ganttHeader}>
+                            {ganttParkingRect && (
+                                <div
+                                    className={styles.ganttParkingLabel}
+                                    style={{ left: Math.max(8, ganttParkingRect.left + 12) }}
+                                >
+                                    Parking
+                                </div>
+                            )}
+                            {ganttHeaderTicks.map((tick) => (
+                                <div key={`${tick.label}-${tick.x}`} className={styles.ganttHeaderTick} style={{ left: tick.x }}>
+                                    {tick.label}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </>
+            ) : (
+                <div
+                    className={styles.gridPattern}
+                    style={{
+                        backgroundPosition: `${canvas.x}px ${canvas.y}px`,
+                        backgroundSize: `${GRID_SIZE * canvas.scale}px ${GRID_SIZE * canvas.scale}px`
+                    }}
+                />
+            )}
 
             {alignmentGuides.map((guide, idx) => (
                 <div
@@ -3715,62 +4251,96 @@ export const Canvas: React.FC = () => {
                     zIndex: 0
                 }}
             >
-	                <defs />
-                {/* Render Saved Drawings */}
-                {visibleDrawings.map(drawing => (
-                    <path
-                        key={drawing.id}
-                        d={drawing.path ?? getSvgPath(drawing.points)}
-                        stroke={drawing.color}
-                        strokeWidth={drawing.width || 3}
-                        fill="none"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        style={{ opacity: drawing.opacity || 1 }}
-                        pointerEvents="none"
-                    />
-                ))}
-                {/* Render Current Drawing Path (live, no React re-renders) */}
-                <path
-                    ref={livePathRef}
-                    d=""
-                    stroke="var(--text-primary)"
-                    strokeWidth={3}
-                    fill="none"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    style={{ opacity: 1, pointerEvents: 'none' }}
-                />
+	                <defs>
+                        {ganttMode && (
+                            <marker
+                                id="gantt-arrow"
+                                markerWidth="10"
+                                markerHeight="8"
+                                refX="9"
+                                refY="4"
+                                orient="auto"
+                            >
+                                <path d="M 0 0 L 10 4 L 0 8 z" fill="currentColor" />
+                            </marker>
+                        )}
+                    </defs>
+                {!ganttMode && (
+                    <>
+                        {/* Render Saved Drawings */}
+                        {visibleDrawings.map(drawing => (
+                            <path
+                                key={drawing.id}
+                                d={drawing.path ?? getSvgPath(drawing.points)}
+                                stroke={drawing.color}
+                                strokeWidth={drawing.width || 3}
+                                fill="none"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                style={{ opacity: drawing.opacity || 1 }}
+                                pointerEvents="none"
+                            />
+                        ))}
+                        {/* Render Current Drawing Path (live, no React re-renders) */}
+                        <path
+                            ref={livePathRef}
+                            d=""
+                            stroke="var(--text-primary)"
+                            strokeWidth={3}
+                            fill="none"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            style={{ opacity: 1, pointerEvents: 'none' }}
+                        />
 
-			                {bridgeEdges.map((bridge) => (
-			                    <LayerBridgeEdge
-			                        key={`${bridge.id}-bridge`}
-			                        id={bridge.id}
-			                        fromId={bridge.fromId}
-			                        toId={bridge.toId}
-			                        layerLabel={bridge.layerLabel}
-			                    />
-			                ))}
-			                {visibleEdges.map((edge) => (
-			                    <Edge
-			                        key={edge.id}
-			                        sourceId={edge.source}
-			                        targetId={edge.target}
-			                        id={edge.id}
-			                        onRequestContextMenu={(args) => {
-			                            if (args.kind === 'selection') setContextMenu({ kind: 'selection', id: '__selection__', x: args.x, y: args.y });
-			                            else setContextMenu({ kind: args.kind, id: args.id, x: args.x, y: args.y });
-			                        }}
-			                    />
-			                ))}
-                {mode === 'connecting' && (
-                    <ConnectionLine
-                        startX={connectionStart.x}
-                        startY={connectionStart.y}
-                        endX={cursorPos.x}
-                        endY={cursorPos.y}
-                    />
+                        {bridgeEdges.map((bridge) => (
+                            <LayerBridgeEdge
+                                key={`${bridge.id}-bridge`}
+                                id={bridge.id}
+                                fromId={bridge.fromId}
+                                toId={bridge.toId}
+                                layerLabel={bridge.layerLabel}
+                            />
+                        ))}
+                        {visibleEdges.map((edge) => (
+                            <Edge
+                                key={edge.id}
+                                sourceId={edge.source}
+                                targetId={edge.target}
+                                id={edge.id}
+                                onRequestContextMenu={(args) => {
+                                    if (args.kind === 'selection') setContextMenu({ kind: 'selection', id: '__selection__', x: args.x, y: args.y });
+                                    else setContextMenu({ kind: args.kind, id: args.id, x: args.x, y: args.y });
+                                }}
+                            />
+                        ))}
+                        {mode === 'connecting' && (
+                            <ConnectionLine
+                                startX={connectionStart.x}
+                                startY={connectionStart.y}
+                                endX={cursorPos.x}
+                                endY={cursorPos.y}
+                            />
+                        )}
+                    </>
                 )}
+                {ganttMode && ganttEdges.map((edge) => {
+                    const isSelected = selectedEdges.includes(edge.id) || selectedEdge === edge.id;
+                    return (
+                        <path
+                            key={edge.id}
+                            className={`${styles.ganttEdge}${isSelected ? ` ${styles.ganttEdgeSelected}` : ''}`}
+                            d={edge.d}
+                            style={{ color: edge.color, stroke: edge.color }}
+                            markerEnd="url(#gantt-arrow)"
+                            data-edge-id={edge.id}
+                            onPointerDown={(e) => {
+                                e.stopPropagation();
+                                useStore.getState().selectEdge(edge.id);
+                            }}
+                        />
+                    );
+                })}
             </svg>
 
             <div
@@ -3782,6 +4352,89 @@ export const Canvas: React.FC = () => {
                     zIndex: 1
                 } as React.CSSProperties}
             >
+                {ganttMode && ganttLayout ? (
+                    ganttLayout.items.map((item) => {
+                        const node = item.node;
+                        const energy = Number.isFinite(effectiveEnergy[node.id])
+                            ? effectiveEnergy[node.id]
+                            : (Number.isFinite(node.energy) ? node.energy ?? 0 : 0);
+                        const glow = withAlpha(energyToColor(energy), Math.min(0.6, 0.18 + energy / 160));
+                        const progress = progressFromNode(node);
+                        const isSelected = selectedNode === node.id || selectedNodes.includes(node.id);
+                        const mentionPeople = resolveMentionParticipants(node.mentions, sessionSavers);
+                        const authorId = typeof node.authorId === 'string' ? node.authorId : '';
+                        const authorLabel = typeof node.authorName === 'string' ? node.authorName.trim() : '';
+                        const authorSaver = authorId ? sessionSavers.find((saver) => saver.id === authorId) : null;
+                        const resolvedAuthorLabel = authorLabel || (authorSaver ? mentionLabelFor(authorSaver) : '');
+                        const people = [];
+                        if (resolvedAuthorLabel) {
+                            people.push({ id: authorId || `author:${node.id}`, label: resolvedAuthorLabel });
+                        }
+                        const seen = new Set(people.map((p) => p.id));
+                        mentionPeople.forEach((person) => {
+                            if (seen.has(person.id)) return;
+                            seen.add(person.id);
+                            people.push(person);
+                        });
+                        const visiblePeople = people.slice(0, 3);
+                        const extraCount = Math.max(0, people.length - visiblePeople.length);
+                        return (
+                            <div
+                                key={`gantt-${node.id}`}
+                                data-node-id={node.id}
+                                data-gantt-bar="true"
+                                className={`${styles.ganttBar}${item.hasDates ? '' : ` ${styles.ganttBarUndated}`}${isSelected ? ` ${styles.ganttBarSelected}` : ''}`}
+                                style={{
+                                    left: item.x,
+                                    top: item.y,
+                                    width: item.width,
+                                    height: item.height,
+                                    '--gantt-glow': glow,
+                                    '--gantt-fill': energyToColor(energy),
+                                } as React.CSSProperties}
+                            >
+                                <div className={styles.ganttBarFill} style={{ width: `${progress}%` }} />
+                                <div className={styles.ganttBarContent}>
+                                    <span className={styles.ganttBarTitle}>{node.title || 'Untitled task'}</span>
+                                    <div className={styles.ganttBarMetaRow}>
+                                        {visiblePeople.length > 0 && (
+                                            <div className={styles.ganttBarPeople}>
+                                                {visiblePeople.map((person) => {
+                                                    const hue = hashString(person.id || person.label) % 360;
+                                                    return (
+                                                        <span
+                                                            key={person.id}
+                                                            className={styles.ganttAvatar}
+                                                            title={person.label}
+                                                            style={{ background: `hsl(${hue} 52% 46%)` }}
+                                                        >
+                                                            {avatarInitials(person.label)}
+                                                        </span>
+                                                    );
+                                                })}
+                                                {extraCount > 0 && (
+                                                    <span className={`${styles.ganttAvatar} ${styles.ganttAvatarMore}`}>
+                                                        +{extraCount}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        )}
+                                        <span className={styles.ganttBarMeta}>{progress}%</span>
+                                    </div>
+                                </div>
+                                <div
+                                    className={styles.ganttHandle}
+                                    data-gantt-resize="start"
+                                />
+                                <div
+                                    className={`${styles.ganttHandle} ${styles.ganttHandleEnd}`}
+                                    data-gantt-resize="end"
+                                />
+                            </div>
+                        );
+                    })
+                ) : (
+                    <>
                 {stackedItems.map((entry) => {
                     if (entry.kind === 'textBox') {
                         const tb = entry.item as TextBoxType;
@@ -4015,7 +4668,23 @@ export const Canvas: React.FC = () => {
                         </div>
                     );
                 })()}
+                    </>
+                )}
             </div>
+            {ganttMode && ganttDetailNode && (
+                <div className={styles.ganttDetailPanel} data-interactive="true">
+                    <button
+                        type="button"
+                        className={styles.ganttDetailClose}
+                        onClick={() => setGanttDetailNodeId(null)}
+                        aria-label="Close task details"
+                        data-interactive="true"
+                    >
+                        <X size={14} />
+                    </button>
+                    <NoteView data={ganttDetailNode} />
+                </div>
+            )}
         </div>
     );
 };

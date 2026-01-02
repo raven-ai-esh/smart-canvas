@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Activity, Hand, PenTool, Eraser, Highlighter, Type, X, SlidersHorizontal, Grid3x3, Eye, CircleDot, StickyNote, Network } from 'lucide-react';
+import { Activity, Calendar, Hand, PenTool, Eraser, Highlighter, Type, X, SlidersHorizontal, Grid3x3, Eye, CircleDot, StickyNote, Network } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import type { PenToolType } from '../../types';
 
@@ -107,7 +107,7 @@ const ControlButton: React.FC<ControlButtonProps> = ({ title, onClick, active, d
 };
 
 export const Controls: React.FC = () => {
-    const { moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, monitoringMode, toggleMonitoringMode, theme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, canvas, setCanvasTransform } = useStore();
+    const { moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, monitoringMode, toggleMonitoringMode, ganttMode, toggleGanttMode, theme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, canvas, setCanvasTransform } = useStore();
 
     const controlsRootRef = useRef<HTMLDivElement | null>(null);
 
@@ -195,6 +195,13 @@ export const Controls: React.FC = () => {
         setShowModeMenu(false);
         setShowZoomMenu(false);
     }, [focusMode]);
+
+    useEffect(() => {
+        if (!ganttMode) return;
+        setShowToolMenu(false);
+        setShowModeMenu(false);
+        setShowZoomMenu(false);
+    }, [ganttMode]);
 
     const handlePenClick = () => {
         setShowModeMenu(false);
@@ -324,7 +331,7 @@ export const Controls: React.FC = () => {
 	            )}
 
 	                {/* Secondary stack for Pen menu (vertical from base button) */}
-	                {!focusMode && (
+	                {!focusMode && !ganttMode && (
 	                    <div
 	                        style={{
 	                            position: 'fixed',
@@ -396,7 +403,7 @@ export const Controls: React.FC = () => {
 	                )}
 
                 {/* Secondary stack for Mode menu (Physics + Grid + Focus) */}
-                {!focusMode && (
+                {!focusMode && !ganttMode && (
                     <div
                         style={{
                             position: 'fixed',
@@ -436,6 +443,13 @@ export const Controls: React.FC = () => {
                                 active: monitoringMode,
                                 child: <Activity size={18} />,
                             },
+                            {
+                                key: 'gantt',
+                                title: ganttMode ? 'Disable Gantt Mode' : 'Enable Gantt Mode',
+                                onClick: toggleGanttMode,
+                                active: ganttMode,
+                                child: <Calendar size={18} />,
+                            },
                         ].map((b, idx) => (
                             <div
                                 key={b.key}
@@ -459,7 +473,7 @@ export const Controls: React.FC = () => {
                 )}
 
                 {/* Secondary stack for Zoom menu (detail/normal/graph) */}
-                {!focusMode && (
+                {!focusMode && !ganttMode && (
                     <div
                         style={{
                             position: 'fixed',
@@ -532,7 +546,15 @@ export const Controls: React.FC = () => {
 	                gap: BUTTON_GAP,
                     pointerEvents: 'auto',
 	            }}>
-                    {focusMode ? (
+                    {ganttMode ? (
+                        <ControlButton
+                            onClick={toggleGanttMode}
+                            title="Disable Gantt Mode"
+                            active
+                        >
+                            <Calendar size={18} />
+                        </ControlButton>
+                    ) : focusMode ? (
                         <ControlButton
                             onClick={handleFocusClick}
                             title="Disable Focus Mode"
@@ -554,7 +576,7 @@ export const Controls: React.FC = () => {
                         <ControlButton
                             onClick={handleModeClick}
                             title="Modes"
-                            active={showModeMenu || snapMode || focusMode || monitoringMode}
+                            active={showModeMenu || snapMode || focusMode || monitoringMode || ganttMode}
                         >
                                 <SlidersHorizontal size={18} />
                             </ControlButton>
