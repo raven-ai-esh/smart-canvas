@@ -10,7 +10,7 @@ import uuid
 import html
 
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from openai import APIStatusError, AsyncOpenAI
@@ -175,11 +175,13 @@ DEFAULT_PROMPT_LINES = [
     "Canvas participants are users who saved the canvas; only they can be tagged.",
     "Use MCP tool list_canvas_participants to fetch taggable people (id, name, email).",
     "Use MCP tool send_alert to notify a canvas participant via their enabled alerting channels. Pass userRef as the participant id (preferred) or their name/email/handle from list_canvas_participants.",
+    "If you receive a message formatted like: \"\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c <Name> \u043e\u0442\u0432\u0435\u0442\u0438\u043b \u043d\u0430 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435 \\\"...\\\" \u0442\u0435\u043a\u0441\u0442\u043e\u043c: \\\"...\\\"\", treat it as that user's reply to your earlier alert; it is not the current user relaying a message.",
     "When tagging someone in a card, include @Name in the content and update node.mentions with {id,label}.",
     "To tag everyone, include @all and add {id:\"all\", label:\"all\"} to node.mentions.",
     "For destructive actions (delete), ask for explicit confirmation first.",
     "If a tool fails, explain what happened and ask how to proceed.",
     "Keep responses concise and actionable.",
+    "Current time: {{current_time}} | Date: {{current_date}} | Day: {{current_weekday}}",
 ]
 DEFAULT_PROMPT = "\n".join(DEFAULT_PROMPT_LINES)
 
@@ -332,7 +334,22 @@ def _save_prompt_text(value: str) -> str:
     return text
 
 def _build_instructions(user_name: str | None, extra: str | None) -> str:
-    parts = [_load_prompt_text()]
+    template = _load_prompt_text()
+    time_line = "Current time: {{current_time}} | Date: {{current_date}} | Day: {{current_weekday}}"
+    if not any(token in template for token in ("{{current_time}}", "{{current_date}}", "{{current_weekday}}", "{{current_datetime}}")):
+        template = "\n".join([template, time_line]).strip()
+    now = datetime.now()
+    current_time = now.strftime("%H:%M")
+    current_date = now.strftime("%Y-%m-%d")
+    current_weekday = now.strftime("%A")
+    rendered = (
+        template
+        .replace("{{current_time}}", current_time)
+        .replace("{{current_date}}", current_date)
+        .replace("{{current_weekday}}", current_weekday)
+        .replace("{{current_datetime}}", f"{current_date} {current_time} ({current_weekday})")
+    )
+    parts = [rendered]
     if isinstance(user_name, str) and user_name.strip():
         parts.append(f'The user name is "{user_name.strip()}".')
     if isinstance(extra, str) and extra.strip():

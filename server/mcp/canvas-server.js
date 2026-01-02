@@ -507,8 +507,12 @@ const fetchCanvasParticipants = async ({ sessionId }, extra) => {
 const sendAlert = async ({ sessionId, userRef, message }, extra) => {
   const token = extra?.authInfo?.mcpToken;
   if (!token) throw new Error('mcp_token_required');
+  const senderUserId = typeof extra?.authInfo?.actingUserId === 'string'
+    ? extra.authInfo.actingUserId.trim()
+    : '';
   const resolvedSessionId = await client.resolveSessionId(sessionId);
   const payload = { sessionId: resolvedSessionId, userId: userRef, message };
+  if (senderUserId) payload.senderUserId = senderUserId;
   const res = await fetch(`${apiBaseUrl}/api/integrations/mcp/alert`, {
     method: 'POST',
     headers: {

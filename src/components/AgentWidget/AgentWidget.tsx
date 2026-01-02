@@ -23,6 +23,9 @@ type ChatMessage = {
   createdAt?: string | null;
   selectionContext?: AssistantSelectionContext | null;
   trace?: AssistantTrace | null;
+  externalReply?: boolean;
+  externalSender?: string | null;
+  externalChannel?: string | null;
 };
 
 const MAX_VISIBLE_MESSAGES = 120;
@@ -40,6 +43,12 @@ const trimMessages = (messages: ChatMessage[], max = MAX_VISIBLE_MESSAGES) => {
   if (messages.length <= max) return messages;
   return messages.slice(messages.length - max);
 };
+
+const isExternalReplyContent = (content: string) => (
+  content.startsWith('Пользователь ')
+  && content.includes(' ответил на сообщение ')
+  && content.includes(' текстом: ')
+);
 
   const isNetworkError = (err: unknown) => {
     if (err instanceof TypeError) return true;
@@ -89,8 +98,10 @@ export const AgentWidget: React.FC = () => {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [expandedDetails, setExpandedDetails] = useState<Record<string, boolean>>({});
+  const [hasUnread, setHasUnread] = useState(false);
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
+  const [assistantStatus, setAssistantStatus] = useState<'idle' | 'thinking' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [contextInfo, setContextInfo] = useState<{ remainingRatio?: number | null } | null>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -102,6 +113,8 @@ export const AgentWidget: React.FC = () => {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const requestAbortRef = useRef<AbortController | null>(null);
+  const openRef = useRef(open);
+  const threadIdRef = useRef<string | null>(null);
   const resizeStartRef = useRef<{
     x: number;
     y: number;
@@ -130,6 +143,11 @@ export const AgentWidget: React.FC = () => {
     return { width, height };
   }, []);
 
+  const isUiActive = useCallback(() => {
+    if (typeof document === 'undefined') return false;
+    return !document.hidden && document.hasFocus();
+  }, []);
+
   const toggleDetails = useCallback((key: string) => {
     setExpandedDetails((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
@@ -145,6 +163,18 @@ export const AgentWidget: React.FC = () => {
   }, [panelSize]);
 
   useEffect(() => {
+    openRef.current = open;
+  }, [open]);
+
+  useEffect(() => {
+    threadIdRef.current = threadId;
+  }, [threadId]);
+
+  useEffect(() => {
+    setAssistantStatus(null);
+  }, [threadId]);
+
+  useEffect(() => {
     const mq = window.matchMedia?.('(max-width: 520px)');
     if (!mq) return undefined;
     const onChange = () => setIsNarrow(mq.matches);
@@ -157,6 +187,40 @@ export const AgentWidget: React.FC = () => {
     if (!open) return;
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [open, messages, pending]);
+
+  useEffect(() => {
+    if (open && isUiActive()) {
+      setHasUnread(false);
+    }
+  }, [open, isUiActive, messages]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (open && isUiActive()) {
+        setHasUnread(false);
+      }
+    };
+    window.addEventListener('focus', onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', onVisibility);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [isUiActive, open]);
+
+  useEffect(() => {
+    const onAssistantStatus = (evt: Event) => {
+      const detail = (evt as CustomEvent).detail ?? {};
+      const targetThreadId = typeof detail.threadId === 'string' ? detail.threadId : null;
+      if (!targetThreadId || targetThreadId !== threadIdRef.current) return;
+      const status = typeof detail.status === 'string' ? detail.status : null;
+      if (status === 'thinking' || status === 'idle') {
+        setAssistantStatus(status);
+      }
+    };
+    window.addEventListener('assistant-status', onAssistantStatus);
+    return () => window.removeEventListener('assistant-status', onAssistantStatus);
+  }, []);
 
   useEffect(() => {
     const onOpen = () => {
@@ -209,6 +273,7 @@ export const AgentWidget: React.FC = () => {
       setMessages([]);
       setContextInfo(null);
       setExpandedDetails({});
+      setHasUnread(false);
       return;
     }
     const sessionKey = sessionId ?? 'default';
@@ -224,6 +289,7 @@ export const AgentWidget: React.FC = () => {
     setMessages([]);
     setContextInfo(null);
     setExpandedDetails({});
+    setHasUnread(false);
   }, [lastSessionKey, sessionId, threadKey]);
 
   const persistPanelSize = useCallback((size: { width: number; height: number }) => {
@@ -327,7 +393,14 @@ export const AgentWidget: React.FC = () => {
       createdAt: msg.createdAt ?? null,
       selectionContext: (msg?.meta?.selectionContext ?? null) as AssistantSelectionContext | null,
       trace: msg?.meta?.trace ?? null,
-    }));
+      externalReply: !!msg?.meta?.externalReply,
+      externalSender: typeof msg?.meta?.externalSender === 'string' ? msg.meta.externalSender : null,
+      externalChannel: typeof msg?.meta?.externalChannel === 'string' ? msg.meta.externalChannel : null,
+    })).filter((msg: ChatMessage) => {
+      if (msg.externalReply) return false;
+      if (msg.role === 'user' && isExternalReplyContent(msg.content)) return false;
+      return true;
+    });
     const context = data?.context && typeof data.context === 'object' ? data.context : null;
     return { messages: mapped, context };
   }, [sessionId]);
@@ -357,6 +430,7 @@ export const AgentWidget: React.FC = () => {
     setThreadId(null);
     setContextInfo(null);
     setExpandedDetails({});
+    setHasUnread(false);
   }, [threadKey]);
 
   useEffect(() => {
@@ -411,6 +485,37 @@ export const AgentWidget: React.FC = () => {
       cancelled = true;
     };
   }, [createThread, ensureThread, loadMessages, open, me?.id, threadKey]);
+
+  useEffect(() => {
+    const onAssistantUpdate = (evt: Event) => {
+      const detail = (evt as CustomEvent).detail ?? {};
+      const targetThreadId = typeof detail.threadId === 'string' ? detail.threadId : null;
+      if (!targetThreadId || targetThreadId !== threadIdRef.current) return;
+      const incoming = detail.message ?? null;
+      if (!incoming || typeof incoming !== 'object') return;
+      if (incoming.role !== 'assistant') return;
+      setMessages((prev) => {
+        if (incoming.id && prev.some((msg) => msg.id === incoming.id)) return prev;
+        const next: ChatMessage = {
+          id: incoming.id,
+          role: incoming.role,
+          content: incoming.content ?? '',
+          createdAt: incoming.createdAt ?? null,
+          selectionContext: (incoming?.meta?.selectionContext ?? null) as AssistantSelectionContext | null,
+          trace: incoming?.meta?.trace ?? null,
+        };
+        return trimMessages([...prev, next]);
+      });
+      if (!openRef.current || !isUiActive()) {
+        setHasUnread(true);
+      }
+      if (detail.context && typeof detail.context === 'object') {
+        setContextInfo(detail.context);
+      }
+    };
+    window.addEventListener('assistant-update', onAssistantUpdate);
+    return () => window.removeEventListener('assistant-update', onAssistantUpdate);
+  }, [isUiActive]);
 
   const sendMessage = async () => {
     const text = input.trim();
@@ -478,6 +583,9 @@ export const AgentWidget: React.FC = () => {
             createdAt: data?.assistantMessage?.createdAt ?? null,
           },
         ]));
+        if (!openRef.current || !isUiActive()) {
+          setHasUnread(true);
+        }
         if (data?.context && typeof data.context === 'object') {
           setContextInfo(data.context);
         }
@@ -540,6 +648,12 @@ export const AgentWidget: React.FC = () => {
     const comments = selectionContext.comments?.length ?? 0;
     return nodes + edges + textBoxes + comments;
   }, [selectionContext]);
+
+  const statusLabel = useMemo(() => {
+    if (!me) return 'Sign in to use the assistant';
+    if (pending || assistantStatus === 'thinking') return 'Thinking...';
+    return 'Connected to your canvas';
+  }, [assistantStatus, me, pending]);
 
   const sendDisabled = !input.trim() || pending || loadingThread || !me || !sessionReady;
 
@@ -675,9 +789,7 @@ export const AgentWidget: React.FC = () => {
             </div>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Raven</div>
-              <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                {me ? 'Connected to your canvas' : 'Sign in to use the assistant'}
-              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{statusLabel}</div>
             </div>
             <button
               type="button"
@@ -725,7 +837,12 @@ export const AgentWidget: React.FC = () => {
             )}
 
             {messages.map((msg, idx) => {
-              const isUser = msg.role === 'user';
+              if (msg.externalReply || (msg.role === 'user' && isExternalReplyContent(msg.content))) {
+                return null;
+              }
+              const isExternal = msg.role === 'user' && !!msg.externalReply;
+              const isUser = msg.role === 'user' && !isExternal;
+              const isAssistant = msg.role === 'assistant';
               const hasSelection = isUser && !!msg.selectionContext && (
                 (msg.selectionContext.nodes?.length ?? 0)
                 + (msg.selectionContext.edges?.length ?? 0)
@@ -733,12 +850,16 @@ export const AgentWidget: React.FC = () => {
                 + (msg.selectionContext.comments?.length ?? 0)
               ) > 0;
               const trace = msg.trace ?? null;
-              const hasTrace = !isUser && !!trace && (
+              const hasTrace = isAssistant && !!trace && (
                 !!(trace.reasoning && trace.reasoning.trim())
                 || ((trace.tools?.length ?? 0) > 0)
               );
               const messageKey = msg.id ?? `${msg.role}-${idx}`;
               const detailsOpen = expandedDetails[messageKey] ?? false;
+              const externalLabel = msg.externalSender
+                ? `Reply from ${msg.externalSender}`
+                : 'Reply received';
+              const channelSuffix = msg.externalChannel === 'telegram' ? 'Telegram' : null;
               return (
                 <div
                   key={messageKey}
@@ -750,6 +871,21 @@ export const AgentWidget: React.FC = () => {
                     maxWidth: '85%',
                   }}
                 >
+                  {isExternal && (
+                    <div
+                      style={{
+                        alignSelf: 'flex-start',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        fontSize: 11,
+                        color: 'var(--text-secondary)',
+                      }}
+                    >
+                      <MessageCircle size={12} />
+                      <span>{channelSuffix ? `${externalLabel} · ${channelSuffix}` : externalLabel}</span>
+                    </div>
+                  )}
                   {hasSelection && (
                     <div
                       style={{
@@ -844,7 +980,7 @@ export const AgentWidget: React.FC = () => {
                     style={{
                       background: isUser ? 'rgba(94,129,172,0.22)' : 'rgba(255,255,255,0.04)',
                       color: 'var(--text-primary)',
-                      border: '1px solid var(--border-strong)',
+                      border: isExternal ? '1px dashed var(--border-strong)' : '1px solid var(--border-strong)',
                       borderRadius: 14,
                       padding: '8px 10px',
                       fontSize: 13,
@@ -1028,9 +1164,24 @@ export const AgentWidget: React.FC = () => {
           cursor: 'pointer',
           display: 'grid',
           placeItems: 'center',
+          position: 'relative',
         }}
       >
         {open ? <X size={20} /> : <MessageCircle size={20} />}
+        {hasUnread && (
+          <span
+            style={{
+              position: 'absolute',
+              top: 8,
+              right: 8,
+              width: 10,
+              height: 10,
+              borderRadius: '50%',
+              background: '#BF616A',
+              boxShadow: '0 0 0 2px rgba(18, 22, 32, 0.9)',
+            }}
+          />
+        )}
       </button>
     </div>
   );
