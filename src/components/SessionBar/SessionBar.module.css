@@ -374,6 +374,23 @@
     gap: 10px;
 }
 
+.linkBackdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 14, 0.45);
+    z-index: 1890;
+}
+
+.linkPrompt {
+    position: fixed;
+    top: 18vh;
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: min(360px, 92vw);
+    width: min(520px, 92vw);
+    z-index: 1901;
+}
+
 .promptTitle {
     font-size: 12px;
     color: var(--text-secondary);

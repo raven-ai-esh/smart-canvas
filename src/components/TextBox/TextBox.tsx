@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { TextBox as TextBoxType } from '../../types';
 import { useStore } from '../../store/useStore';
-import { formatBytes } from '../../utils/attachments';
+import { formatBytes, resolveAttachmentUrl } from '../../utils/attachments';
 import styles from './TextBox.module.css';
 
 const MIN_W = 80;
@@ -73,10 +73,13 @@ export function TextBox({
   const selectedIds = useStore((s) => s.selectedTextBoxes);
   const selectTextBox = useStore((s) => s.selectTextBox);
   const authorshipMode = useStore((s) => s.authorshipMode);
+  const sessionShareToken = useStore((s) => s.sessionShareToken);
 
   const isEditing = editingId === box.id;
-  const isImage = box.kind === 'image' && typeof box.src === 'string' && box.src.length > 0;
-  const isFile = box.kind === 'file' && typeof box.src === 'string' && box.src.length > 0;
+  const rawSrc = typeof box.src === 'string' ? box.src : '';
+  const resolvedSrc = resolveAttachmentUrl(rawSrc, sessionShareToken);
+  const isImage = box.kind === 'image' && rawSrc.length > 0;
+  const isFile = box.kind === 'file' && rawSrc.length > 0;
   const isMedia = isImage || isFile;
   const isSelected = selectedId === box.id || selectedIds.includes(box.id);
   const fileName = typeof box.fileName === 'string' ? box.fileName.trim() : '';
@@ -124,7 +127,7 @@ export function TextBox({
   }, [isEditing]);
 
   React.useEffect(() => {
-    if (!previewOpen || !isFile || !box.src) {
+    if (!previewOpen || !isFile || !resolvedSrc) {
       if (previewWorkerRef.current) {
         previewWorkerRef.current.terminate();
         previewWorkerRef.current = null;
@@ -133,7 +136,7 @@ export function TextBox({
       setPreviewState({ status: 'idle' });
       return;
     }
-    const src = box.src;
+    const src = resolvedSrc;
     let cancelled = false;
     const controller = new AbortController();
     const { signal } = controller;
@@ -237,7 +240,7 @@ export function TextBox({
       }
       previewRequestRef.current = null;
     };
-  }, [previewOpen, isFile, box.src, fileName, fileMime]);
+  }, [previewOpen, isFile, resolvedSrc, fileName, fileMime, fileSize]);
 
   React.useEffect(() => {
     if (!previewOpen) return;
@@ -767,7 +770,7 @@ export function TextBox({
           onPointerCancel={endDrag}
         >
           {isImage ? (
-            <img className={styles.imageDisplay} src={box.src} alt="" draggable={false} />
+            <img className={styles.imageDisplay} src={resolvedSrc} alt="" draggable={false} />
           ) : isFile ? (
             <div className={styles.fileCard}>
               <div className={styles.fileIcon}>
@@ -807,7 +810,7 @@ export function TextBox({
           onPointerCancel={endDrag}
         />
       )}
-      {previewOpen && isFile && typeof document !== 'undefined' && box.src && createPortal(
+      {previewOpen && isFile && typeof document !== 'undefined' && resolvedSrc && createPortal(
         <div className={styles.previewOverlay}>
           <div
             className={styles.previewModal}
@@ -821,7 +824,7 @@ export function TextBox({
               <div className={styles.previewActions}>
                 <a
                   className={styles.previewButton}
-                  href={box.src}
+                  href={resolvedSrc}
                   download={fileDisplayName}
                   onClick={(e) => e.stopPropagation()}
                 >

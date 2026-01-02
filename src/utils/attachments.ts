@@ -60,6 +60,22 @@ export async function filesToAttachments(files: File[], sessionId?: string | nul
   return { attachments, rejected, failed };
 }
 
+export const resolveAttachmentUrl = (url?: string | null, shareToken?: string | null) => {
+  if (!url) return '';
+  if (!shareToken) return url;
+  if (url.startsWith('data:')) return url;
+  if (typeof window === 'undefined') return url;
+  try {
+    const parsed = new URL(url, window.location.origin);
+    if (!parsed.pathname.startsWith('/api/attachments/')) return url;
+    if (parsed.searchParams.has('share') || parsed.searchParams.has('shareToken')) return url;
+    parsed.searchParams.set('share', shareToken);
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+};
+
 export const formatBytes = (bytes: number) => {
   if (!Number.isFinite(bytes)) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];

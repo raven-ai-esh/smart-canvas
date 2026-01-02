@@ -38,6 +38,7 @@ const TELEGRAM_AUTH_BOT_TOKEN = process.env.TELEGRAM_AUTH_BOT_TOKEN ?? TELEGRAM_
 const TELEGRAM_ALERT_BOT_USERNAME = process.env.TELEGRAM_ALERT_BOT_USERNAME ?? TELEGRAM_BOT_USERNAME;
 const TELEGRAM_ALERT_BOT_TOKEN = process.env.TELEGRAM_ALERT_BOT_TOKEN ?? TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ALERT_LINK_TTL_HOURS = Number(process.env.TELEGRAM_ALERT_LINK_TTL_HOURS ?? 24);
+const SESSION_SHARE_TOKEN_TTL_DAYS = Number(process.env.SESSION_SHARE_TOKEN_TTL_DAYS ?? 0);
 const TELEGRAM_ALERT_REPLY_TTL_HOURS = Number(process.env.TELEGRAM_ALERT_REPLY_TTL_HOURS ?? 24);
 const TELEGRAM_ALERT_WEBHOOK_SECRET = process.env.TELEGRAM_ALERT_WEBHOOK_SECRET ?? '';
 const TEST_USER_ENABLED = process.env.TEST_USER_ENABLED ?? (process.env.NODE_ENV === 'production' ? 'false' : 'true');
@@ -265,6 +266,20 @@ async function initDb() {
   `);
   try {
     await pool.query('CREATE INDEX IF NOT EXISTS session_savers_user_idx ON session_savers (user_id)');
+  } catch {
+    // ignore
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS session_share_tokens (
+      session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ
+    );
+  `);
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS session_share_tokens_expires_idx ON session_share_tokens (expires_at)');
   } catch {
     // ignore
   }
@@ -797,6 +812,65 @@ const isSessionMember = async (sessionId, userId, ownerId) => {
   return res.rows.length > 0;
 };
 
+const resolveSessionShareTokenExpiresAt = () => {
+  if (!Number.isFinite(SESSION_SHARE_TOKEN_TTL_DAYS) || SESSION_SHARE_TOKEN_TTL_DAYS <= 0) return null;
+  return new Date(Date.now() + SESSION_SHARE_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
+};
+
+const hashSessionShareToken = (raw) => createHash('sha256').update(raw).digest('hex');
+
+async function upsertSessionShareToken({ sessionId, tokenHash, expiresAt }) {
+  const res = await pool.query(
+    `INSERT INTO session_share_tokens (session_id, token_hash, expires_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (session_id)
+     DO UPDATE SET token_hash = EXCLUDED.token_hash, expires_at = EXCLUDED.expires_at, created_at = NOW()
+     RETURNING session_id, token_hash, expires_at`,
+    [sessionId, tokenHash, expiresAt ?? null],
+  );
+  return res.rows[0] ?? null;
+}
+
+async function getSessionShareTokenByHash(tokenHash) {
+  const res = await pool.query(
+    'SELECT session_id, token_hash, expires_at FROM session_share_tokens WHERE token_hash = $1',
+    [tokenHash],
+  );
+  return res.rows[0] ?? null;
+}
+
+async function createSessionShareToken(sessionId) {
+  const rawToken = randomBytes(18).toString('hex');
+  const tokenHash = hashSessionShareToken(rawToken);
+  const expiresAt = resolveSessionShareTokenExpiresAt();
+  const row = await upsertSessionShareToken({ sessionId, tokenHash, expiresAt });
+  return row ? rawToken : null;
+}
+
+async function ensureSessionAccessForShareToken({ sessionId, token }) {
+  if (!token || !sessionId) return false;
+  const tokenHash = hashSessionShareToken(token);
+  const row = await getSessionShareTokenByHash(tokenHash);
+  if (!row) return false;
+  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+    await pool.query('DELETE FROM session_share_tokens WHERE token_hash = $1', [tokenHash]);
+    return false;
+  }
+  return row.session_id === sessionId;
+}
+
+async function resolveSessionIdFromShareToken(token) {
+  if (!token) return null;
+  const tokenHash = hashSessionShareToken(token);
+  const row = await getSessionShareTokenByHash(tokenHash);
+  if (!row) return null;
+  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+    await pool.query('DELETE FROM session_share_tokens WHERE token_hash = $1', [tokenHash]);
+    return null;
+  }
+  return row.session_id ?? null;
+}
+
 const resolveSessionAccess = async ({ sessionId, auth }) => {
   const session = await getSession(sessionId);
   if (!session) return { error: 'not_found' };
@@ -812,10 +886,19 @@ const resolveSessionAccessFromRequest = async ({ sessionId, req }) => {
   if (!session) return { error: 'not_found' };
   if (!isSessionRestricted(session)) return { session, access: 'public' };
   const auth = authUserFromRequest(req);
+  const shareToken = getShareTokenFromRequest(req);
   if (auth?.userId) {
     const member = await isSessionMember(sessionId, auth.userId, session.owner_id);
-    if (!member) return { error: 'forbidden' };
-    return { session, access: 'member' };
+    if (member) return { session, access: 'member' };
+    if (shareToken) {
+      const shareOk = await ensureSessionAccessForShareToken({ sessionId, token: shareToken });
+      if (shareOk) return { session, access: 'share' };
+    }
+    return { error: 'forbidden' };
+  }
+  if (shareToken) {
+    const shareOk = await ensureSessionAccessForShareToken({ sessionId, token: shareToken });
+    if (shareOk) return { session, access: 'share' };
   }
   const token = getBearerToken(req);
   if (!token) return { error: 'unauthorized' };
@@ -3677,6 +3760,7 @@ const sendDirectAlertToUser = async ({
 
 async function cleanupExpiredSessions() {
   await pool.query('DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= NOW()');
+  await pool.query('DELETE FROM session_share_tokens WHERE expires_at IS NOT NULL AND expires_at <= NOW()');
 }
 
 async function pinSession(sessionId) {
@@ -3790,6 +3874,17 @@ function getBearerToken(req) {
   const alt = req.headers?.['x-mcp-token'];
   if (typeof alt === 'string') return alt.trim();
   if (Array.isArray(alt) && alt.length) return String(alt[0]).trim();
+  return null;
+}
+
+function getShareTokenFromRequest(req) {
+  const header = req.headers?.['x-session-share'];
+  if (typeof header === 'string' && header.trim()) return header.trim();
+  if (Array.isArray(header) && header.length) return String(header[0]).trim();
+  const query = req.query ?? {};
+  const token = query.share ?? query.shareToken;
+  if (typeof token === 'string' && token.trim()) return token.trim();
+  if (Array.isArray(token) && token.length) return String(token[0]).trim();
   return null;
 }
 
@@ -5599,6 +5694,29 @@ app.get('/api/sessions/mine', async (req, res) => {
   });
 });
 
+app.get('/api/sessions/share/:token', async (req, res) => {
+  const rawToken = String(req.params.token ?? '').trim();
+  if (!rawToken) return res.status(400).json({ error: 'bad_token' });
+  const sessionId = await resolveSessionIdFromShareToken(rawToken);
+  if (!sessionId) return res.status(404).json({ error: 'not_found' });
+  const session = await getSession(sessionId);
+  if (!session) return res.status(404).json({ error: 'not_found' });
+  res.json({ sessionId });
+});
+
+app.post('/api/sessions/:id/share', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const access = await resolveSessionAccess({ sessionId: req.params.id, auth });
+  if (access.error === 'unauthorized') return res.status(401).json({ error: 'unauthorized' });
+  if (access.error === 'forbidden') return res.status(403).json({ error: 'forbidden' });
+  if (access.error === 'not_found') return res.status(404).json({ error: 'not_found' });
+  const rawToken = await createSessionShareToken(req.params.id);
+  if (!rawToken) return res.status(500).json({ error: 'share_token_failed' });
+  const url = `${getBaseUrl(req)}/?share=${encodeURIComponent(rawToken)}`;
+  res.json({ token: rawToken, url });
+});
+
 // Fast server-side clone: avoids uploading large session state from the client.
 app.post('/api/sessions/:id/clone', async (req, res) => {
   const auth = authUserFromRequest(req);
@@ -5765,14 +5883,13 @@ app.post('/api/attachments', async (req, res) => {
 });
 
 app.get('/api/attachments/:id', async (req, res) => {
-  const auth = authUserFromRequest(req);
   const id = String(req.params.id || '').trim();
   if (!id) return res.status(400).json({ error: 'bad_request' });
 
   const attachment = await getAttachmentById(id);
   if (!attachment) return res.status(404).json({ error: 'not_found' });
 
-  const access = await resolveSessionAccess({ sessionId: attachment.session_id, auth });
+  const access = await resolveSessionAccessFromRequest({ sessionId: attachment.session_id, req });
   if (access.error === 'unauthorized') return res.status(401).json({ error: 'unauthorized' });
   if (access.error === 'forbidden') return res.status(403).json({ error: 'forbidden' });
   if (access.error === 'not_found') return res.status(404).json({ error: 'not_found' });
@@ -5792,10 +5909,9 @@ app.get('/api/attachments/:id', async (req, res) => {
 });
 
 app.get('/api/sessions/:id/savers', async (req, res) => {
-  const auth = authUserFromRequest(req);
-  if (!auth) return res.status(401).json({ error: 'unauthorized' });
   const sessionId = req.params.id;
-  const access = await resolveSessionAccess({ sessionId, auth });
+  const access = await resolveSessionAccessFromRequest({ sessionId, req });
+  if (access.error === 'unauthorized') return res.status(401).json({ error: 'unauthorized' });
   if (access.error === 'forbidden') return res.status(403).json({ error: 'forbidden' });
   if (access.error === 'not_found') return res.status(404).json({ error: 'not_found' });
   const rows = await pool.query(
@@ -5959,6 +6075,7 @@ const ENTITY_COUNT_QUERIES = [
   { entity: 'users', sql: 'SELECT COUNT(*)::int AS count FROM users' },
   { entity: 'sessions', sql: 'SELECT COUNT(*)::int AS count FROM sessions' },
   { entity: 'session_savers', sql: 'SELECT COUNT(*)::int AS count FROM session_savers' },
+  { entity: 'session_share_tokens', sql: 'SELECT COUNT(*)::int AS count FROM session_share_tokens' },
   { entity: 'oauth_accounts', sql: 'SELECT COUNT(*)::int AS count FROM oauth_accounts' },
   { entity: 'alerting_settings', sql: 'SELECT COUNT(*)::int AS count FROM alerting_settings' },
   { entity: 'telegram_alert_links', sql: 'SELECT COUNT(*)::int AS count FROM telegram_alert_links' },
@@ -6137,6 +6254,12 @@ function getMcpTokenFromWsRequest(req, url) {
   return null;
 }
 
+function getShareTokenFromWsRequest(url) {
+  const queryToken = url?.searchParams?.get('shareToken') || url?.searchParams?.get('share');
+  if (typeof queryToken === 'string' && queryToken.trim()) return queryToken.trim();
+  return null;
+}
+
 function guestNameFromClientId(clientId) {
   if (!clientId || typeof clientId !== 'string') return 'Guest';
   return `Guest ${clientId.slice(0, 4)}`;
@@ -6195,6 +6318,7 @@ wss.on('connection', async (ws, req) => {
   const sessionId = url.searchParams.get('sessionId');
   const clientId = url.searchParams.get('clientId');
   const mcpToken = getMcpTokenFromWsRequest(req, url);
+  const shareToken = getShareTokenFromWsRequest(url);
   let mcpInfo = null;
   if (mcpToken) {
     const info = await resolveMcpTokenInfo(mcpToken);
@@ -6214,24 +6338,22 @@ wss.on('connection', async (ws, req) => {
   const connId = randomUUID();
   const auth = authUserFromCookieHeader(req.headers.cookie);
   if (isSessionRestricted(session)) {
+    let allowed = false;
     if (auth?.userId) {
-      const member = await isSessionMember(sessionId, auth.userId, session.owner_id);
-      if (!member) {
-        ws.close(1008, 'forbidden');
-        return;
-      }
-    } else if (mcpInfo) {
-      const accessOk = await ensureSessionAccessForUser({
+      allowed = await isSessionMember(sessionId, auth.userId, session.owner_id);
+    }
+    if (!allowed && shareToken) {
+      allowed = await ensureSessionAccessForShareToken({ sessionId, token: shareToken });
+    }
+    if (!allowed && mcpInfo) {
+      allowed = await ensureSessionAccessForUser({
         session,
         userId: mcpInfo.userId ?? null,
         allowTech: mcpInfo.kind === 'tech',
       });
-      if (!accessOk) {
-        ws.close(1008, 'forbidden');
-        return;
-      }
-    } else {
-      ws.close(1008, 'unauthorized');
+    }
+    if (!allowed) {
+      ws.close(1008, auth?.userId ? 'forbidden' : 'unauthorized');
       return;
     }
   }
