@@ -692,6 +692,26 @@ export function useSessionSync() {
           return;
         }
 
+        if (msg?.type === 'assistant_update') {
+          const detail = {
+            threadId: typeof msg?.threadId === 'string' ? msg.threadId : null,
+            message: msg?.message ?? null,
+            context: msg?.context ?? null,
+          };
+          window.dispatchEvent(new CustomEvent('assistant-update', { detail }));
+          return;
+        }
+
+        if (msg?.type === 'assistant_status') {
+          const detail = {
+            threadId: typeof msg?.threadId === 'string' ? msg.threadId : null,
+            status: typeof msg?.status === 'string' ? msg.status : null,
+            reason: typeof msg?.reason === 'string' ? msg.reason : null,
+          };
+          window.dispatchEvent(new CustomEvent('assistant-status', { detail }));
+          return;
+        }
+
         if (msg?.type === 'session_meta') {
           const meta = normalizeSessionMeta(msg?.meta);
           if (meta) setSessionMeta(meta);

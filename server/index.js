@@ -38,6 +38,7 @@ const TELEGRAM_AUTH_BOT_TOKEN = process.env.TELEGRAM_AUTH_BOT_TOKEN ?? TELEGRAM_
 const TELEGRAM_ALERT_BOT_USERNAME = process.env.TELEGRAM_ALERT_BOT_USERNAME ?? TELEGRAM_BOT_USERNAME;
 const TELEGRAM_ALERT_BOT_TOKEN = process.env.TELEGRAM_ALERT_BOT_TOKEN ?? TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ALERT_LINK_TTL_HOURS = Number(process.env.TELEGRAM_ALERT_LINK_TTL_HOURS ?? 24);
+const TELEGRAM_ALERT_REPLY_TTL_HOURS = Number(process.env.TELEGRAM_ALERT_REPLY_TTL_HOURS ?? 24);
 const TELEGRAM_ALERT_WEBHOOK_SECRET = process.env.TELEGRAM_ALERT_WEBHOOK_SECRET ?? '';
 const TEST_USER_ENABLED = process.env.TEST_USER_ENABLED ?? (process.env.NODE_ENV === 'production' ? 'false' : 'true');
 const TEST_USER_EMAIL = process.env.TEST_USER_EMAIL ?? '';
@@ -344,6 +345,43 @@ async function initDb() {
   } catch {
     // ignore
   }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS telegram_alert_messages (
+      id TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL,
+      sender_user_id TEXT NOT NULL,
+      recipient_user_id TEXT NOT NULL,
+      session_id TEXT,
+      message TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS telegram_alert_messages_chat_idx ON telegram_alert_messages (chat_id)');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS telegram_alert_messages_sender_idx ON telegram_alert_messages (sender_user_id)');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS telegram_alert_messages_recipient_idx ON telegram_alert_messages (recipient_user_id)');
+  } catch {
+    // ignore
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS telegram_alert_reply_pending (
+      chat_id TEXT PRIMARY KEY,
+      alert_id TEXT NOT NULL REFERENCES telegram_alert_messages(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ
+    );
+  `);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS email_verification_tokens (
@@ -1218,6 +1256,13 @@ const resolveTelegramLinkExpiry = () => {
   return new Date(Date.now() + hours * 60 * 60 * 1000);
 };
 
+const resolveTelegramReplyExpiry = () => {
+  const hours = Number.isFinite(TELEGRAM_ALERT_REPLY_TTL_HOURS) && TELEGRAM_ALERT_REPLY_TTL_HOURS > 0
+    ? TELEGRAM_ALERT_REPLY_TTL_HOURS
+    : 24;
+  return new Date(Date.now() + hours * 60 * 60 * 1000);
+};
+
 const sanitizeWebhookUrl = (value) => {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -1455,6 +1500,112 @@ async function listTelegramAlertLinksByUserIds(userIds) {
     map.set(row.user_id, row.chat_id);
   }
   return map;
+}
+
+async function createTelegramAlertMessage({
+  id,
+  chatId,
+  senderUserId,
+  recipientUserId,
+  sessionId,
+  message,
+}) {
+  if (!id || !chatId || !senderUserId || !recipientUserId || !message) return null;
+  const res = await pool.query(
+    `INSERT INTO telegram_alert_messages (id, chat_id, sender_user_id, recipient_user_id, session_id, message)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id, chat_id, sender_user_id, recipient_user_id, session_id, message, created_at`,
+    [id, chatId, senderUserId, recipientUserId, sessionId ?? null, message],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    chatId: row.chat_id,
+    senderUserId: row.sender_user_id,
+    recipientUserId: row.recipient_user_id,
+    sessionId: row.session_id ?? null,
+    message: row.message,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+  };
+}
+
+async function deleteTelegramAlertMessage(alertId) {
+  if (!alertId) return;
+  await pool.query('DELETE FROM telegram_alert_messages WHERE id = $1', [alertId]);
+}
+
+async function getTelegramAlertMessage(alertId) {
+  if (!alertId) return null;
+  const res = await pool.query(
+    `SELECT id, chat_id, sender_user_id, recipient_user_id, session_id, message, created_at
+       FROM telegram_alert_messages
+      WHERE id = $1`,
+    [alertId],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    chatId: row.chat_id,
+    senderUserId: row.sender_user_id,
+    recipientUserId: row.recipient_user_id,
+    sessionId: row.session_id ?? null,
+    message: row.message,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+  };
+}
+
+async function upsertTelegramAlertReplyPending({ chatId, alertId, expiresAt }) {
+  if (!chatId || !alertId) return null;
+  const res = await pool.query(
+    `INSERT INTO telegram_alert_reply_pending (chat_id, alert_id, expires_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (chat_id) DO UPDATE
+       SET alert_id = EXCLUDED.alert_id,
+           expires_at = EXCLUDED.expires_at,
+           updated_at = NOW()
+     RETURNING chat_id, alert_id, created_at, updated_at, expires_at`,
+    [chatId, alertId, expiresAt ?? null],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return {
+    chatId: row.chat_id,
+    alertId: row.alert_id,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+    expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+  };
+}
+
+async function getTelegramAlertReplyPending(chatId) {
+  if (!chatId) return null;
+  const res = await pool.query(
+    `SELECT chat_id, alert_id, created_at, updated_at, expires_at
+       FROM telegram_alert_reply_pending
+      WHERE chat_id = $1`,
+    [chatId],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  const expiresAt = row.expires_at ? new Date(row.expires_at) : null;
+  if (expiresAt && expiresAt.getTime() <= Date.now()) {
+    await clearTelegramAlertReplyPending(chatId);
+    return null;
+  }
+  return {
+    chatId: row.chat_id,
+    alertId: row.alert_id,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+    expiresAt: expiresAt ? expiresAt.toISOString() : null,
+  };
+}
+
+async function clearTelegramAlertReplyPending(chatId) {
+  if (!chatId) return;
+  await pool.query('DELETE FROM telegram_alert_reply_pending WHERE chat_id = $1', [chatId]);
 }
 
 async function listUsersByIds(ids) {
@@ -1701,11 +1852,29 @@ const normalizeAssistantMessageMeta = (value) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const selectionContext = normalizeSelectionContext(value.selectionContext ?? value.selection ?? value);
   const trace = normalizeAssistantTrace(value.trace);
-  if (!selectionContext && !trace) return null;
+  const externalReply = value.externalReply === true;
+  const externalSender = typeof value.externalSender === 'string' ? value.externalSender.trim() : '';
+  const externalChannel = typeof value.externalChannel === 'string' ? value.externalChannel.trim() : '';
+  if (!selectionContext && !trace && !externalReply) return null;
   const meta = {};
   if (selectionContext) meta.selectionContext = selectionContext;
   if (trace) meta.trace = trace;
+  if (externalReply) {
+    meta.externalReply = true;
+    if (externalSender) meta.externalSender = externalSender;
+    if (externalChannel) meta.externalChannel = externalChannel;
+  }
   return meta;
+};
+
+const isExternalReplyMessage = (message) => {
+  if (!message || typeof message !== 'object') return false;
+  if (message.meta?.externalReply) return true;
+  if (message.role !== 'user') return false;
+  const content = typeof message.content === 'string' ? message.content : '';
+  return content.startsWith('Пользователь ')
+    && content.includes(' ответил на сообщение ')
+    && content.includes(' текстом: ');
 };
 
 const formatSelectionContextForAgent = (selectionContext) => {
@@ -1919,6 +2088,26 @@ async function getAssistantThread(userId, threadId) {
     [threadId, userId],
   );
   return res.rows[0] ? serializeAssistantThreadRow(res.rows[0]) : null;
+}
+
+async function getAssistantThreadBySession(userId, sessionId) {
+  if (!sessionId) return null;
+  const res = await pool.query(
+    `SELECT id, user_id, session_id, title, created_at, updated_at, last_message_at
+       FROM assistant_threads
+      WHERE user_id = $1 AND session_id = $2
+      ORDER BY updated_at DESC NULLS LAST, created_at DESC
+      LIMIT 1`,
+    [userId, sessionId],
+  );
+  return res.rows[0] ? serializeAssistantThreadRow(res.rows[0]) : null;
+}
+
+async function getOrCreateAssistantThreadForSession({ userId, sessionId, title }) {
+  if (!userId || !sessionId) return null;
+  const existing = await getAssistantThreadBySession(userId, sessionId);
+  if (existing) return existing;
+  return createAssistantThread({ userId, sessionId, title });
 }
 
 async function listAssistantMessages(threadId, limit = ASSISTANT_CONTEXT_LIMIT) {
@@ -3125,13 +3314,147 @@ const sendAlertEmail = async ({ to, subject, text, html }) => {
   return true;
 };
 
+const TELEGRAM_MESSAGE_LIMIT = 4096;
+
+const htmlToPlainText = (value) => {
+  let text = String(value ?? '');
+  text = text.replace(/<a\s+[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gi, (_match, href, label) => (
+    label ? `${label} (${href})` : href
+  ));
+  text = text.replace(/<br\s*\/?>/gi, '\n');
+  text = text.replace(/<\/p>/gi, '\n');
+  text = text.replace(/<[^>]*>/g, '');
+  return text;
+};
+
+const splitTextIntoSentences = (text) => {
+  const safeText = String(text ?? '');
+  if (!safeText) return [];
+  if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+    const segmenter = new Intl.Segmenter('ru', { granularity: 'sentence' });
+    const segments = Array.from(segmenter.segment(safeText))
+      .map((seg) => seg.segment)
+      .filter((seg) => seg && seg.trim());
+    if (segments.length) return segments;
+  }
+  const matches = safeText.match(/[^.!?\n]+[.!?…]+(?:["'”»)]*)|\S+$/g);
+  return matches && matches.length ? matches : [safeText];
+};
+
+const splitLongSegment = (segment, limit) => {
+  const parts = [];
+  const tokens = segment.match(/\S+\s*/g) ?? [segment];
+  let buffer = '';
+  for (const tokenRaw of tokens) {
+    const token = buffer ? tokenRaw : tokenRaw.trimStart();
+    if (!token) continue;
+    if (token.length > limit) {
+      if (buffer) {
+        parts.push(buffer);
+        buffer = '';
+      }
+      for (let idx = 0; idx < token.length; idx += limit) {
+        parts.push(token.slice(idx, idx + limit));
+      }
+      continue;
+    }
+    if (buffer.length + token.length > limit) {
+      if (buffer) parts.push(buffer);
+      buffer = token;
+      continue;
+    }
+    buffer += token;
+  }
+  if (buffer) parts.push(buffer);
+  return parts;
+};
+
+const splitTextIntoTelegramChunks = (text, limit) => {
+  const sentences = splitTextIntoSentences(text);
+  const chunks = [];
+  let buffer = '';
+  for (const sentence of sentences) {
+    const trimmed = sentence.trim();
+    if (!trimmed) continue;
+    if (trimmed.length > limit) {
+      const parts = splitLongSegment(trimmed, limit);
+      for (const part of parts) {
+        if (!part) continue;
+        if (buffer) {
+          chunks.push(buffer);
+          buffer = '';
+        }
+        chunks.push(part);
+      }
+      continue;
+    }
+    const next = buffer ? `${buffer} ${trimmed}` : trimmed;
+    if (next.length > limit) {
+      if (buffer) chunks.push(buffer);
+      buffer = trimmed;
+      continue;
+    }
+    buffer = next;
+  }
+  if (buffer) chunks.push(buffer);
+  return chunks.length ? chunks : [String(text ?? '')];
+};
+
+const buildTelegramMessageParts = ({ text, parseMode }) => {
+  const rawText = typeof text === 'string' ? text : String(text ?? '');
+  let effectiveText = rawText;
+  let effectiveParseMode = parseMode;
+  if (rawText.length > TELEGRAM_MESSAGE_LIMIT && parseMode === 'HTML') {
+    effectiveText = htmlToPlainText(rawText);
+    effectiveParseMode = undefined;
+  }
+  const chunks = effectiveText.length > TELEGRAM_MESSAGE_LIMIT
+    ? splitTextIntoTelegramChunks(effectiveText, TELEGRAM_MESSAGE_LIMIT)
+    : [effectiveText];
+  return chunks.map((chunk) => ({
+    text: chunk,
+    parseMode: effectiveParseMode,
+  }));
+};
+
 const sendTelegramAlertMessage = async ({ chatId, text, replyMarkup, parseMode }) => {
   if (!TELEGRAM_ALERT_BOT_TOKEN) return false;
   const url = `https://api.telegram.org/bot${TELEGRAM_ALERT_BOT_TOKEN}/sendMessage`;
-  const payload = { chat_id: chatId, text };
-  if (replyMarkup) payload.reply_markup = replyMarkup;
-  if (parseMode) payload.parse_mode = parseMode;
-  payload.disable_web_page_preview = true;
+  const parts = buildTelegramMessageParts({ text, parseMode });
+  let allOk = true;
+  for (let idx = 0; idx < parts.length; idx += 1) {
+    const part = parts[idx];
+    const payload = { chat_id: chatId, text: part.text };
+    if (replyMarkup && idx === 0) payload.reply_markup = replyMarkup;
+    if (part.parseMode) payload.parse_mode = part.parseMode;
+    payload.disable_web_page_preview = true;
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+      ALERT_WEBHOOK_TIMEOUT_MS,
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.warn('[telegram] send_failed', {
+        status: res.status,
+        body: body ? body.slice(0, 500) : null,
+      });
+      allOk = false;
+      break;
+    }
+  }
+  return allOk;
+};
+
+const answerTelegramAlertCallback = async ({ callbackQueryId, text }) => {
+  if (!TELEGRAM_ALERT_BOT_TOKEN || !callbackQueryId) return false;
+  const url = `https://api.telegram.org/bot${TELEGRAM_ALERT_BOT_TOKEN}/answerCallbackQuery`;
+  const payload = { callback_query_id: callbackQueryId };
+  if (text) payload.text = text;
   const res = await fetchWithTimeout(
     url,
     {
@@ -3144,8 +3467,8 @@ const sendTelegramAlertMessage = async ({ chatId, text, replyMarkup, parseMode }
   return res.ok;
 };
 
-const sendAlertTelegram = async ({ chatId, text, parseMode }) => (
-  sendTelegramAlertMessage({ chatId, text, parseMode })
+const sendAlertTelegram = async ({ chatId, text, parseMode, replyMarkup }) => (
+  sendTelegramAlertMessage({ chatId, text, parseMode, replyMarkup })
 );
 
 const sendAlertWebhook = async ({ url, payload }) => {
@@ -3253,7 +3576,14 @@ const dispatchAlertEvents = async (alerts) => {
   }
 };
 
-const sendDirectAlertToUser = async ({ userId, sessionId, sessionName, message, actor }) => {
+const sendDirectAlertToUser = async ({
+  userId,
+  sessionId,
+  sessionName,
+  message,
+  actor,
+  senderUserId,
+}) => {
   if (!userId || !message) return { delivered: { email: false, telegram: false, webhook: false } };
   const [settings, user, telegramLink] = await Promise.all([
     getAlertingSettings(userId),
@@ -3291,11 +3621,40 @@ const sendDirectAlertToUser = async ({ userId, sessionId, sessionName, message, 
   if (settings.channels?.telegram?.enabled && chatId) {
     tasks.push((async () => {
       try {
+        const resolvedSender = senderUserId || actor?.id || null;
+        let alertId = null;
+        let replyMarkup = null;
+        if (resolvedSender) {
+          const nextId = randomUUID();
+          try {
+            await createTelegramAlertMessage({
+              id: nextId,
+              chatId,
+              senderUserId: resolvedSender,
+              recipientUserId: user.id,
+              sessionId,
+              message,
+            });
+            alertId = nextId;
+            replyMarkup = { inline_keyboard: [[{ text: 'Ответить', callback_data: `alert_reply:${alertId}` }]] };
+          } catch (err) {
+            console.warn('[alerting] telegram reply tracking failed', err?.message ?? err);
+          }
+        }
         delivered.telegram = await sendAlertTelegram({
           chatId,
           text: messagePayload.telegram?.text ?? messagePayload.text,
           parseMode: messagePayload.telegram?.parseMode,
+          replyMarkup,
         });
+        if (alertId) {
+          if (delivered.telegram) {
+            const expiresAt = resolveTelegramReplyExpiry();
+            await upsertTelegramAlertReplyPending({ chatId, alertId, expiresAt });
+          } else {
+            await deleteTelegramAlertMessage(alertId);
+          }
+        }
       } catch (err) {
         console.warn('[alerting] direct telegram failed', err?.message ?? err);
       }
@@ -3863,19 +4222,207 @@ app.post('/api/integrations/telegram/webhook', async (req, res) => {
     }
   }
   const update = req.body ?? {};
-  const message = update.message || update.edited_message || update.callback_query?.message || null;
+  const callback = update.callback_query ?? null;
+  if (callback && typeof callback.data === 'string') {
+    const data = callback.data.trim();
+    if (data.startsWith('alert_reply:')) {
+      const chatId = normalizeTelegramChatId(callback.message?.chat?.id ?? null);
+      const alertId = data.slice('alert_reply:'.length).trim();
+      if (!chatId || !alertId) {
+        await answerTelegramAlertCallback({ callbackQueryId: callback.id, text: 'Не удалось открыть ответ.' }).catch(() => {});
+        return res.json({ ok: true });
+      }
+      const alert = await getTelegramAlertMessage(alertId);
+      if (!alert || alert.chatId !== chatId) {
+        await answerTelegramAlertCallback({ callbackQueryId: callback.id, text: 'Не удалось найти сообщение для ответа.' }).catch(() => {});
+        return res.json({ ok: true });
+      }
+      const expiresAt = resolveTelegramReplyExpiry();
+      await upsertTelegramAlertReplyPending({ chatId, alertId: alert.id, expiresAt });
+      const snippet = snippetText(alert.message, 240);
+      const promptLines = ['Напишите ответ для Raven.'];
+      if (snippet) promptLines.push(`Сообщение: "${snippet}"`);
+      await sendTelegramAlertMessage({
+        chatId,
+        text: promptLines.join('\n'),
+      }).catch(() => {});
+      await answerTelegramAlertCallback({ callbackQueryId: callback.id }).catch(() => {});
+      return res.json({ ok: true });
+    }
+  }
+
+  const message = update.message || update.edited_message || null;
   const chatIdRaw = message?.chat?.id ?? null;
   const chatId = normalizeTelegramChatId(chatIdRaw);
   if (!chatId) return res.json({ ok: true });
 
-  const textRaw = typeof update.message?.text === 'string'
-    ? update.message.text
-    : typeof update.edited_message?.text === 'string'
-      ? update.edited_message.text
-      : typeof update.callback_query?.data === 'string'
-        ? update.callback_query.data
-        : '';
+  const textRaw = typeof message?.text === 'string' ? message.text : '';
   const text = String(textRaw || '').trim();
+  const pending = await getTelegramAlertReplyPending(chatId);
+  if (pending && text && !text.startsWith('/')) {
+    const alert = await getTelegramAlertMessage(pending.alertId);
+    if (!alert || alert.chatId !== chatId) {
+      await clearTelegramAlertReplyPending(chatId);
+      await sendTelegramAlertMessage({
+        chatId,
+        text: 'Не удалось найти исходное сообщение. Попробуйте нажать кнопку ответа снова.',
+      }).catch(() => {});
+      return res.json({ ok: true });
+    }
+    const responder = await getUserById(alert.recipientUserId);
+    const responderLabel = responder?.name || responder?.email || alert.recipientUserId || 'Пользователь';
+    const originalSnippet = snippetText(alert.message, 500);
+    const replySnippet = snippetText(text, 500);
+    const replyMessage = `Пользователь ${responderLabel} ответил на сообщение "${originalSnippet}" текстом: "${replySnippet}"`;
+    const senderUser = alert.senderUserId ? await getUserById(alert.senderUserId) : null;
+    if (!senderUser) {
+      await clearTelegramAlertReplyPending(chatId);
+      await sendTelegramAlertMessage({
+        chatId,
+        text: 'Не удалось найти получателя ответа. Попробуйте позже.',
+      }).catch(() => {});
+      return res.json({ ok: true });
+    }
+    const thread = await getOrCreateAssistantThreadForSession({
+      userId: senderUser.id,
+      sessionId: alert.sessionId,
+      title: null,
+    });
+    if (!thread) {
+      await sendTelegramAlertMessage({
+        chatId,
+        text: 'Не удалось передать ответ. Попробуйте позже.',
+      }).catch(() => {});
+      return res.json({ ok: true });
+    }
+    await clearTelegramAlertReplyPending(chatId);
+    await sendTelegramAlertMessage({
+      chatId,
+      text: 'Спасибо! Ответ передан Raven.',
+    }).catch(() => {});
+    await insertAssistantMessage({
+      threadId: thread.id,
+      role: 'user',
+      content: replyMessage,
+      meta: {
+        externalReply: true,
+        externalSender: responderLabel,
+        externalChannel: 'telegram',
+      },
+    });
+    sendAssistantStatusToUser({
+      sessionId: alert.sessionId,
+      userId: senderUser.id,
+      threadId: thread.id,
+      status: 'thinking',
+      reason: 'external_reply',
+    });
+    void (async () => {
+      try {
+        const keyRow = await getOpenAiKeyForUser(senderUser.id);
+        const apiKey = keyRow?.api_key ?? OPENAI_API_KEY;
+        if (!apiKey) {
+          console.warn('[telegram] reply ignored: missing_openai_key', senderUser.id);
+          return;
+        }
+        const aiSettings = await getRavenAiSettings(senderUser.id);
+        const resolvedAi = resolveRavenAiSettings(aiSettings);
+        const { items: inputItems } = await buildAssistantContext({
+          threadId: thread.id,
+          userId: senderUser.id,
+          apiKey,
+          model: resolvedAi.model,
+          openaiBaseUrl: resolvedAi.baseUrl,
+        });
+        const assistantResult = await runAssistantTurn({
+          apiKey,
+          sessionId: alert.sessionId,
+          userName: senderUser.name ?? null,
+          userId: senderUser.id,
+          inputItems,
+          model: resolvedAi.model,
+          openaiBaseUrl: resolvedAi.baseUrl,
+          webSearchEnabled: resolvedAi.webSearchEnabled,
+        });
+        const assistantText = assistantResult?.output ?? '';
+        const reply = assistantText || 'No response returned.';
+        const assistantTrace = assistantResult?.trace ? { trace: assistantResult.trace } : null;
+        const assistantMessage = await insertAssistantMessage({
+          threadId: thread.id,
+          role: 'assistant',
+          content: reply,
+          meta: assistantTrace,
+        });
+        sendAssistantUpdateToUser({
+          sessionId: alert.sessionId,
+          userId: senderUser.id,
+          threadId: thread.id,
+          message: assistantMessage,
+          context: assistantResult?.context ?? null,
+        });
+        void notifyAgentReply({
+          userId: senderUser.id,
+          sessionId: alert.sessionId ?? null,
+          message: reply,
+        }).catch((err) => {
+          console.warn('[alerting] agent reply failed', err?.message ?? err);
+        });
+        let context = assistantResult?.context ?? null;
+        if (!context) {
+          const contextItems = inputItems.concat({ role: 'assistant', content: reply });
+          context = await callAgentContext({
+            model: resolvedAi.model,
+            input: contextItems,
+            userName: senderUser.name ?? null,
+          }).catch(() => null);
+        }
+        if (context) {
+          void upsertAssistantContext({ threadId: thread.id, context }).catch((err) => {
+            console.warn('[assistant] context_upsert_failed', err?.message ?? err);
+          });
+          const remainingRatio = Number.isFinite(context?.remainingRatio) ? context.remainingRatio : null;
+          if (remainingRatio !== null && remainingRatio <= getSummaryRemainingRatio()) {
+            scheduleSummaryRefresh({
+              threadId: thread.id,
+              apiKey,
+              remainingRatio,
+              openaiBaseUrl: resolvedAi.baseUrl,
+              model: resolvedAi.model,
+            });
+          }
+        }
+        if (replyMessage && reply) {
+          await addAssistantMemory({
+            threadId: thread.id,
+            userId: senderUser.id,
+            apiKey,
+            userText: replyMessage,
+            assistantText: reply,
+            openaiBaseUrl: resolvedAi.baseUrl,
+          });
+        }
+        if (keyRow) {
+          await touchOpenAiKey(senderUser.id);
+        }
+        logAssistantEvent('telegram_reply_processed', {
+          userId: senderUser.id,
+          threadId: thread.id,
+          assistantMessageId: assistantMessage?.id ?? null,
+        });
+      } catch (err) {
+        console.warn('[telegram] reply processing failed', err?.message ?? err);
+      } finally {
+        sendAssistantStatusToUser({
+          sessionId: alert.sessionId,
+          userId: senderUser.id,
+          threadId: thread.id,
+          status: 'idle',
+          reason: 'external_reply',
+        });
+      }
+    })();
+    return res.json({ ok: true });
+  }
   const connectLabel = 'Подключить уведомления';
   const disconnectLabel = 'Отписаться от уведомлений';
   const existingLink = await getTelegramAlertLinkByChatId(chatId);
@@ -3997,7 +4544,7 @@ app.post('/api/assistant/threads', async (req, res) => {
   if (!sessionId) return res.status(400).json({ error: 'session_required' });
   const rawTitle = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
   const title = rawTitle ? rawTitle.slice(0, 120) : null;
-  const thread = await createAssistantThread({
+  const thread = await getOrCreateAssistantThreadForSession({
     userId: auth.userId,
     sessionId,
     title,
@@ -4035,7 +4582,8 @@ app.get('/api/assistant/threads/:id/messages', async (req, res) => {
   const rawLimit = req.query?.limit;
   const parsedLimit = typeof rawLimit === 'string' ? Number(rawLimit) : Number(rawLimit ?? NaN);
   const limit = Number.isFinite(parsedLimit) ? parsedLimit : ASSISTANT_CONTEXT_LIMIT;
-  const messages = await listAssistantMessages(threadId, limit);
+  const messages = (await listAssistantMessages(threadId, limit))
+    .filter((msg) => !isExternalReplyMessage(msg));
   const aiSettings = await getRavenAiSettings(auth.userId);
   const resolvedAi = resolveRavenAiSettings(aiSettings);
   let context = await getAssistantContext(threadId);
@@ -4439,6 +4987,21 @@ app.post('/api/integrations/mcp/alert', async (req, res) => {
   const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
   if (!message) return res.status(400).json({ error: 'message_required' });
 
+  const senderUserIdRaw = typeof req.body?.senderUserId === 'string' ? req.body.senderUserId.trim() : '';
+  let senderUserId = null;
+  if (senderUserIdRaw) {
+    if (info?.kind === 'tech') {
+      senderUserId = senderUserIdRaw;
+    } else if (info?.userId && senderUserIdRaw === info.userId) {
+      senderUserId = senderUserIdRaw;
+    }
+  }
+  let senderUser = null;
+  if (senderUserId) {
+    senderUser = await getUserById(senderUserId);
+    if (!senderUser) senderUserId = null;
+  }
+
   const resolved = await resolveSessionParticipantId({ sessionId, userRef });
   if (resolved?.error === 'participant_ambiguous') {
     return res.status(409).json({ error: 'participant_ambiguous' });
@@ -4446,13 +5009,16 @@ app.post('/api/integrations/mcp/alert', async (req, res) => {
   if (!resolved?.userId) return res.status(404).json({ error: 'participant_not_found' });
   const userId = resolved.userId;
 
-  const actor = info?.user ? { id: info.user.id, name: info.user.name } : null;
+  const actor = senderUser
+    ? { id: senderUser.id, name: senderUser.name }
+    : (info?.user ? { id: info.user.id, name: info.user.name } : null);
   const result = await sendDirectAlertToUser({
     userId,
     sessionId,
     sessionName: session?.name ?? null,
     message,
     actor,
+    senderUserId,
   });
   res.json({
     ok: true,
@@ -5480,6 +6046,26 @@ function sendCanvasViewToUser(sessionId, userId, message) {
 
 function sendSnapshotRequestToUser(sessionId, userId, message) {
   return sendToUser(sessionId, userId, message, 'mcp-snapshot');
+}
+
+function sendAssistantUpdateToUser({ sessionId, userId, threadId, message, context }) {
+  if (!sessionId || !userId || !message) return 0;
+  return sendToUser(sessionId, userId, {
+    type: 'assistant_update',
+    threadId: threadId ?? null,
+    message,
+    context: context ?? null,
+  }, 'assistant-update');
+}
+
+function sendAssistantStatusToUser({ sessionId, userId, threadId, status, reason }) {
+  if (!sessionId || !userId || !status) return 0;
+  return sendToUser(sessionId, userId, {
+    type: 'assistant_status',
+    threadId: threadId ?? null,
+    status,
+    reason: reason ?? null,
+  }, 'assistant-status');
 }
 
 function requestCanvasSnapshot(sessionId, userId, options = {}) {
