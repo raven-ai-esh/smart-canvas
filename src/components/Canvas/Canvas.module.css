@@ -50,6 +50,268 @@
     background-size: 50px 50px;
 }
 
+.ganttGrid {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    opacity: 0.2;
+    background-image:
+        linear-gradient(90deg, rgba(255, 255, 255, 0.12) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.24) 1.5px, transparent 1.5px),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+    background-repeat: repeat;
+}
+
+.ganttParking {
+    position: absolute;
+    top: 0;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(0, 0, 0, 0.08) 100%);
+    border-right: 1px dashed rgba(255, 255, 255, 0.2);
+    opacity: 0.8;
+}
+
+.ganttToday {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--accent-primary);
+    opacity: 0.65;
+    pointer-events: none;
+    box-shadow: 0 0 12px rgba(94, 129, 172, 0.45);
+}
+
+.ganttHeader {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 34px;
+    pointer-events: none;
+    z-index: 1200;
+    background: linear-gradient(180deg, rgba(10, 10, 14, 0.75) 0%, rgba(10, 10, 14, 0.2) 100%);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(6px);
+}
+
+.ganttHeaderTick {
+    position: absolute;
+    top: 8px;
+    transform: translateX(-50%);
+    font-size: 11px;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.ganttParkingLabel {
+    position: absolute;
+    top: 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.ganttBar {
+    position: absolute;
+    border-radius: 12px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-node);
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    padding: 0 12px;
+    font-size: 12px;
+    letter-spacing: 0.01em;
+    box-shadow: 0 0 16px var(--gantt-glow, rgba(255, 255, 255, 0.2));
+    transition: box-shadow 160ms ease, border-color 160ms ease, transform 160ms ease;
+    cursor: pointer;
+}
+
+.ganttBarUndated {
+    border-style: dashed;
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.ganttBarSelected {
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 18px rgba(94, 129, 172, 0.6);
+}
+
+.ganttBarFill {
+    position: absolute;
+    inset: 0;
+    background: var(--gantt-fill, rgba(255, 255, 255, 0.2));
+    opacity: 0.18;
+    pointer-events: none;
+    z-index: 0;
+}
+
+.ganttBarContent {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.ganttBarMetaRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ganttBarPeople {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ganttAvatar {
+    width: 20px;
+    height: 20px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 600;
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    text-transform: uppercase;
+}
+
+.ganttAvatarMore {
+    background: rgba(255, 255, 255, 0.2);
+    color: var(--text-primary);
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+.ganttBarTitle {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+}
+
+.ganttBarMeta {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.ganttHandle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 12px;
+    cursor: ew-resize;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0));
+    opacity: 0.6;
+    transition: opacity 120ms ease;
+    z-index: 2;
+}
+
+.ganttHandleEnd {
+    left: auto;
+    right: 0;
+    background: linear-gradient(270deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0));
+}
+
+.ganttBar:hover .ganttHandle {
+    opacity: 1;
+}
+
+.ganttEdge {
+    fill: none;
+    stroke-width: 2;
+    opacity: 0.75;
+    pointer-events: stroke;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    filter: drop-shadow(0 0 6px rgba(0, 0, 0, 0.35));
+}
+
+.ganttEdgeSelected {
+    stroke-width: 3;
+    opacity: 1;
+}
+
+.ganttDetailPanel {
+    position: absolute;
+    top: 70px;
+    right: 24px;
+    z-index: 2100;
+    pointer-events: auto;
+}
+
+.ganttDetailClose {
+    position: absolute;
+    top: -10px;
+    right: -10px;
+    width: 26px;
+    height: 26px;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-node);
+    color: var(--text-primary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+}
+
+:global(body.light-theme) .ganttGrid {
+    background-image:
+        linear-gradient(90deg, rgba(0, 0, 0, 0.12) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 0, 0, 0.22) 1.5px, transparent 1.5px),
+        linear-gradient(180deg, rgba(0, 0, 0, 0.08) 1px, transparent 1px);
+}
+
+:global(body.light-theme) .ganttParking {
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.04) 0%, rgba(0, 0, 0, 0.1) 100%);
+    border-right: 1px dashed rgba(0, 0, 0, 0.18);
+}
+
+:global(body.light-theme) .ganttHeader {
+    background: linear-gradient(180deg, rgba(248, 248, 252, 0.92) 0%, rgba(248, 248, 252, 0.6) 100%);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+:global(body.light-theme) .ganttToday {
+    box-shadow: 0 0 10px rgba(46, 52, 64, 0.35);
+}
+
+:global(body.light-theme) .ganttBar {
+    background: rgba(255, 255, 255, 0.92);
+}
+
+:global(body.light-theme) .ganttBarUndated {
+    background: rgba(255, 255, 255, 0.75);
+}
+
+:global(body.light-theme) .ganttAvatar {
+    color: #fff;
+}
+
+:global(body.light-theme) .ganttHandle {
+    background: linear-gradient(90deg, rgba(0, 0, 0, 0.2), rgba(0, 0, 0, 0));
+}
+
+:global(body.light-theme) .ganttHandleEnd {
+    background: linear-gradient(270deg, rgba(0, 0, 0, 0.2), rgba(0, 0, 0, 0));
+}
+
 .alignmentGuide {
     position: absolute;
     pointer-events: none;

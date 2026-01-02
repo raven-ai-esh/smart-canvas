@@ -40,6 +40,7 @@ export interface NodeData {
   status?: 'queued' | 'in_progress' | 'done';
   progress?: number;
   childProgress?: boolean;
+  ganttY?: number;
   attachments?: Attachment[];
   mentions?: MentionToken[];
 }

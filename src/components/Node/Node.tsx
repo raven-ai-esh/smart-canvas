@@ -1098,7 +1098,7 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
     );
 });
 
-const NoteView = React.memo(({ data }: { data: NodeData }) => {
+export const NoteView = React.memo(({ data }: { data: NodeData }) => {
     const updateNode = useStore((state) => state.updateNode);
     const monitoringMode = useStore((state) => state.monitoringMode);
     const sessionSavers = useStore((state) => state.sessionSavers);
