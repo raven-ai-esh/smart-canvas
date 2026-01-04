@@ -2,7 +2,74 @@ import React from 'react';
 import { useStore } from '../../store/useStore';
 import styles from './Edge.module.css';
 import { energyToColor } from '../../utils/energy';
+import { catmullRomToBezierPath } from '../../utils/strokeBeautify';
+import type { EdgeControlPoint } from '../../types';
 
+type Vec2 = { x: number; y: number };
+
+const EPS = 0.0001;
+
+const resolveVec = (value?: { x?: number; y?: number } | null): Vec2 | null => {
+    if (!value) return null;
+    const x = typeof value.x === 'number' && Number.isFinite(value.x) ? value.x : null;
+    const y = typeof value.y === 'number' && Number.isFinite(value.y) ? value.y : null;
+    if (x === null || y === null) return null;
+    return { x, y };
+};
+
+const resolveOffset = (value?: { x?: number; y?: number } | null): Vec2 => ({
+    x: typeof value?.x === 'number' && Number.isFinite(value.x) ? value.x : 0,
+    y: typeof value?.y === 'number' && Number.isFinite(value.y) ? value.y : 0,
+});
+
+const normalizeVec = (value: Vec2, fallback: Vec2): Vec2 => {
+    const len = Math.hypot(value.x, value.y);
+    if (len > EPS) return { x: value.x / len, y: value.y / len };
+    return fallback;
+};
+
+const pointOnCubic = (p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: number): Vec2 => {
+    const mt = 1 - t;
+    const mt2 = mt * mt;
+    const t2 = t * t;
+    const a = mt2 * mt;
+    const b = 3 * mt2 * t;
+    const c = 3 * mt * t2;
+    const d = t2 * t;
+    return {
+        x: p0.x * a + p1.x * b + p2.x * c + p3.x * d,
+        y: p0.y * a + p1.y * b + p2.y * c + p3.y * d,
+    };
+};
+
+const closestTOnCubic = (p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, target: Vec2): number => {
+    let bestT = 0;
+    let bestDist = Infinity;
+    const samples = 40;
+    for (let i = 0; i <= samples; i += 1) {
+        const t = i / samples;
+        const p = pointOnCubic(p0, p1, p2, p3, t);
+        const dist = Math.hypot(p.x - target.x, p.y - target.y);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestT = t;
+        }
+    }
+    const refineRange = 1 / samples;
+    const refineSteps = 20;
+    const start = Math.max(0, bestT - refineRange);
+    const end = Math.min(1, bestT + refineRange);
+    for (let i = 0; i <= refineSteps; i += 1) {
+        const t = start + (end - start) * (i / refineSteps);
+        const p = pointOnCubic(p0, p1, p2, p3, t);
+        const dist = Math.hypot(p.x - target.x, p.y - target.y);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestT = t;
+        }
+    }
+    return bestT;
+};
 
 
 interface EdgeProps {
@@ -10,6 +77,7 @@ interface EdgeProps {
     sourceId: string;
     targetId: string;
     onRequestContextMenu?: (args: { kind: 'edge' | 'selection'; id: string; x: number; y: number }) => void;
+    screenToWorld: (screenX: number, screenY: number) => { x: number; y: number };
 }
 
 interface LayerBridgeEdgeProps {
@@ -104,21 +172,40 @@ export const LayerBridgeEdge: React.FC<LayerBridgeEdgeProps> = ({ fromId, toId, 
 };
 
 // Subscribe to store parts granularly to optimize performance
-export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestContextMenu }) => {
+export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestContextMenu, screenToWorld }) => {
     const sourceNode = useStore((state) => state.nodes.find((n) => n.id === sourceId));
     const targetNode = useStore((state) => state.nodes.find((n) => n.id === targetId));
     const selectedNode = useStore((state) => state.selectedNode);
     const selectedEdge = useStore((state) => state.selectedEdge);
     const selectedEdges = useStore((state) => state.selectedEdges);
+    const selectedEdgeHandle = useStore((state) => state.selectedEdgeHandle);
     const selectedNodes = useStore((state) => state.selectedNodes);
     const selectedTextBoxes = useStore((state) => state.selectedTextBoxes);
     const setMultiSelection = useStore((state) => state.setMultiSelection);
     const neighbors = useStore((state) => state.neighbors);
     const selectEdge = useStore((state) => state.selectEdge);
+    const selectEdgeHandle = useStore((state) => state.selectEdgeHandle);
+    const setSelectedEdgeHandle = useStore((state) => state.setSelectedEdgeHandle);
     const edgeData = useStore((state) => state.edges.find((e) => e.id === id));
+    const updateEdge = useStore((state) => state.updateEdge);
+    const pushHistory = useStore((state) => state.pushHistory);
     const monitoringMode = useStore((state) => state.monitoringMode);
     const authorshipMode = useStore((state) => state.authorshipMode);
     const [isHovered, setIsHovered] = React.useState(false);
+    const dragStateRef = React.useRef<{
+        kind: 'control' | 'source' | 'target';
+        pointerId: number;
+        startClient: Vec2;
+        startWorld: Vec2;
+        base?: { start: Vec2; cp1: Vec2; cp2: Vec2; end: Vec2 };
+        controlId?: string;
+        isLegacy?: boolean;
+        nodeCenter?: Vec2;
+        captureTarget?: EventTarget | null;
+        moved: boolean;
+    } | null>(null);
+    const dragHandlersRef = React.useRef<{ move: (e: PointerEvent) => void; up: (e: PointerEvent) => void } | null>(null);
+    const suppressClickRef = React.useRef(false);
     const sourceEnergy = useStore((state) => {
         const eff = state.effectiveEnergy[sourceId];
         if (Number.isFinite(eff)) return eff;
@@ -141,6 +228,24 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
     // We need canvas scale to determine view mode
     const scale = useStore((state) => state.canvas.scale);
     const isGraphMode = scale < 0.6;
+
+    const sourceAnchor = resolveVec(edgeData?.sourceAnchor);
+    const targetAnchor = resolveVec(edgeData?.targetAnchor);
+    const curveOffset = resolveOffset(edgeData?.curveOffset);
+    const controlPoints = React.useMemo<EdgeControlPoint[]>(() => {
+        const raw = Array.isArray(edgeData?.controlPoints) ? edgeData?.controlPoints : [];
+        return raw
+            .map((cp) => {
+                if (!cp || typeof cp !== 'object') return null;
+                const id = typeof cp.id === 'string' && cp.id ? cp.id : null;
+                const t = typeof cp.t === 'number' && Number.isFinite(cp.t) ? Math.max(0, Math.min(1, cp.t)) : null;
+                const ox = typeof cp.offset?.x === 'number' && Number.isFinite(cp.offset.x) ? cp.offset.x : null;
+                const oy = typeof cp.offset?.y === 'number' && Number.isFinite(cp.offset.y) ? cp.offset.y : null;
+                if (!id || t === null || ox === null || oy === null) return null;
+                return { id, t, offset: { x: ox, y: oy } };
+            })
+            .filter(Boolean) as EdgeControlPoint[];
+    }, [edgeData?.controlPoints]);
 
     // Memoize geometry (path + arrow head)
     const geom = React.useMemo(() => {
@@ -173,70 +278,19 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
         const ARROW_LEN = 10;
         const ARROW_W = 7;
 
-        // --- CIRCLE INTERSECTION (Graph View) ---
-        if (sDims.shape === 'circle' && tDims.shape === 'circle') {
-            const dx = tx - sx;
-            const dy = ty - sy;
-            const distRaw = Math.sqrt(dx * dx + dy * dy);
+        const dx = tx - sx;
+        const dy = ty - sy;
+        const distRaw = Math.hypot(dx, dy);
+        if (distRaw < EPS) return null;
 
-            if (distRaw === 0) return null; // Overlap
+        const baseDir = { x: dx / distRaw, y: dy / distRaw };
+        const targetFallback = { x: -baseDir.x, y: -baseDir.y };
+        const sourceDir = normalizeVec(sourceAnchor ?? baseDir, baseDir);
+        const targetDir = normalizeVec(targetAnchor ?? targetFallback, targetFallback);
 
-            // Normalized direction
-            const nx = dx / distRaw;
-            const ny = dy / distRaw;
-
-            // Radius is half width (16px)
-            const sRad = sDims.w / 2;
-            const tRad = tDims.w / 2;
-
-            const start = { x: sx + nx * sRad, y: sy + ny * sRad };
-
-            // Arrow: line stops short by ARROW_LEN, arrow tip touches border.
-            const tip = { x: tx - nx * tRad, y: ty - ny * tRad };
-            const end = { x: tx - nx * (tRad + ARROW_LEN), y: ty - ny * (tRad + ARROW_LEN) };
-
-            // Straight line for graph circles looks cleaner? Or slight curve?
-            // User liked "Smooth". Continuous connections usually imply curves.
-            // Let's use a very subtle curve or just straight if dist is short?
-            // Standard Bezier with consistent offset usually looks good.
-
-            const cpOffset = Math.max(distRaw * 0.3, 30);
-            // Perpendicular control points? No, for circles, tangent? 
-            // Or just simple curve 'out' from center?
-            // Actually, for circles, straight line often looks best, OR bezier with slight handles aligned to direction?
-            // If we use the "Same Normal Logic", the normal at the intersection point of a circle IS the direction vector (from center).
-            // So normal = (nx, ny).
-
-            const cp1 = { x: start.x + nx * cpOffset, y: start.y + ny * cpOffset };
-            // For target, normal is pointing OUT of target, which is (-nx, -ny).
-            // So we project OUT from target surface: end (which is near surface) + normal * offset.
-            // Wait, end is "in front" of surface.
-            // Normal at target surface points towards source (if we look at the line incoming).
-            // Actually, normal usually points OUT of the shape.
-            // At target intersection (near tx, ty), normal points towards Source (-nx, -ny).
-            // Visual:  (S) --->  (T)
-            // Normal at S = --->
-            // Normal at T = <--- (pointing away from T center)
-            // So cp2 = end + (-nx, -ny) * offset?
-            // But we want C curve.
-            // If we use same logic as box:
-            // cp2 = end + normal * offset.
-            // For box, normal was perpendicular to side.
-            // For circle, normal is radial.
-            // So:
-            const cp2 = { x: end.x + (-nx) * cpOffset, y: end.y + (-ny) * cpOffset }; // Projecting "out" from target towards source?
-
-            // Wait, cp2 should "pull" the curve.
-            // Usually for node-link:
-            // CP1 = Start + Normal * Offset
-            // CP2 = End + Normal * Offset
-            // Start normal = Out from S. End normal = Out from T.
-
-            const d = `M ${start.x} ${start.y} C ${cp1.x} ${cp1.y}, ${cp2.x} ${cp2.y}, ${end.x} ${end.y}`;
-
-            // Arrow head triangle
-            const ux = tip.x - end.x;
-            const uy = tip.y - end.y;
+        const buildArrow = (tip: Vec2, endLine: Vec2) => {
+            const ux = tip.x - endLine.x;
+            const uy = tip.y - endLine.y;
             const ulen = Math.sqrt(ux * ux + uy * uy) || 1;
             const vx = ux / ulen;
             const vy = uy / ulen;
@@ -245,66 +299,137 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
             const base = { x: tip.x - vx * ARROW_LEN, y: tip.y - vy * ARROW_LEN };
             const left = { x: base.x + px * (ARROW_W / 2), y: base.y + py * (ARROW_W / 2) };
             const right = { x: base.x - px * (ARROW_W / 2), y: base.y - py * (ARROW_W / 2) };
-            const arrowD = `M ${tip.x} ${tip.y} L ${left.x} ${left.y} L ${right.x} ${right.y} Z`;
+            return `M ${tip.x} ${tip.y} L ${left.x} ${left.y} L ${right.x} ${right.y} Z`;
+        };
 
-            return { d, arrowD, tip, end };
+        const legacyActive = Math.abs(curveOffset.x) > EPS || Math.abs(curveOffset.y) > EPS;
+        const handleDefs = [
+            ...controlPoints.map((cp) => ({ id: cp.id, t: cp.t, offset: cp.offset, isLegacy: false })),
+            ...(legacyActive ? [{ id: '__legacy__', t: 0.5, offset: curveOffset, isLegacy: true }] : []),
+        ].sort((a, b) => a.t - b.t);
+
+        const buildGeom = (input: {
+            start: Vec2;
+            endLine: Vec2;
+            tip: Vec2;
+            cp1: Vec2;
+            cp2: Vec2;
+            startNormal: Vec2;
+            endNormal: Vec2;
+        }) => {
+            const base = { start: input.start, cp1: input.cp1, cp2: input.cp2, end: input.endLine };
+            const handles = handleDefs.map((cp) => {
+                const basePoint = pointOnCubic(base.start, base.cp1, base.cp2, base.end, cp.t);
+                return {
+                    id: cp.id,
+                    t: cp.t,
+                    offset: cp.offset,
+                    isLegacy: cp.isLegacy,
+                    pos: { x: basePoint.x + cp.offset.x, y: basePoint.y + cp.offset.y },
+                };
+            });
+            const d = handles.length > 0
+                ? catmullRomToBezierPath([input.start, ...handles.map((h) => h.pos), input.endLine])
+                : `M ${input.start.x} ${input.start.y} C ${input.cp1.x} ${input.cp1.y}, ${input.cp2.x} ${input.cp2.y}, ${input.endLine.x} ${input.endLine.y}`;
+            const arrowD = buildArrow(input.tip, input.endLine);
+            return {
+                d,
+                arrowD,
+                tip: input.tip,
+                end: input.endLine,
+                start: input.start,
+                base,
+                handles,
+                startNormal: input.startNormal,
+                endNormal: input.endNormal,
+            };
+        };
+
+        // --- CIRCLE INTERSECTION (Graph View) ---
+        if (sDims.shape === 'circle' && tDims.shape === 'circle') {
+            const sRad = sDims.w / 2;
+            const tRad = tDims.w / 2;
+
+            const start = { x: sx + sourceDir.x * sRad, y: sy + sourceDir.y * sRad };
+            const tip = { x: tx + targetDir.x * tRad, y: ty + targetDir.y * tRad };
+            const endLine = { x: tip.x + targetDir.x * ARROW_LEN, y: tip.y + targetDir.y * ARROW_LEN };
+
+            const dist = Math.hypot(tip.x - start.x, tip.y - start.y);
+            const cpOffset = Math.max(dist * 0.3, 30);
+
+            const cp1 = { x: start.x + sourceDir.x * cpOffset, y: start.y + sourceDir.y * cpOffset };
+            const cp2 = { x: endLine.x + targetDir.x * cpOffset, y: endLine.y + targetDir.y * cpOffset };
+
+            return buildGeom({
+                start,
+                endLine,
+                tip,
+                cp1,
+                cp2,
+                startNormal: sourceDir,
+                endNormal: targetDir,
+            });
         }
 
         // --- BOX INTERSECTION (Card View) ---
-        // Fallback to Box logic if mixed or both box
-        // Use the existing logic
-        // Ray-Box Intersection to find exact border point and normal
+        const getBoxIntersection = (cx: number, cy: number, w: number, h: number, dir: Vec2) => {
+            const hW = w / 2;
+            const hH = h / 2;
+            const dx = dir.x;
+            const dy = dir.y;
 
-        const getBoxIntersection = (cx: number, cy: number, w: number, h: number, targetX: number, targetY: number) => {
-            const h_w = w / 2;
-            const h_h = h / 2;
-            const dx = targetX - cx;
-            const dy = targetY - cy;
+            const adx = Math.abs(dx) < EPS ? EPS : Math.abs(dx);
+            const ady = Math.abs(dy) < EPS ? EPS : Math.abs(dy);
 
-            const adx = Math.abs(dx) < 0.0001 ? 0.0001 : Math.abs(dx);
-            const ady = Math.abs(dy) < 0.0001 ? 0.0001 : Math.abs(dy);
+            const txPlane = hW / adx;
+            const tyPlane = hH / ady;
 
-            const tx_plane = h_w / adx;
-            const ty_plane = h_h / ady;
-
-            if (tx_plane < ty_plane) {
+            if (txPlane < tyPlane) {
                 const sign = dx > 0 ? 1 : -1;
-                return { x: cx + sign * h_w, y: cy + dy * tx_plane, nx: sign, ny: 0 };
-            } else {
-                const sign = dy > 0 ? 1 : -1;
-                return { x: cx + dx * ty_plane, y: cy + sign * h_h, nx: 0, ny: sign };
+                return { x: cx + sign * hW, y: cy + dy * txPlane, nx: sign, ny: 0 };
             }
+            const sign = dy > 0 ? 1 : -1;
+            return { x: cx + dx * tyPlane, y: cy + sign * hH, nx: 0, ny: sign };
         };
 
-        const start = getBoxIntersection(sx, sy, sDims.w, sDims.h, tx, ty);
-        const end = getBoxIntersection(tx, ty, tDims.w, tDims.h, sx, sy);
-
-        const dist = Math.sqrt(Math.pow(end.x - start.x, 2) + Math.pow(end.y - start.y, 2));
-
-        const cpOffset = Math.max(dist * 0.5, 60);
-
-        const cp1 = { x: start.x + start.nx * cpOffset, y: start.y + start.ny * cpOffset };
-        const cp2 = { x: end.x + end.nx * cpOffset, y: end.y + end.ny * cpOffset };
+        const start = getBoxIntersection(sx, sy, sDims.w, sDims.h, sourceDir);
+        const end = getBoxIntersection(tx, ty, tDims.w, tDims.h, targetDir);
 
         const tip = { x: end.x, y: end.y };
         const endLine = { x: end.x + end.nx * ARROW_LEN, y: end.y + end.ny * ARROW_LEN };
 
-        const d = `M ${start.x} ${start.y} C ${cp1.x} ${cp1.y}, ${cp2.x} ${cp2.y}, ${endLine.x} ${endLine.y}`;
+        const dist = Math.hypot(end.x - start.x, end.y - start.y);
+        const cpOffset = Math.max(dist * 0.5, 60);
 
-        const ux = tip.x - endLine.x;
-        const uy = tip.y - endLine.y;
-        const ulen = Math.sqrt(ux * ux + uy * uy) || 1;
-        const vx = ux / ulen;
-        const vy = uy / ulen;
-        const px = -vy;
-        const py = vx;
-        const base = { x: tip.x - vx * ARROW_LEN, y: tip.y - vy * ARROW_LEN };
-        const left = { x: base.x + px * (ARROW_W / 2), y: base.y + py * (ARROW_W / 2) };
-        const right = { x: base.x - px * (ARROW_W / 2), y: base.y - py * (ARROW_W / 2) };
-        const arrowD = `M ${tip.x} ${tip.y} L ${left.x} ${left.y} L ${right.x} ${right.y} Z`;
+        const cp1 = { x: start.x + start.nx * cpOffset, y: start.y + start.ny * cpOffset };
+        const cp2 = { x: endLine.x + end.nx * cpOffset, y: endLine.y + end.ny * cpOffset };
 
-        return { d, arrowD, tip, end: endLine };
-    }, [sx, sy, tx, ty, sourceId, targetId, isGraphMode]);
+        return buildGeom({
+            start: { x: start.x, y: start.y },
+            endLine,
+            tip,
+            cp1,
+            cp2,
+            startNormal: { x: start.nx, y: start.ny },
+            endNormal: { x: end.nx, y: end.ny },
+        });
+    }, [
+        sx,
+        sy,
+        tx,
+        ty,
+        sourceId,
+        targetId,
+        isGraphMode,
+        scale,
+        sourceAnchor?.x,
+        sourceAnchor?.y,
+        targetAnchor?.x,
+        targetAnchor?.y,
+        curveOffset.x,
+        curveOffset.y,
+        controlPoints,
+    ]);
 
     if (!geom) return null;
 
@@ -359,6 +484,191 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
         const isInSelection = (selectedEdges?.includes(id) ?? false) || selectedEdge === id;
         if (multiCount > 1 && isInSelection) return;
         selectEdge(id);
+    };
+
+    const stopEdgeDrag = React.useCallback((pointerId?: number) => {
+        const state = dragStateRef.current;
+        if (pointerId && state?.pointerId !== pointerId) return;
+        const handlers = dragHandlersRef.current;
+        if (handlers) {
+            window.removeEventListener('pointermove', handlers.move, true);
+            window.removeEventListener('pointerup', handlers.up, true);
+            window.removeEventListener('pointercancel', handlers.up, true);
+            dragHandlersRef.current = null;
+        }
+        if (state?.captureTarget && 'releasePointerCapture' in (state.captureTarget as any)) {
+            try {
+                (state.captureTarget as any).releasePointerCapture(state.pointerId);
+            } catch {
+                // ignore
+            }
+        }
+        dragStateRef.current = null;
+    }, []);
+
+    React.useEffect(() => () => stopEdgeDrag(), [stopEdgeDrag]);
+
+    const beginEdgeDrag = (
+        e: React.PointerEvent,
+        next: {
+            kind: 'control' | 'source' | 'target';
+            controlId?: string;
+            isLegacy?: boolean;
+            nodeCenter?: Vec2;
+            base?: { start: Vec2; cp1: Vec2; cp2: Vec2; end: Vec2 };
+        },
+    ) => {
+        const startClient = { x: e.clientX, y: e.clientY };
+        const startWorld = screenToWorld(e.clientX, e.clientY);
+        dragStateRef.current = {
+            kind: next.kind,
+            pointerId: e.pointerId,
+            startClient,
+            startWorld,
+            base: next.base,
+            controlId: next.controlId,
+            isLegacy: next.isLegacy,
+            nodeCenter: next.nodeCenter,
+            captureTarget: e.currentTarget,
+            moved: false,
+        };
+
+        if ((e.pointerType === 'mouse' || e.pointerType === 'pen') && 'setPointerCapture' in (e.currentTarget as any)) {
+            try {
+                (e.currentTarget as any).setPointerCapture(e.pointerId);
+            } catch {
+                // ignore
+            }
+        }
+
+        const DRAG_START_PX = 4;
+
+        const move = (ev: PointerEvent) => {
+            const state = dragStateRef.current;
+            if (!state || state.pointerId !== ev.pointerId) return;
+            const distPx = Math.hypot(ev.clientX - state.startClient.x, ev.clientY - state.startClient.y);
+            if (!state.moved && distPx < DRAG_START_PX) return;
+            if (!state.moved) {
+                pushHistory();
+                state.moved = true;
+            }
+            const world = screenToWorld(ev.clientX, ev.clientY);
+
+            if (state.kind === 'control') {
+                const base = state.base;
+                if (!base || !state.controlId) return;
+                const t = state.isLegacy
+                    ? 0.5
+                    : closestTOnCubic(base.start, base.cp1, base.cp2, base.end, world);
+                const basePoint = pointOnCubic(base.start, base.cp1, base.cp2, base.end, t);
+                const offset = { x: world.x - basePoint.x, y: world.y - basePoint.y };
+                if (state.isLegacy) {
+                    updateEdge(id, { curveOffset: offset });
+                } else {
+                    const nextPoints = controlPoints.map((cp) => (
+                        cp.id === state.controlId ? { ...cp, t, offset } : cp
+                    ));
+                    updateEdge(id, { controlPoints: nextPoints });
+                }
+                return;
+            }
+
+            if (!state.nodeCenter) return;
+            const dir = { x: world.x - state.nodeCenter.x, y: world.y - state.nodeCenter.y };
+            const len = Math.hypot(dir.x, dir.y);
+            if (len < EPS) return;
+            const anchor = { x: dir.x / len, y: dir.y / len };
+            if (state.kind === 'source') updateEdge(id, { sourceAnchor: anchor });
+            else updateEdge(id, { targetAnchor: anchor });
+        };
+
+        const up = (ev: PointerEvent) => {
+            const state = dragStateRef.current;
+            if (!state || state.pointerId !== ev.pointerId) return;
+            suppressClickRef.current = state.moved;
+            if (state.moved) {
+                window.setTimeout(() => {
+                    suppressClickRef.current = false;
+                }, 0);
+            }
+            stopEdgeDrag(ev.pointerId);
+        };
+
+        dragHandlersRef.current = { move, up };
+        window.addEventListener('pointermove', move, true);
+        window.addEventListener('pointerup', up, true);
+        window.addEventListener('pointercancel', up, true);
+    };
+
+    const startControlDrag = (e: React.PointerEvent, handle: { id: string; isLegacy: boolean }) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        if (!geom?.base) return;
+        e.preventDefault();
+        e.stopPropagation();
+        selectEdgeHandle(id, handle.id);
+        beginEdgeDrag(e, {
+            kind: 'control',
+            controlId: handle.id,
+            isLegacy: handle.isLegacy,
+            base: geom.base,
+        });
+    };
+
+    const startAnchorDrag = (e: React.PointerEvent, kind: 'source' | 'target') => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        selectThisEdge(e);
+        if (e.shiftKey) return;
+        beginEdgeDrag(e, {
+            kind,
+            nodeCenter: kind === 'source' ? { x: sx, y: sy } : { x: tx, y: ty },
+        });
+    };
+
+    const handleEdgePointerDown = (e: React.PointerEvent) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        if (selectedEdgeHandle) setSelectedEdgeHandle(null);
+        selectThisEdge(e);
+    };
+
+    const handleEdgeClick = (e: React.MouseEvent) => {
+        if (suppressClickRef.current) {
+            suppressClickRef.current = false;
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
+        selectThisEdge(e);
+    };
+
+    const handleEdgeDoubleClick = (e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!geom?.base) return;
+        if (!isSelectedEdge) {
+            selectEdge(id);
+            return;
+        }
+        const world = screenToWorld(e.clientX, e.clientY);
+        const t = closestTOnCubic(geom.base.start, geom.base.cp1, geom.base.cp2, geom.base.end, world);
+        const basePoint = pointOnCubic(geom.base.start, geom.base.cp1, geom.base.cp2, geom.base.end, t);
+        const offset = { x: world.x - basePoint.x, y: world.y - basePoint.y };
+        const nextPoints = [...controlPoints];
+        const hasLegacy = Math.abs(curveOffset.x) > EPS || Math.abs(curveOffset.y) > EPS;
+        if (hasLegacy) {
+            nextPoints.push({
+                id: crypto.randomUUID(),
+                t: 0.5,
+                offset: { x: curveOffset.x, y: curveOffset.y },
+            });
+        }
+        const newId = crypto.randomUUID();
+        nextPoints.push({ id: newId, t, offset });
+        pushHistory();
+        updateEdge(id, {
+            controlPoints: nextPoints,
+            ...(hasLegacy ? { curveOffset: { x: 0, y: 0 } } : {}),
+        });
+        selectEdgeHandle(id, newId);
     };
 
     const startTouchLongPress = (e: React.PointerEvent) => {
@@ -430,6 +740,18 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
 
     // Always use a gradient paint to avoid switching stroke types (url <-> color), which can flicker in browsers.
     const strokePaint = `url(#${gradId})`;
+    const handleRadius = 6 / Math.max(0.0001, scale);
+    const handleStrokeWidth = 1.5;
+    const anchorHandleOffset = 18 / Math.max(0.0001, scale);
+    const sourceHandlePos = {
+        x: geom.start.x + geom.startNormal.x * anchorHandleOffset,
+        y: geom.start.y + geom.startNormal.y * anchorHandleOffset,
+    };
+    const targetHandlePos = {
+        x: geom.tip.x + geom.endNormal.x * anchorHandleOffset,
+        y: geom.tip.y + geom.endNormal.y * anchorHandleOffset,
+    };
+    const showHandles = isSelectedEdge;
 
     return (
         <>
@@ -443,8 +765,9 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
                 d={geom.d}
                 className={styles.edgeHitArea}
                 data-edge-id={id}
-                onPointerDown={selectThisEdge}
-                onClick={selectThisEdge}
+                onPointerDown={handleEdgePointerDown}
+                onClick={handleEdgeClick}
+                onDoubleClick={handleEdgeDoubleClick}
                 onContextMenu={handleContextMenu}
                 onPointerDownCapture={startTouchLongPress}
                 onPointerEnter={() => setIsHovered(true)}
@@ -463,6 +786,43 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
                 className={`${styles.edgeArrow} ${isSelectedEdge ? styles.edgeArrowSelected : ''}${isMonitoringEdge ? ` ${styles.edgeArrowMonitoring}` : ''}${!isEnergyEnabled ? ` ${styles.edgeArrowDisabled}` : ''}`}
                 style={{ fill: strokePaint, ...(monitorStyle ?? {}) }}
             />
+            {showHandles && (
+                <>
+                    <circle
+                        className={`${styles.edgeHandle} ${styles.edgeHandleAnchor}`}
+                        cx={sourceHandlePos.x}
+                        cy={sourceHandlePos.y}
+                        r={handleRadius}
+                        style={{ strokeWidth: handleStrokeWidth }}
+                        data-edge-handle="source"
+                        onPointerDown={(e) => startAnchorDrag(e, 'source')}
+                    />
+                    <circle
+                        className={`${styles.edgeHandle} ${styles.edgeHandleAnchor}`}
+                        cx={targetHandlePos.x}
+                        cy={targetHandlePos.y}
+                        r={handleRadius}
+                        style={{ strokeWidth: handleStrokeWidth }}
+                        data-edge-handle="target"
+                        onPointerDown={(e) => startAnchorDrag(e, 'target')}
+                    />
+                    {geom.handles.map((handle) => {
+                        const isSelected = selectedEdgeHandle?.edgeId === id && selectedEdgeHandle.handleId === handle.id;
+                        return (
+                            <circle
+                                key={handle.id}
+                                className={`${styles.edgeHandle} ${styles.edgeHandleControl}${isSelected ? ` ${styles.edgeHandleSelected}` : ''}`}
+                                cx={handle.pos.x}
+                                cy={handle.pos.y}
+                                r={handleRadius}
+                                style={{ strokeWidth: handleStrokeWidth }}
+                                data-edge-handle="control"
+                                onPointerDown={(e) => startControlDrag(e, handle)}
+                            />
+                        );
+                    })}
+                </>
+            )}
             {authorLabel && (
                 <text
                     x={Math.min(sx, tx) - 6}

@@ -127,6 +127,7 @@ interface AppState {
     selectedNodes: string[];
     selectedEdge: string | null;
     selectedEdges: string[];
+    selectedEdgeHandle: { edgeId: string; handleId: string } | null;
     neighbors: Record<string, number>; // id -> distance (0 = selected, 1 = connected, etc.)
 
     moveMode: boolean;
@@ -189,6 +190,8 @@ interface AppState {
     togglePhysicsMode: () => void;
     selectNode: (id: string | null) => void;
     selectEdge: (id: string | null) => void;
+    selectEdgeHandle: (edgeId: string, handleId: string) => void;
+    setSelectedEdgeHandle: (handle: { edgeId: string; handleId: string } | null) => void;
     setMultiSelection: (sel: { nodes: string[]; edges?: string[]; textBoxes?: string[] }) => void;
     deleteSelection: () => void;
 
@@ -294,6 +297,7 @@ const sanitizeSelections = (state: AppState, visibleLayerIds: Set<string>) => {
         selectedTextBoxId,
         selectedEdge: null,
         selectedEdges: [],
+        selectedEdgeHandle: null,
         neighbors: {},
     };
 };
@@ -446,6 +450,7 @@ export const useStore = create<AppState>()(
                     selectedNodes: [],
                     selectedEdge: null,
                     selectedEdges: [],
+                    selectedEdgeHandle: null,
                     selectedTextBoxId: null,
                     selectedTextBoxes: [],
                     neighbors: {},
@@ -515,6 +520,7 @@ export const useStore = create<AppState>()(
                     selectedNodes: [],
                     selectedEdge: null,
                     selectedEdges: [],
+                    selectedEdgeHandle: null,
                     selectedTextBoxId: null,
                     selectedTextBoxes: [],
                     neighbors: {},
@@ -556,6 +562,7 @@ export const useStore = create<AppState>()(
                     selectedNodes: [],
                     selectedEdge: null,
                     selectedEdges: [],
+                    selectedEdgeHandle: null,
                     neighbors: {},
                 });
                 debugLog({
@@ -571,6 +578,7 @@ export const useStore = create<AppState>()(
             selectedNodes: [],
             selectedEdge: null,
             selectedEdges: [],
+            selectedEdgeHandle: null,
             neighbors: {},
 
             moveMode: false,
@@ -636,6 +644,7 @@ export const useStore = create<AppState>()(
 	                    selectedNodes: [],
 	                    selectedEdge: null,
 	                    selectedEdges: [],
+	                    selectedEdgeHandle: null,
 	                    selectedTextBoxId: null,
 	                    selectedTextBoxes: [],
 	                    neighbors: {},
@@ -663,6 +672,7 @@ export const useStore = create<AppState>()(
 	                    selectedNodes: [],
 	                    selectedEdge: null,
 	                    selectedEdges: [],
+	                    selectedEdgeHandle: null,
 	                    selectedTextBoxId: null,
 	                    selectedTextBoxes: [],
 	                    neighbors: {},
@@ -909,6 +919,7 @@ export const useStore = create<AppState>()(
                         selectedEdges: [],
                         selectedTextBoxId: null,
                         selectedTextBoxes: [],
+                        selectedEdgeHandle: null,
                         neighbors: {},
                     });
                     debugLog({
@@ -927,6 +938,7 @@ export const useStore = create<AppState>()(
                     selectedEdges: [],
                     selectedTextBoxId: null,
                     selectedTextBoxes: [],
+                    selectedEdgeHandle: null,
                     selectedNodes: [id],
                 });
 
@@ -972,6 +984,7 @@ export const useStore = create<AppState>()(
                         neighbors: {},
                         selectedTextBoxId: null,
                         selectedTextBoxes: [],
+                        selectedEdgeHandle: null,
                     });
                     debugLog({
                         type: 'select',
@@ -981,7 +994,7 @@ export const useStore = create<AppState>()(
                         selection: { node: null, edge: id, textBox: null },
                     });
                 } else {
-                    set({ selectedEdge: null, selectedEdges: [] });
+                    set({ selectedEdge: null, selectedEdges: [], selectedEdgeHandle: null });
                     debugLog({
                         type: 'select',
                         t: performance.now(),
@@ -991,6 +1004,21 @@ export const useStore = create<AppState>()(
                     });
                 }
             },
+
+            selectEdgeHandle: (edgeId, handleId) => {
+                set({
+                    selectedEdge: edgeId,
+                    selectedEdges: [edgeId],
+                    selectedNode: null,
+                    selectedNodes: [],
+                    neighbors: {},
+                    selectedTextBoxId: null,
+                    selectedTextBoxes: [],
+                    selectedEdgeHandle: { edgeId, handleId },
+                });
+            },
+
+            setSelectedEdgeHandle: (handle) => set({ selectedEdgeHandle: handle }),
 
             setMultiSelection: ({ nodes, edges, textBoxes }) => {
                 const n = Array.from(new Set((nodes ?? []).filter(Boolean)));
@@ -1003,6 +1031,7 @@ export const useStore = create<AppState>()(
                     selectedNode: n.length === 1 && e.length === 0 && t.length === 0 ? n[0] : null,
                     selectedEdge: e.length === 1 && n.length === 0 && t.length === 0 ? e[0] : null,
                     selectedTextBoxId: t.length === 1 && n.length === 0 && e.length === 0 ? t[0] : null,
+                    selectedEdgeHandle: null,
                     neighbors: {},
                 });
                 debugLog({
@@ -1068,6 +1097,7 @@ export const useStore = create<AppState>()(
                     selectedNodes: [],
                     selectedEdge: null,
                     selectedEdges: [],
+                    selectedEdgeHandle: null,
                     selectedTextBoxId: null,
                     selectedTextBoxes: [],
                     neighbors: {},
@@ -1165,6 +1195,7 @@ export const useStore = create<AppState>()(
                         selectedNodes: [],
                         selectedEdge: null,
                         selectedEdges: [],
+                        selectedEdgeHandle: null,
 	                        neighbors: {},
 	                    };
 	                }),

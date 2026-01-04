@@ -33,6 +33,31 @@
     pointer-events: none;
 }
 
+.edgeHandle {
+    fill: var(--bg-space);
+    stroke: var(--accent-primary);
+    cursor: grab;
+    pointer-events: all;
+    vector-effect: non-scaling-stroke;
+}
+
+.edgeHandle:active {
+    cursor: grabbing;
+}
+
+.edgeHandleAnchor {
+    fill: var(--bg-space);
+}
+
+.edgeHandleControl {
+    fill: var(--accent-primary);
+}
+
+.edgeHandleSelected {
+    stroke: var(--accent-primary);
+    filter: drop-shadow(0 0 6px rgba(94, 129, 172, 0.55));
+}
+
 .edgeDisabled {
     stroke-dasharray: 6 8;
     opacity: 0.35;

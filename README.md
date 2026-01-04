@@ -15,6 +15,7 @@ A spatial thinking canvas for tasks and ideas. Place cards in an infinite space,
 - Task cards with status (`queued`, `in_progress`, `done`), dates, and progress.
 - Monitoring mode with animated tasks and energy-aware connections.
 - Raven assistant (OpenAI Responses API) that can operate the canvas via MCP tools.
+- Optional Skills mode with step-by-step skill execution, background recording, and feedback-driven improvements.
 - Alerting system with email, Telegram, and webhook channels.
 
 ## Architecture
@@ -22,6 +23,7 @@ Services (Docker):
 - `app`: Nginx serving the frontend and proxying `/api` + `/ws`.
 - `api`: Express REST API + WebSocket sync, auth, alerting, and AI integration.
 - `agent`: FastAPI service that runs the Raven assistant and executes MCP tools.
+- `skills`: FastAPI service for skill search, execution, recording, merging, and feedback.
 - `mcp`: MCP server that exposes canvas tools to the assistant.
 - `db`: Postgres (with pgvector extension).
 - `redis`: caching for assistant and session helpers.
@@ -71,6 +73,14 @@ npm run dev
 - MCP tools allow the assistant to read and update the canvas.
 - Prompt editor: `GET /prompt/ui` on the agent service.
 
+### Skills Mode (optional)
+- Toggle in Raven AI settings; when disabled, the assistant behaves like standard Q&A.
+- If enabled, requests route to the skills service:
+  - **Skill found**: executes steps sequentially, passing prior step outputs into the next step.
+  - **Skill not found**: returns a normal answer, then records and generalizes a new skill in the background.
+- Feedback UI: thumbs up/down after a skill run triggers skill improvement on negative feedback.
+- Skills library: full-screen modal showing all recorded skills with search and detail view.
+
 ## Alerting
 Alerting is configured in **Integrations → Alerting**.
 
@@ -102,6 +112,10 @@ Telegram webhook:
 - `GET /api/auth/change-email` - confirm email change via token
 - `GET /api/integrations/ai/key` - get AI key status
 - `POST /api/integrations/ai/key` - set AI key
+- `GET /api/raven-ai/settings` - get Raven AI settings
+- `POST /api/raven-ai/settings` - update Raven AI settings (model, skills toggle, base URL)
+- `GET /api/raven-ai/skills` - list recorded skills
+- `POST /api/raven-ai/skills/feedback` - submit skill feedback
 - `POST /api/integrations/alerting` - save alerting settings
 - `POST /api/integrations/telegram/webhook` - Telegram alert bot webhook
 - `POST /api/assistant/threads` - create assistant thread
@@ -157,6 +171,16 @@ AI / Agent:
 - `AGENT_LOG_LEVEL`
 - `AGENT_LOG_TRUNCATE`
 - `AGENT_PROMPT_PATH`
+
+Skills:
+- `SKILLS_SERVICE_URL`
+- `SKILLS_SERVICE_TIMEOUT_MS`
+- `SKILLS_MATCH_SIMILARITY_THRESHOLD`
+- `SKILLS_MERGE_SIMILARITY_THRESHOLD`
+- `SKILLS_MERGE_SIMILARITY_EPS`
+- `SKILLS_GENERALIZATION_THRESHOLD`
+- `SKILLS_MAX_STEPS`
+- `SKILLS_LOG_LEVEL`
 
 curl -X POST "https://api.telegram.org/bot8579736745:AAEJK7mo2TTR4l3Gp6KLZECvFJwEA73jVwc/setWebhook" \
     -d "url=https://canvas.raven-ai.ru/api/integrations/telegram/webhook" \

@@ -2287,6 +2287,22 @@ export const Canvas: React.FC = () => {
 
             if (e.key === 'Backspace' || e.key === 'Delete') {
                 const st = useStore.getState();
+                const handle = st.selectedEdgeHandle;
+                if (handle) {
+                    const edge = st.edges.find((e) => e.id === handle.edgeId);
+                    if (edge) {
+                        const points = Array.isArray(edge.controlPoints) ? edge.controlPoints : [];
+                        st.pushHistory();
+                        if (handle.handleId === '__legacy__') {
+                            st.updateEdge(edge.id, { curveOffset: { x: 0, y: 0 } });
+                        } else {
+                            st.updateEdge(edge.id, { controlPoints: points.filter((p) => p.id !== handle.handleId) });
+                        }
+                    }
+                    st.setSelectedEdgeHandle(null);
+                    e.preventDefault();
+                    return;
+                }
                 const hasSelection =
                     !!st.selectedNode ||
                     !!st.selectedEdge ||
@@ -4309,6 +4325,7 @@ export const Canvas: React.FC = () => {
                                 sourceId={edge.source}
                                 targetId={edge.target}
                                 id={edge.id}
+                                screenToWorld={screenToWorld}
                                 onRequestContextMenu={(args) => {
                                     if (args.kind === 'selection') setContextMenu({ kind: 'selection', id: '__selection__', x: args.x, y: args.y });
                                     else setContextMenu({ kind: args.kind, id: args.id, x: args.x, y: args.y });
