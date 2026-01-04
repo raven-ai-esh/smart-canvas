@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, ChevronDown, ChevronUp, Link2, MessageCircle, X } from 'lucide-react';
+import { Bot, ChevronDown, ChevronUp, Link2, MessageCircle, ThumbsDown, ThumbsUp, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/useStore';
@@ -7,6 +7,13 @@ import type { AssistantSelectionContext } from '../../types/assistant';
 
 type AssistantTrace = {
   reasoning?: string | null;
+  skill?: {
+    runId?: string;
+    skillId?: string;
+    skillVersionId?: string;
+    found?: boolean;
+    matchDistance?: number;
+  } | null;
   tools?: Array<{
     name: string;
     callId?: string;
@@ -98,6 +105,8 @@ export const AgentWidget: React.FC = () => {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [expandedDetails, setExpandedDetails] = useState<Record<string, boolean>>({});
+  const [feedbackState, setFeedbackState] = useState<Record<string, 'up' | 'down'>>({});
+  const [feedbackBusy, setFeedbackBusy] = useState<Record<string, boolean>>({});
   const [hasUnread, setHasUnread] = useState(false);
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
@@ -405,6 +414,45 @@ export const AgentWidget: React.FC = () => {
     return { messages: mapped, context };
   }, [sessionId]);
 
+  const sendSkillFeedback = useCallback(async ({
+    messageKey,
+    messageId,
+    runId,
+    rating,
+  }: {
+    messageKey: string;
+    messageId?: string;
+    runId?: string;
+    rating: 'positive' | 'negative';
+  }) => {
+    if (!me?.id) return;
+    if (!runId && !messageId) return;
+    setFeedbackBusy((prev) => ({ ...prev, [messageKey]: true }));
+    try {
+      const payload: Record<string, string> = { rating };
+      if (runId) payload.runId = runId;
+      if (messageId) payload.assistantMessageId = messageId;
+      const res = await fetch('/api/raven-ai/skills/feedback', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        throw new Error('feedback_failed');
+      }
+      setFeedbackState((prev) => ({ ...prev, [messageKey]: rating === 'positive' ? 'up' : 'down' }));
+    } catch {
+      setFeedbackState((prev) => {
+        if (!Object.prototype.hasOwnProperty.call(prev, messageKey)) return prev;
+        const copy = { ...prev };
+        delete copy[messageKey];
+        return copy;
+      });
+    } finally {
+      setFeedbackBusy((prev) => ({ ...prev, [messageKey]: false }));
+    }
+  }, [me?.id]);
+
   const ensureThread = useCallback(async () => {
     if (!sessionReady) {
       throw new Error('Session is not ready yet. Please wait a moment and try again.');
@@ -431,6 +479,8 @@ export const AgentWidget: React.FC = () => {
     setContextInfo(null);
     setExpandedDetails({});
     setHasUnread(false);
+    setFeedbackState({});
+    setFeedbackBusy({});
   }, [threadKey]);
 
   useEffect(() => {
@@ -506,6 +556,8 @@ export const AgentWidget: React.FC = () => {
         };
         return trimMessages([...prev, next]);
       });
+      setPending(false);
+      setError(null);
       if (!openRef.current || !isUiActive()) {
         setHasUnread(true);
       }
@@ -535,6 +587,7 @@ export const AgentWidget: React.FC = () => {
       clearSelectionContext();
     }
 
+    let keepPending = false;
     try {
       const attempt = async () => {
         const id = await ensureThread();
@@ -568,6 +621,10 @@ export const AgentWidget: React.FC = () => {
           setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: msg }]));
           return { retry: false };
         }
+        if (res.status === 202 || data?.queued) {
+          keepPending = true;
+          return { retry: false, queued: true };
+        }
         const reply = typeof data?.message === 'string' && data.message.trim()
           ? data.message.trim()
           : 'No response returned.';
@@ -589,11 +646,14 @@ export const AgentWidget: React.FC = () => {
         if (data?.context && typeof data.context === 'object') {
           setContextInfo(data.context);
         }
-        return { retry: false };
+        return { retry: false, queued: false };
       };
       const first = await attempt();
       if (first?.retry) {
-        await attempt();
+        const second = await attempt();
+        keepPending = !!second?.queued;
+      } else {
+        keepPending = !!first?.queued;
       }
     } catch (err) {
       if (err && typeof err === 'object' && (err as { name?: string }).name === 'AbortError') {
@@ -605,7 +665,9 @@ export const AgentWidget: React.FC = () => {
       setError(msg);
       setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: msg }]));
     } finally {
-      setPending(false);
+      if (!keepPending) {
+        setPending(false);
+      }
       requestAbortRef.current = null;
     }
   };
@@ -854,7 +916,11 @@ export const AgentWidget: React.FC = () => {
                 !!(trace.reasoning && trace.reasoning.trim())
                 || ((trace.tools?.length ?? 0) > 0)
               );
+              const skillTrace = trace?.skill ?? null;
+              const showFeedback = isAssistant && !!skillTrace?.runId && skillTrace?.found === true;
               const messageKey = msg.id ?? `${msg.role}-${idx}`;
+              const feedbackValue = feedbackState[messageKey] ?? null;
+              const feedbackIsBusy = feedbackBusy[messageKey] ?? false;
               const detailsOpen = expandedDetails[messageKey] ?? false;
               const externalLabel = msg.externalSender
                 ? `Reply from ${msg.externalSender}`
@@ -1000,6 +1066,67 @@ export const AgentWidget: React.FC = () => {
                       </ReactMarkdown>
                     )}
                   </div>
+                  {showFeedback && (
+                    <div
+                      style={{
+                        display: 'inline-flex',
+                        gap: 6,
+                        opacity: 0.7,
+                        alignSelf: 'flex-start',
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => sendSkillFeedback({
+                          messageKey,
+                          messageId: msg.id,
+                          runId: skillTrace?.runId,
+                          rating: 'positive',
+                        })}
+                        disabled={feedbackIsBusy || !!feedbackValue}
+                        aria-label="Thumbs up"
+                        style={{
+                          width: 26,
+                          height: 22,
+                          display: 'grid',
+                          placeItems: 'center',
+                          borderRadius: 999,
+                          border: '1px solid rgba(255,255,255,0.18)',
+                          background: feedbackValue === 'up' ? 'rgba(163,190,140,0.2)' : 'rgba(255,255,255,0.04)',
+                          color: feedbackValue === 'up' ? '#A3BE8C' : 'var(--text-secondary)',
+                          cursor: feedbackIsBusy || feedbackValue ? 'not-allowed' : 'pointer',
+                          transition: 'opacity 160ms ease, transform 160ms ease',
+                        }}
+                      >
+                        <ThumbsUp size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => sendSkillFeedback({
+                          messageKey,
+                          messageId: msg.id,
+                          runId: skillTrace?.runId,
+                          rating: 'negative',
+                        })}
+                        disabled={feedbackIsBusy || !!feedbackValue}
+                        aria-label="Thumbs down"
+                        style={{
+                          width: 26,
+                          height: 22,
+                          display: 'grid',
+                          placeItems: 'center',
+                          borderRadius: 999,
+                          border: '1px solid rgba(255,255,255,0.18)',
+                          background: feedbackValue === 'down' ? 'rgba(191,97,106,0.22)' : 'rgba(255,255,255,0.04)',
+                          color: feedbackValue === 'down' ? '#BF616A' : 'var(--text-secondary)',
+                          cursor: feedbackIsBusy || feedbackValue ? 'not-allowed' : 'pointer',
+                          transition: 'opacity 160ms ease, transform 160ms ease',
+                        }}
+                      >
+                        <ThumbsDown size={13} />
+                      </button>
+                    </div>
+                  )}
                 </div>
               );
             })}

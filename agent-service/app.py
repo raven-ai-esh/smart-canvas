@@ -922,6 +922,10 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
                         last_context = _calculate_context(req.model, req.instructions, req.input, tool_output_chunks)
                     trace_entry = {
                         "name": name,
+                        "callId": call_id,
+                        "arguments": args,
+                        "output": payload["content"],
+                        "isError": payload["isError"],
                     }
                     tool_trace.append(trace_entry)
                     if logger.isEnabledFor(logging.DEBUG):

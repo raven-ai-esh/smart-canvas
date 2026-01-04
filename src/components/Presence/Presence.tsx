@@ -34,6 +34,7 @@ type AiKeyInfo = {
 type RavenAiSettings = {
   model: string | null;
   webSearchEnabled: boolean;
+  skillsEnabled: boolean;
   baseUrl: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
@@ -41,7 +42,23 @@ type RavenAiSettings = {
 type RavenAiDefaults = {
   model: string;
   webSearchEnabled: boolean;
+  skillsEnabled: boolean;
   baseUrl: string | null;
+};
+type RavenSkillStep = {
+  title: string;
+  instructions: string;
+  notes?: string | null;
+};
+type RavenSkill = {
+  id: string;
+  name: string;
+  description: string | null;
+  entrypoint: string;
+  version: number | null;
+  steps: RavenSkillStep[];
+  createdAt: string | null;
+  updatedAt: string | null;
 };
 type AlertingSettings = {
   channels: {
@@ -625,8 +642,16 @@ export const Presence: React.FC = () => {
   const [ravenAiDefaults, setRavenAiDefaults] = useState<RavenAiDefaults | null>(null);
   const [ravenAiModel, setRavenAiModel] = useState('');
   const [ravenAiWebSearch, setRavenAiWebSearch] = useState(false);
+  const [ravenAiSkillsEnabled, setRavenAiSkillsEnabled] = useState(false);
   const [ravenAiBaseUrl, setRavenAiBaseUrl] = useState('');
   const [ravenAiAdvancedOpen, setRavenAiAdvancedOpen] = useState(false);
+  const [ravenAiSkills, setRavenAiSkills] = useState<RavenSkill[]>([]);
+  const [ravenAiSkillsBusy, setRavenAiSkillsBusy] = useState(false);
+  const [ravenAiSkillsMessage, setRavenAiSkillsMessage] = useState<string | null>(null);
+  const [ravenAiSkillsOpen, setRavenAiSkillsOpen] = useState(false);
+  const [ravenAiSkillsQuery, setRavenAiSkillsQuery] = useState('');
+  const [ravenAiSkillsActiveId, setRavenAiSkillsActiveId] = useState<string | null>(null);
+  const [ravenAiSkillOverlayVisible, setRavenAiSkillOverlayVisible] = useState(false);
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [integrationsBusy, setIntegrationsBusy] = useState(false);
   const [integrationsMessage, setIntegrationsMessage] = useState<string | null>(null);
@@ -650,6 +675,7 @@ export const Presence: React.FC = () => {
   });
   const [alertingWebhookUrl, setAlertingWebhookUrl] = useState('');
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const ravenAiSkillCloseTimeout = useRef<number | null>(null);
 
   const selfId = presence.selfId;
   const peers = presence.peers;
@@ -669,6 +695,23 @@ export const Presence: React.FC = () => {
   const aiStatusLabel = aiKeyInfo ? 'Active' : 'Not set';
   const ravenAiModelHint = `Default: ${ravenAiDefaults?.model ?? 'gpt-5.2'}`;
   const ravenAiBaseUrlHint = `Default: ${ravenAiDefaults?.baseUrl ?? 'https://api.openai.com/v1'}`;
+  const ravenAiSkillsFiltered = useMemo(() => {
+    const query = ravenAiSkillsQuery.trim().toLowerCase();
+    if (!query) return ravenAiSkills;
+    return ravenAiSkills.filter((skill) => {
+      const haystack = [
+        skill.name,
+        skill.description ?? '',
+        skill.entrypoint,
+      ].join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [ravenAiSkills, ravenAiSkillsQuery]);
+  const ravenAiSkillsLatest = ravenAiSkills[0] ?? null;
+  const ravenAiActiveSkill = useMemo(() => {
+    if (!ravenAiSkillsActiveId) return null;
+    return ravenAiSkills.find((skill) => skill.id === ravenAiSkillsActiveId) ?? null;
+  }, [ravenAiSkills, ravenAiSkillsActiveId]);
   const isTelegramLinked = !!alertingMeta?.telegramLinkedId;
   const telegramBotLink = alertingMeta?.telegramBotLink
     || (alertingMeta?.telegramBotUsername ? `https://t.me/${alertingMeta.telegramBotUsername}` : null);
@@ -741,6 +784,11 @@ export const Presence: React.FC = () => {
     setRavenAiOpen(true);
   };
 
+  const openRavenAiSkills = () => {
+    if (!me) return;
+    setRavenAiSkillsOpen(true);
+  };
+
   const closeSettings = () => {
     setSettingsOpen(false);
     setSettingsMessage(null);
@@ -766,10 +814,38 @@ export const Presence: React.FC = () => {
     setRavenAiDefaults(null);
     setRavenAiModel('');
     setRavenAiWebSearch(false);
+    setRavenAiSkillsEnabled(false);
     setRavenAiBaseUrl('');
     setRavenAiAdvancedOpen(false);
     setAiKeyInfo(null);
     setAiKeyInput('');
+    setRavenAiSkills([]);
+    setRavenAiSkillsBusy(false);
+    setRavenAiSkillsMessage(null);
+    setRavenAiSkillsActiveId(null);
+    setRavenAiSkillOverlayVisible(false);
+    if (ravenAiSkillCloseTimeout.current) {
+      window.clearTimeout(ravenAiSkillCloseTimeout.current);
+      ravenAiSkillCloseTimeout.current = null;
+    }
+  };
+
+  const closeRavenAiSkills = () => {
+    setRavenAiSkillsOpen(false);
+    setRavenAiSkillsQuery('');
+    setRavenAiSkillsActiveId(null);
+    setRavenAiSkillOverlayVisible(false);
+    if (ravenAiSkillCloseTimeout.current) {
+      window.clearTimeout(ravenAiSkillCloseTimeout.current);
+      ravenAiSkillCloseTimeout.current = null;
+    }
+    setRavenAiSkillsMessage(null);
+    setRavenAiSkillsBusy(false);
+  };
+
+  const closeRavenAiSkillsAndSettings = () => {
+    closeRavenAiSkills();
+    closeRavenAi();
   };
 
   const closeIntegrations = () => {
@@ -911,11 +987,30 @@ export const Presence: React.FC = () => {
       setRavenAiDefaults(defaults);
       setRavenAiModel(settings?.model ?? '');
       setRavenAiWebSearch(settings?.webSearchEnabled ?? defaults?.webSearchEnabled ?? false);
+      setRavenAiSkillsEnabled(settings?.skillsEnabled ?? defaults?.skillsEnabled ?? false);
       setRavenAiBaseUrl(settings?.baseUrl ?? '');
     } catch {
       setRavenAiMessage('Failed to load Raven AI settings');
     } finally {
       if (!skipBusy) setRavenAiBusy(false);
+    }
+  };
+
+  const loadRavenAiSkills = async ({ skipBusy = false }: { skipBusy?: boolean } = {}) => {
+    if (!skipBusy) setRavenAiSkillsBusy(true);
+    setRavenAiSkillsMessage(null);
+    try {
+      const res = await fetch('/api/raven-ai/skills');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setRavenAiSkillsMessage('Failed to load skills');
+        return;
+      }
+      setRavenAiSkills(Array.isArray(data?.skills) ? data.skills : []);
+    } catch {
+      setRavenAiSkillsMessage('Failed to load skills');
+    } finally {
+      if (!skipBusy) setRavenAiSkillsBusy(false);
     }
   };
 
@@ -927,10 +1022,34 @@ export const Presence: React.FC = () => {
       await Promise.all([
         loadRavenAiKey({ skipBusy: true }),
         loadRavenAiSettings({ skipBusy: true }),
+        loadRavenAiSkills({ skipBusy: true }),
       ]);
     } finally {
       setRavenAiBusy(false);
     }
+  };
+
+  const openRavenAiSkill = (id: string) => {
+    if (ravenAiSkillCloseTimeout.current) {
+      window.clearTimeout(ravenAiSkillCloseTimeout.current);
+      ravenAiSkillCloseTimeout.current = null;
+    }
+    setRavenAiSkillsActiveId(id);
+    setRavenAiSkillOverlayVisible(false);
+    window.requestAnimationFrame(() => {
+      setRavenAiSkillOverlayVisible(true);
+    });
+  };
+
+  const closeRavenAiSkill = () => {
+    setRavenAiSkillOverlayVisible(false);
+    if (ravenAiSkillCloseTimeout.current) {
+      window.clearTimeout(ravenAiSkillCloseTimeout.current);
+    }
+    ravenAiSkillCloseTimeout.current = window.setTimeout(() => {
+      setRavenAiSkillsActiveId(null);
+      ravenAiSkillCloseTimeout.current = null;
+    }, 200);
   };
 
   const saveRavenAiSettings = async () => {
@@ -940,6 +1059,7 @@ export const Presence: React.FC = () => {
       const payload = {
         model: ravenAiModel.trim() || null,
         webSearchEnabled: ravenAiWebSearch,
+        skillsEnabled: ravenAiSkillsEnabled,
         baseUrl: ravenAiBaseUrl.trim() || null,
       };
       const res = await fetch('/api/raven-ai/settings', {
@@ -957,6 +1077,7 @@ export const Presence: React.FC = () => {
       setRavenAiDefaults(defaults);
       setRavenAiModel(settings?.model ?? '');
       setRavenAiWebSearch(settings?.webSearchEnabled ?? defaults?.webSearchEnabled ?? false);
+      setRavenAiSkillsEnabled(settings?.skillsEnabled ?? defaults?.skillsEnabled ?? false);
       setRavenAiBaseUrl(settings?.baseUrl ?? '');
       setRavenAiMessage('Raven AI settings saved');
     } catch {
@@ -1199,12 +1320,12 @@ export const Presence: React.FC = () => {
   }, [settingsOpen, me]);
 
   useEffect(() => {
-    const modalOpen = settingsOpen || integrationsOpen || ravenAiOpen || (open && !me);
+    const modalOpen = settingsOpen || integrationsOpen || ravenAiOpen || ravenAiSkillsOpen || (open && !me);
     document.body.classList.toggle('modal-open', modalOpen);
     return () => {
       document.body.classList.remove('modal-open');
     };
-  }, [integrationsOpen, me, open, ravenAiOpen, settingsOpen]);
+  }, [integrationsOpen, me, open, ravenAiOpen, ravenAiSkillsOpen, settingsOpen]);
 
   useEffect(() => {
     if (!integrationsOpen) return;
@@ -1227,6 +1348,11 @@ export const Presence: React.FC = () => {
   }, [ravenAiOpen]);
 
   useEffect(() => {
+    if (!ravenAiSkillsOpen) return;
+    void loadRavenAiSkills();
+  }, [ravenAiSkillsOpen]);
+
+  useEffect(() => {
     if (integrationsOpen && !me) {
       closeIntegrations();
     }
@@ -1237,6 +1363,12 @@ export const Presence: React.FC = () => {
       closeRavenAi();
     }
   }, [ravenAiOpen, me]);
+
+  useEffect(() => {
+    if (ravenAiSkillsOpen && !me) {
+      closeRavenAiSkills();
+    }
+  }, [ravenAiSkillsOpen, me]);
 
   useEffect(() => {
     if (!settingsPassword) setSettingsPasswordConfirm('');
@@ -3063,6 +3195,31 @@ export const Presence: React.FC = () => {
                   </div>
 
                   <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Skills mode</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Let Raven learn and reuse step-by-step skills.</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setRavenAiSkillsEnabled((prev) => !prev)}
+                      disabled={ravenAiBusy}
+                      style={{
+                        borderRadius: 999,
+                        border: '1px solid var(--border-strong)',
+                        background: ravenAiSkillsEnabled ? 'var(--accent-glow)' : 'transparent',
+                        color: 'var(--text-primary)',
+                        padding: '6px 12px',
+                        fontSize: 12,
+                        cursor: ravenAiBusy ? 'not-allowed' : 'pointer',
+                        minWidth: 64,
+                      }}
+                    >
+                      {ravenAiSkillsEnabled ? 'On' : 'Off'}
+                    </button>
+                  </div>
+
+                  <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.4 }} />
                   <button
                     type="button"
                     onClick={() => setRavenAiAdvancedOpen((prev) => !prev)}
@@ -3130,6 +3287,467 @@ export const Presence: React.FC = () => {
                       {ravenAiBusy && <LoadingSpinner size={12} />}
                     </button>
                   </div>
+                </div>
+
+                <div
+                  style={{
+                    borderRadius: 14,
+                    border: '1px solid var(--border-strong)',
+                    background: 'rgba(255,255,255,0.03)',
+                    padding: 12,
+                    display: 'grid',
+                    gap: 10,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Skills library</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Review the skills Raven has recorded.</div>
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-secondary)',
+                      padding: '10px 12px',
+                      borderRadius: 12,
+                      border: '1px solid var(--border-strong)',
+                      background: 'rgba(15, 20, 28, 0.45)',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    Skills live in a dedicated library so you can browse them without leaving your canvas.
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-secondary)' }}>
+                    <span>{ravenAiSkillsBusy ? 'Loading skills...' : `${ravenAiSkills.length} skills`}</span>
+                    <span>
+                      {ravenAiSkillsLatest
+                        ? `Last updated ${formatDateTime(ravenAiSkillsLatest.updatedAt)}`
+                        : 'No skills recorded yet'}
+                    </span>
+                  </div>
+                  {ravenAiSkillsMessage && (
+                    <div style={{ fontSize: 11, color: '#EBCB8B' }}>{ravenAiSkillsMessage}</div>
+                  )}
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      onClick={openRavenAiSkills}
+                      disabled={ravenAiSkillsBusy}
+                      style={{
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'var(--accent-primary)',
+                        color: '#fff',
+                        padding: '8px 12px',
+                        cursor: ravenAiSkillsBusy ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      Open skills library
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void loadRavenAiSkills({})}
+                      disabled={ravenAiSkillsBusy}
+                      style={{
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'transparent',
+                        color: 'var(--text-primary)',
+                        padding: '8px 12px',
+                        cursor: ravenAiSkillsBusy ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Raven AI skills library modal */}
+      {ravenAiSkillsOpen && me && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 12100,
+            background: 'rgba(0,0,0,0.55)',
+            display: 'grid',
+            placeItems: 'stretch',
+            padding: 0,
+          }}
+          onPointerDown={closeRavenAiSkills}
+        >
+          <div style={{ display: 'grid', position: 'relative' }}>
+            <div
+              style={{
+                width: '100%',
+                height: '100%',
+                borderRadius: 0,
+                background: 'var(--bg-node)',
+                border: 'none',
+                boxShadow: 'none',
+                padding: 20,
+                paddingTop: 'calc(20px + env(safe-area-inset-top, 0px))',
+                paddingLeft: 'calc(20px + env(safe-area-inset-left, 0px))',
+                paddingRight: 'calc(20px + env(safe-area-inset-right, 0px))',
+                boxSizing: 'border-box',
+                position: 'relative',
+                maxHeight: '100vh',
+                overflow: 'hidden',
+                paddingBottom: 'calc(20px + env(safe-area-inset-bottom, 0px))',
+                WebkitOverflowScrolling: 'touch',
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <div
+                style={{
+                  display: 'grid',
+                  gap: 12,
+                  height: '100%',
+                  gridTemplateRows: 'auto minmax(0, 1fr)',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                      <div style={{ display: 'grid', gap: 4 }}>
+                        <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--text-primary)' }}>Skills</div>
+                        <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                          {ravenAiSkillsBusy ? 'Loading skills...' : `${ravenAiSkills.length} skills`}
+                          {ravenAiSkillsLatest ? ` • Updated ${formatDateTime(ravenAiSkillsLatest.updatedAt)}` : ''}
+                        </div>
+                      </div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <input
+                      value={ravenAiSkillsQuery}
+                      onChange={(e) => setRavenAiSkillsQuery(e.target.value)}
+                      placeholder="Search skills"
+                      disabled={ravenAiSkillsBusy}
+                      style={{
+                        borderRadius: 10,
+                        border: '1px solid var(--border-strong)',
+                        background: 'rgba(12, 14, 20, 0.6)',
+                        color: 'var(--text-primary)',
+                        padding: '6px 10px',
+                        fontSize: 12,
+                        minWidth: isCompactAuth ? '100%' : 220,
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void loadRavenAiSkills({})}
+                      disabled={ravenAiSkillsBusy}
+                      style={{
+                        borderRadius: 10,
+                        border: '1px solid var(--border-strong)',
+                        background: 'transparent',
+                        color: 'var(--text-primary)',
+                        padding: '6px 12px',
+                        fontSize: 12,
+                        cursor: ravenAiSkillsBusy ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      Refresh
+                    </button>
+                    <button
+                      type="button"
+                      onClick={closeRavenAiSkills}
+                      style={{
+                        borderRadius: 10,
+                        border: '1px solid var(--border-strong)',
+                        background: 'transparent',
+                        color: 'var(--text-primary)',
+                        padding: '6px 12px',
+                        cursor: 'pointer',
+                        fontSize: 12,
+                      }}
+                    >
+                      Back
+                    </button>
+                    <button
+                      type="button"
+                      onClick={closeRavenAiSkillsAndSettings}
+                      style={{
+                        borderRadius: 10,
+                        border: '1px solid var(--border-strong)',
+                        background: 'rgba(15, 20, 28, 0.6)',
+                        color: 'var(--text-primary)',
+                        padding: '6px 12px',
+                        cursor: 'pointer',
+                        fontSize: 12,
+                      }}
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+                {ravenAiSkillsMessage && (
+                  <div style={{ fontSize: 11, color: '#EBCB8B' }}>{ravenAiSkillsMessage}</div>
+                )}
+
+                <div style={{ position: 'relative', minHeight: 0 }}>
+                  <div style={{ height: '100%', overflowY: 'auto', overflowX: 'hidden', paddingRight: 6 }}>
+                    {ravenAiSkillsBusy && (
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Loading skills...</div>
+                    )}
+                    {!ravenAiSkillsBusy && ravenAiSkillsFiltered.length === 0 && (
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                        {ravenAiSkills.length === 0 ? 'No skills recorded yet.' : 'No skills match this search.'}
+                      </div>
+                    )}
+                    {!ravenAiSkillsBusy && ravenAiSkillsFiltered.length > 0 && (
+                      <div
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: isCompactAuth
+                            ? 'repeat(2, minmax(0, 1fr))'
+                            : 'repeat(auto-fill, minmax(180px, 1fr))',
+                          gap: 12,
+                          gridAutoRows: '108px',
+                        }}
+                      >
+                        {ravenAiSkillsFiltered.map((skill, idx) => (
+                          <button
+                            key={skill.id}
+                            type="button"
+                            onClick={() => openRavenAiSkill(skill.id)}
+                            style={{
+                              textAlign: 'left',
+                              borderRadius: 14,
+                              border: '1px solid rgba(255,255,255,0.16)',
+                              background: 'rgba(14, 18, 28, 0.88)',
+                              padding: '10px 12px',
+                              display: 'grid',
+                              gap: 6,
+                              cursor: 'pointer',
+                              color: 'inherit',
+                              overflow: 'hidden',
+                              boxShadow: '0 10px 24px rgba(0,0,0,0.25)',
+                              boxSizing: 'border-box',
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  fontWeight: 700,
+                                  color: 'var(--text-secondary)',
+                                  padding: '2px 8px',
+                                  borderRadius: 999,
+                                  border: '1px solid rgba(255,255,255,0.16)',
+                                  background: 'rgba(15, 18, 26, 0.6)',
+                                  minWidth: 30,
+                                  textAlign: 'center',
+                                }}
+                              >
+                                {idx + 1}
+                              </div>
+                              <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                                {`${skill.steps?.length ?? 0} steps`}
+                              </div>
+                            </div>
+                            <div
+                              style={{
+                                fontSize: 13,
+                                fontWeight: 600,
+                                color: 'var(--text-primary)',
+                                lineHeight: 1.3,
+                                display: '-webkit-box',
+                                WebkitBoxOrient: 'vertical',
+                                WebkitLineClamp: 2,
+                                overflow: 'hidden',
+                                minWidth: 0,
+                                maxWidth: '100%',
+                                wordBreak: 'break-word',
+                                overflowWrap: 'anywhere',
+                              }}
+                            >
+                              {skill.name}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {ravenAiActiveSkill && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        inset: 0,
+                        background: 'rgba(6, 8, 14, 0.75)',
+                        display: 'grid',
+                        placeItems: 'center',
+                        padding: 16,
+                        zIndex: 5,
+                        opacity: ravenAiSkillOverlayVisible ? 1 : 0,
+                        pointerEvents: ravenAiSkillOverlayVisible ? 'auto' : 'none',
+                        transition: 'opacity 180ms ease',
+                        backdropFilter: 'blur(6px)',
+                      }}
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        closeRavenAiSkill();
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: isCompactAuth ? '100%' : 'min(760px, 94%)',
+                          maxHeight: isCompactAuth
+                            ? 'calc(var(--visual-height, 100vh) - 120px)'
+                            : 'min(720px, calc(var(--visual-height, 100vh) - 180px))',
+                          borderRadius: 18,
+                          background: 'linear-gradient(180deg, rgba(18, 22, 32, 0.98), rgba(10, 12, 20, 0.98))',
+                          border: '1px solid rgba(255,255,255,0.12)',
+                          boxShadow: '0 24px 80px rgba(0,0,0,0.6)',
+                          padding: 18,
+                          display: 'grid',
+                          gap: 12,
+                          gridTemplateRows: 'auto auto minmax(0, 1fr)',
+                          boxSizing: 'border-box',
+                          overflow: 'hidden',
+                          minWidth: 0,
+                          transform: ravenAiSkillOverlayVisible ? 'translateY(0) scale(1)' : 'translateY(12px) scale(0.97)',
+                          opacity: ravenAiSkillOverlayVisible ? 1 : 0,
+                          transition: 'transform 220ms ease, opacity 220ms ease',
+                        }}
+                        onPointerDown={(e) => e.stopPropagation()}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                          <div style={{ display: 'grid', gap: 6 }}>
+                            <div
+                              style={{
+                                fontSize: 18,
+                                fontWeight: 700,
+                                color: 'var(--text-primary)',
+                                wordBreak: 'break-word',
+                                overflowWrap: 'anywhere',
+                                maxWidth: '100%',
+                              }}
+                            >
+                              {ravenAiActiveSkill.name}
+                            </div>
+                            {ravenAiActiveSkill.description && (
+                              <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                                {ravenAiActiveSkill.description}
+                              </div>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={closeRavenAiSkill}
+                            style={{
+                              borderRadius: 999,
+                              border: '1px solid rgba(255,255,255,0.12)',
+                              background: 'rgba(12, 14, 20, 0.6)',
+                              color: 'var(--text-primary)',
+                              padding: '6px 12px',
+                              cursor: 'pointer',
+                              fontSize: 12,
+                            }}
+                          >
+                            Close
+                          </button>
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 11, color: 'var(--text-secondary)' }}>
+                          <span>{ravenAiActiveSkill.version ? `v${ravenAiActiveSkill.version}` : 'v?'}</span>
+                          <span>{`${ravenAiActiveSkill.steps?.length ?? 0} steps`}</span>
+                          <span>{`Updated ${formatDateTime(ravenAiActiveSkill.updatedAt)}`}</span>
+                        </div>
+                        <div
+                          style={{
+                            borderRadius: 12,
+                            border: '1px solid rgba(255,255,255,0.12)',
+                            background: 'rgba(12, 14, 22, 0.7)',
+                            padding: 12,
+                            display: 'grid',
+                            gap: 10,
+                            fontSize: 12,
+                            color: 'var(--text-secondary)',
+                            overflowY: 'auto',
+                            overflowX: 'hidden',
+                            minHeight: 0,
+                            minWidth: 0,
+                            width: '100%',
+                            maxWidth: '100%',
+                            boxSizing: 'border-box',
+                          }}
+                        >
+                          {ravenAiActiveSkill.entrypoint && (
+                            <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                              Entrypoint:{' '}
+                              <span
+                                style={{
+                                  color: 'var(--text-primary)',
+                                  whiteSpace: 'pre-wrap',
+                                  wordBreak: 'break-word',
+                                  overflowWrap: 'anywhere',
+                                }}
+                              >
+                                {ravenAiActiveSkill.entrypoint}
+                              </span>
+                            </div>
+                          )}
+                          <div style={{ display: 'grid', gap: 10, minWidth: 0, width: '100%', maxWidth: '100%' }}>
+                            {(ravenAiActiveSkill.steps ?? []).map((step, idx) => (
+                              <div
+                                key={`${ravenAiActiveSkill.id}-step-${idx}`}
+                                style={{
+                                  borderRadius: 12,
+                                  border: '1px solid rgba(255,255,255,0.1)',
+                                  background: 'rgba(10, 12, 18, 0.78)',
+                                  padding: '10px 12px',
+                                  display: 'grid',
+                                  gap: 6,
+                                  overflow: 'hidden',
+                                  minWidth: 0,
+                                  width: '100%',
+                                  maxWidth: '100%',
+                                  boxSizing: 'border-box',
+                                }}
+                              >
+                                <div style={{ fontSize: 10, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                                  {`Step ${idx + 1}`}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                    color: 'var(--text-primary)',
+                                    wordBreak: 'break-word',
+                                    overflowWrap: 'anywhere',
+                                  }}
+                                >
+                                  {step.title}
+                                </div>
+                                <div
+                                  style={{
+                                    color: 'var(--text-secondary)',
+                                    whiteSpace: 'pre-wrap',
+                                    wordBreak: 'break-word',
+                                    overflowWrap: 'anywhere',
+                                    maxWidth: '100%',
+                                  }}
+                                >
+                                  {step.instructions}
+                                </div>
+                                {step.notes && (
+                                  <div style={{ color: 'var(--text-secondary)', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
+                                    {step.notes}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
