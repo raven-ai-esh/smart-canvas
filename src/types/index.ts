@@ -51,10 +51,20 @@ export interface EdgeData {
   target: string;
   type: 'default' | 'connection';
   energyEnabled?: boolean;
+  sourceAnchor?: { x: number; y: number };
+  targetAnchor?: { x: number; y: number };
+  curveOffset?: { x: number; y: number };
+  controlPoints?: EdgeControlPoint[];
   createdAt?: number; // epoch ms
   updatedAt?: number; // epoch ms
   authorId?: string | null;
   authorName?: string | null;
+}
+
+export interface EdgeControlPoint {
+  id: string;
+  t: number; // 0-1 along base curve
+  offset: { x: number; y: number };
 }
 
 export type PenToolType = 'pen' | 'eraser' | 'highlighter';
