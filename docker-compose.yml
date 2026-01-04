@@ -50,6 +50,8 @@ services:
       OPENAI_TIMEOUT_MS: "${OPENAI_TIMEOUT_MS:-600000}"
       AGENT_SERVICE_TIMEOUT_MS: "${AGENT_SERVICE_TIMEOUT_MS:-600000}"
       AGENT_SERVICE_URL: "${AGENT_SERVICE_URL:-http://agent:8001/run}"
+      SKILLS_SERVICE_URL: "${SKILLS_SERVICE_URL:-http://skills:8002/run}"
+      SKILLS_SERVICE_TIMEOUT_MS: "${SKILLS_SERVICE_TIMEOUT_MS:-600000}"
       REDIS_URL: "redis://redis:6379"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
       LOG_TRACE: "${LOG_TRACE:-false}"
@@ -68,6 +70,7 @@ services:
       - db
       - redis
       - agent
+      - skills
       - otel-collector
     volumes:
       - attachments-data:/app/data/attachments
@@ -92,6 +95,28 @@ services:
       - "8001:8001"
     volumes:
       - agent-data:/app/data
+    restart: always
+
+  skills:
+    build:
+      context: .
+      dockerfile: skills-service/Dockerfile
+    environment:
+      DATABASE_URL: "postgres://postgres:postgres@db:5432/smart_tracker"
+      AGENT_SERVICE_URL: "http://agent:8001/run"
+      AGENT_SERVICE_TIMEOUT_MS: "${AGENT_SERVICE_TIMEOUT_MS:-600000}"
+      OPENAI_API_BASE_URL: "${OPENAI_API_BASE_URL:-https://api.openai.com/v1}"
+      OPENAI_EMBEDDING_MODEL: "${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}"
+      OPENAI_TIMEOUT_MS: "${OPENAI_TIMEOUT_MS:-600000}"
+      OPENAI_EMBEDDING_DIM: "${OPENAI_EMBEDDING_DIM:-1536}"
+      SKILLS_MATCH_THRESHOLD: "${SKILLS_MATCH_THRESHOLD:-0.25}"
+      SKILLS_MAX_STEPS: "${SKILLS_MAX_STEPS:-8}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    ports:
+      - "8002:8002"
+    depends_on:
+      - db
+      - agent
     restart: always
 
   mcp:

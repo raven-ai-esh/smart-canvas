@@ -67,6 +67,8 @@ const MCP_TECH_AVATAR_ANIMAL = process.env.MCP_TECH_AVATAR_ANIMAL ?? '';
 const MCP_TECH_AVATAR_COLOR = process.env.MCP_TECH_AVATAR_COLOR ?? '';
 const AGENT_SERVICE_URL = process.env.AGENT_SERVICE_URL ?? 'http://agent:8001/run';
 const AGENT_SERVICE_TIMEOUT_MS = Number(process.env.AGENT_SERVICE_TIMEOUT_MS ?? 60000);
+const SKILLS_SERVICE_URL = process.env.SKILLS_SERVICE_URL ?? '';
+const SKILLS_SERVICE_TIMEOUT_MS = Number(process.env.SKILLS_SERVICE_TIMEOUT_MS ?? AGENT_SERVICE_TIMEOUT_MS);
 const OPENAI_API_BASE_URL = process.env.OPENAI_API_BASE_URL ?? 'https://api.openai.com/v1';
 const OPENAI_MODEL = process.env.OPENAI_MODEL ?? 'gpt-5.2';
 const OPENAI_SUMMARY_MODEL = process.env.OPENAI_SUMMARY_MODEL ?? OPENAI_MODEL;
@@ -448,6 +450,7 @@ async function initDb() {
       user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       model TEXT,
       web_search_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      skills_enabled BOOLEAN NOT NULL DEFAULT FALSE,
       base_url TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -455,6 +458,11 @@ async function initDb() {
   `);
   try {
     await pool.query('CREATE INDEX IF NOT EXISTS raven_ai_settings_user_id_idx ON raven_ai_settings (user_id)');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('ALTER TABLE raven_ai_settings ADD COLUMN IF NOT EXISTS skills_enabled BOOLEAN NOT NULL DEFAULT FALSE');
   } catch {
     // ignore
   }
@@ -576,6 +584,146 @@ async function initDb() {
     } catch {
       // ignore
     }
+  }
+
+  if (VECTOR_ENABLED) {
+    const dim = Number.isFinite(EMBEDDING_DIM) && EMBEDDING_DIM > 0 ? Math.floor(EMBEDDING_DIM) : 1536;
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS assistant_skills (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        description TEXT,
+        entrypoint_text TEXT NOT NULL,
+        embedding vector(${dim}),
+        active_version_id TEXT,
+        parameters JSONB NOT NULL DEFAULT '[]'::jsonb,
+        preconditions JSONB NOT NULL DEFAULT '[]'::jsonb,
+        success_criteria JSONB NOT NULL DEFAULT '[]'::jsonb,
+        examples JSONB NOT NULL DEFAULT '[]'::jsonb,
+        generalization_score DOUBLE PRECISION,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    try {
+      await pool.query('CREATE INDEX IF NOT EXISTS assistant_skills_embedding_idx ON assistant_skills USING ivfflat (embedding vector_cosine_ops)');
+    } catch {
+      // ignore
+    }
+  } else {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS assistant_skills (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        description TEXT,
+        entrypoint_text TEXT NOT NULL,
+        embedding DOUBLE PRECISION[],
+        active_version_id TEXT,
+        parameters JSONB NOT NULL DEFAULT '[]'::jsonb,
+        preconditions JSONB NOT NULL DEFAULT '[]'::jsonb,
+        success_criteria JSONB NOT NULL DEFAULT '[]'::jsonb,
+        examples JSONB NOT NULL DEFAULT '[]'::jsonb,
+        generalization_score DOUBLE PRECISION,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS assistant_skills_user_id_idx ON assistant_skills (user_id)');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query("ALTER TABLE assistant_skills ADD COLUMN IF NOT EXISTS parameters JSONB NOT NULL DEFAULT '[]'::jsonb");
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query("ALTER TABLE assistant_skills ADD COLUMN IF NOT EXISTS preconditions JSONB NOT NULL DEFAULT '[]'::jsonb");
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query("ALTER TABLE assistant_skills ADD COLUMN IF NOT EXISTS success_criteria JSONB NOT NULL DEFAULT '[]'::jsonb");
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query("ALTER TABLE assistant_skills ADD COLUMN IF NOT EXISTS examples JSONB NOT NULL DEFAULT '[]'::jsonb");
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('ALTER TABLE assistant_skills ADD COLUMN IF NOT EXISTS generalization_score DOUBLE PRECISION');
+  } catch {
+    // ignore
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS assistant_skill_versions (
+      id TEXT PRIMARY KEY,
+      skill_id TEXT NOT NULL REFERENCES assistant_skills(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      steps JSONB NOT NULL DEFAULT '[]'::jsonb,
+      base_prompt TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS assistant_skill_versions_skill_id_idx ON assistant_skill_versions (skill_id)');
+  } catch {
+    // ignore
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS assistant_skill_runs (
+      id TEXT PRIMARY KEY,
+      skill_id TEXT REFERENCES assistant_skills(id) ON DELETE SET NULL,
+      skill_version_id TEXT REFERENCES assistant_skill_versions(id) ON DELETE SET NULL,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      thread_id TEXT,
+      session_id TEXT,
+      input TEXT,
+      step_results JSONB NOT NULL DEFAULT '[]'::jsonb,
+      feedback_rating TEXT,
+      feedback_text TEXT,
+      feedback_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS assistant_skill_runs_user_id_idx ON assistant_skill_runs (user_id)');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS assistant_skill_runs_skill_id_idx ON assistant_skill_runs (skill_id)');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('ALTER TABLE assistant_skill_runs ADD COLUMN IF NOT EXISTS feedback_rating TEXT');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('ALTER TABLE assistant_skill_runs ADD COLUMN IF NOT EXISTS feedback_text TEXT');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('ALTER TABLE assistant_skill_runs ADD COLUMN IF NOT EXISTS feedback_at TIMESTAMPTZ');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('ALTER TABLE assistant_skill_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()');
+  } catch {
+    // ignore
   }
 }
 
@@ -1255,6 +1403,7 @@ function normalizeRavenAiSettings(raw) {
   return {
     model: modelRaw ? modelRaw.slice(0, 120) : null,
     webSearchEnabled: coerceBool(raw?.webSearchEnabled, false),
+    skillsEnabled: coerceBool(raw?.skillsEnabled, false),
     baseUrl: baseUrlRaw ? sanitizeWebhookUrl(baseUrlRaw) : null,
   };
 }
@@ -1264,6 +1413,7 @@ function serializeRavenAiSettingsRow(row) {
   return {
     model: row.model ?? null,
     webSearchEnabled: row.web_search_enabled ?? false,
+    skillsEnabled: row.skills_enabled ?? false,
     baseUrl: row.base_url ?? null,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
@@ -1275,13 +1425,14 @@ function resolveRavenAiSettings(settings) {
   return {
     model: settings?.model ?? OPENAI_MODEL,
     webSearchEnabled: typeof settings?.webSearchEnabled === 'boolean' ? settings.webSearchEnabled : false,
+    skillsEnabled: typeof settings?.skillsEnabled === 'boolean' ? settings.skillsEnabled : false,
     baseUrl: settings?.baseUrl ?? baseUrl,
   };
 }
 
 async function getRavenAiSettings(userId) {
   const res = await pool.query(
-    `SELECT user_id, model, web_search_enabled, base_url, created_at, updated_at
+    `SELECT user_id, model, web_search_enabled, skills_enabled, base_url, created_at, updated_at
        FROM raven_ai_settings
       WHERE user_id = $1`,
     [userId],
@@ -1292,15 +1443,16 @@ async function getRavenAiSettings(userId) {
 async function upsertRavenAiSettings({ userId, settings }) {
   const normalized = normalizeRavenAiSettings(settings ?? {});
   const res = await pool.query(
-    `INSERT INTO raven_ai_settings (user_id, model, web_search_enabled, base_url)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO raven_ai_settings (user_id, model, web_search_enabled, skills_enabled, base_url)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (user_id) DO UPDATE
        SET model = EXCLUDED.model,
            web_search_enabled = EXCLUDED.web_search_enabled,
+           skills_enabled = EXCLUDED.skills_enabled,
            base_url = EXCLUDED.base_url,
            updated_at = NOW()
-     RETURNING user_id, model, web_search_enabled, base_url, created_at, updated_at`,
-    [userId, normalized.model, normalized.webSearchEnabled, normalized.baseUrl],
+     RETURNING user_id, model, web_search_enabled, skills_enabled, base_url, created_at, updated_at`,
+    [userId, normalized.model, normalized.webSearchEnabled, normalized.skillsEnabled, normalized.baseUrl],
   );
   return res.rows[0] ? serializeRavenAiSettingsRow(res.rows[0]) : null;
 }
@@ -1802,6 +1954,109 @@ const clampText = (value, max) => {
   return trimmed.length > max ? trimmed.slice(0, max) : trimmed;
 };
 
+const normalizeSkillSteps = (value) => {
+  let raw = value;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      raw = [];
+    }
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 50).map((step) => {
+    if (!step || typeof step !== 'object') return null;
+    const title = clampText(step.title ?? '', 160) || 'Step';
+    const instructions = clampText(step.instructions ?? '', 2400);
+    if (!instructions) return null;
+    const notes = clampText(step.notes ?? '', 1200) || null;
+    return { title, instructions, notes };
+  }).filter(Boolean);
+};
+
+const normalizeSkillParameters = (value) => {
+  let raw = value;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      raw = [];
+    }
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 20).map((param) => {
+    if (!param || typeof param !== 'object') return null;
+    const name = clampText(param.name ?? '', 80);
+    const description = clampText(param.description ?? '', 280);
+    if (!name || !description) return null;
+    const example = clampText(param.example ?? '', 280) || null;
+    return { name, description, example };
+  }).filter(Boolean);
+};
+
+const normalizeSkillStringList = (value, maxItems, maxLen) => {
+  let raw = value;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      raw = raw.split(/\n|;/g);
+    }
+  }
+  if (!Array.isArray(raw)) return [];
+  const items = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const text = clampText(entry, maxLen);
+    if (!text) continue;
+    items.push(text);
+    if (items.length >= maxItems) break;
+  }
+  return items;
+};
+
+const normalizeSkillExamples = (value) => {
+  let raw = value;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      raw = [];
+    }
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 10).map((example) => {
+    if (!example || typeof example !== 'object') return null;
+    const userInput = clampText(example.userInput ?? '', 900);
+    if (!userInput) return null;
+    const outputSummary = clampText(example.outputSummary ?? '', 1400) || null;
+    const notes = clampText(example.notes ?? '', 800) || null;
+    const runId = clampText(example.runId ?? '', 80) || null;
+    return { userInput, outputSummary, notes, runId };
+  }).filter(Boolean);
+};
+
+const serializeSkillRow = (row) => {
+  if (!row) return null;
+  const rawVersion = row.version;
+  const version = typeof rawVersion === 'number' ? rawVersion : Number(rawVersion ?? NaN);
+  return {
+    id: row.id,
+    name: row.name ?? 'Skill',
+    description: row.description ?? null,
+    entrypoint: row.entrypoint_text ?? '',
+    version: Number.isFinite(version) ? version : null,
+    steps: normalizeSkillSteps(row.steps),
+    parameters: normalizeSkillParameters(row.parameters),
+    preconditions: normalizeSkillStringList(row.preconditions, 12, 260),
+    successCriteria: normalizeSkillStringList(row.success_criteria, 12, 260),
+    examples: normalizeSkillExamples(row.examples),
+    generalizationScore: clampNumber(row.generalization_score, 0, 1),
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+  };
+};
+
 const clampNumber = (value, min, max) => {
   const num = Number(value);
   if (!Number.isFinite(num)) return null;
@@ -1905,6 +2160,23 @@ const normalizeAssistantTraceValue = (value, maxLength) => {
   }
 };
 
+const normalizeAssistantSkillTrace = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const runId = clampText(value.runId, 200) || undefined;
+  const skillId = clampText(value.skillId, 200) || undefined;
+  const skillVersionId = clampText(value.skillVersionId, 200) || undefined;
+  const found = value.found === true ? true : value.found === false ? false : undefined;
+  const matchDistance = Number.isFinite(value.matchDistance) ? Number(value.matchDistance) : undefined;
+  if (!runId && !skillId && !skillVersionId) return undefined;
+  return {
+    runId,
+    skillId,
+    skillVersionId,
+    found,
+    matchDistance,
+  };
+};
+
 const normalizeAssistantTrace = (value) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const reasoning = clampText(value.reasoning, 2400) || undefined;
@@ -1924,10 +2196,12 @@ const normalizeAssistantTrace = (value) => {
       isError: tool.isError === true,
     };
   }).filter(Boolean);
-  if (!reasoning && !tools.length) return null;
+  const skill = normalizeAssistantSkillTrace(value.skill);
+  if (!reasoning && !tools.length && !skill) return null;
   return {
     reasoning,
     tools,
+    skill,
   };
 };
 
@@ -2104,6 +2378,150 @@ const callAgentService = async ({
   }
 };
 
+const callSkillsService = async ({
+  apiKey,
+  sessionId,
+  userName,
+  userId,
+  threadId,
+  inputItems,
+  model,
+  openaiBaseUrl,
+  webSearchEnabled,
+  abortSignal,
+}) => {
+  if (!SKILLS_SERVICE_URL) {
+    const err = new Error('skills_service_unavailable');
+    err.code = 'skills_service_unavailable';
+    throw err;
+  }
+  const allowedTools = (MCP_AGENT_ALLOWED_TOOLS || '')
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+  const resolvedModel = model || OPENAI_MODEL;
+  const resolvedBaseUrl = openaiBaseUrl || OPENAI_API_BASE_URL;
+  const payload = {
+    apiKey,
+    model: resolvedModel,
+    userName,
+    userId,
+    threadId,
+    sessionId,
+    input: inputItems,
+    temperature: 0.3,
+    openaiBaseUrl: resolvedBaseUrl,
+    openaiTimeoutMs: OPENAI_TIMEOUT_MS,
+    webSearchEnabled: !!webSearchEnabled,
+    mcp: MCP_SERVER_URL
+      ? {
+          url: MCP_SERVER_URL,
+          token: MCP_TECH_TOKEN || null,
+          sessionId: sessionId || null,
+          userId: userId || null,
+          allowedTools,
+        }
+      : null,
+  };
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (abortSignal) {
+    if (abortSignal.aborted) {
+      controller.abort();
+    } else {
+      abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
+  }
+  const timeout = setTimeout(() => controller.abort(), SKILLS_SERVICE_TIMEOUT_MS);
+  try {
+    const res = await fetch(SKILLS_SERVICE_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = body?.detail ?? body ?? {};
+      const err = new Error(detail?.message ?? detail?.error ?? res.statusText ?? 'skills_failed');
+      err.status = res.status;
+      err.code = detail?.error ?? null;
+      throw err;
+    }
+    const rawTrace = body?.trace ?? null;
+    const skillMeta = body?.skill ?? null;
+    let trace = rawTrace;
+    if (skillMeta && typeof skillMeta === 'object') {
+      const base = rawTrace && typeof rawTrace === 'object' ? rawTrace : {};
+      trace = { ...base, skill: skillMeta };
+    }
+    return {
+      output: typeof body?.output === 'string' ? body.output : '',
+      context: body?.context ?? null,
+      trace,
+    };
+  } finally {
+    clearTimeout(timeout);
+    if (abortSignal) {
+      abortSignal.removeEventListener?.('abort', onAbort);
+    }
+  }
+};
+
+const getSkillsFeedbackUrl = () => {
+  if (!SKILLS_SERVICE_URL) return '';
+  if (SKILLS_SERVICE_URL.endsWith('/feedback')) return SKILLS_SERVICE_URL;
+  if (SKILLS_SERVICE_URL.endsWith('/run')) return SKILLS_SERVICE_URL.replace(/\/run$/, '/feedback');
+  return `${SKILLS_SERVICE_URL.replace(/\/+$/, '')}/feedback`;
+};
+
+const callSkillsFeedback = async ({
+  apiKey,
+  model,
+  userId,
+  runId,
+  rating,
+  feedback,
+  openaiBaseUrl,
+}) => {
+  const url = getSkillsFeedbackUrl();
+  if (!url) {
+    const err = new Error('skills_service_unavailable');
+    err.code = 'skills_service_unavailable';
+    throw err;
+  }
+  const payload = {
+    apiKey,
+    model,
+    userId,
+    runId,
+    rating,
+    feedback,
+    openaiBaseUrl,
+  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SKILLS_SERVICE_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = body?.detail ?? body ?? {};
+      const err = new Error(detail?.message ?? detail?.error ?? res.statusText ?? 'skills_feedback_failed');
+      err.status = res.status;
+      err.code = detail?.error ?? null;
+      throw err;
+    }
+    return body ?? {};
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 const callAgentContext = async ({ model, input, userName }) => {
   const payload = {
     model,
@@ -2151,6 +2569,19 @@ const serializeAssistantMessageRow = (row) => ({
   meta: normalizeAssistantMessageMeta(row.meta) ?? null,
   createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
 });
+
+async function getAssistantMessageMetaForUser({ messageId, userId }) {
+  const res = await pool.query(
+    `SELECT m.meta
+       FROM assistant_messages m
+       JOIN assistant_threads t ON t.id = m.thread_id
+      WHERE m.id = $1
+        AND t.user_id = $2`,
+    [messageId, userId],
+  );
+  if (!res.rows[0]) return null;
+  return normalizeAssistantMessageMeta(res.rows[0].meta) ?? null;
+}
 
 async function createAssistantThread({ userId, sessionId, title }) {
   const id = randomUUID();
@@ -2271,6 +2702,22 @@ async function listAssistantMessagesPage(threadId, limit, offset) {
     [threadId, safeLimit, safeOffset],
   );
   return res.rows.map(serializeAssistantMessageRow);
+}
+
+async function listAssistantSkills(userId, limit = 60) {
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(200, Math.floor(limit)) : 60;
+  const res = await pool.query(
+    `SELECT s.id, s.name, s.description, s.entrypoint_text, s.updated_at, s.created_at,
+            s.parameters, s.preconditions, s.success_criteria, s.examples, s.generalization_score,
+            v.version, v.steps
+       FROM assistant_skills s
+       LEFT JOIN assistant_skill_versions v ON v.id = s.active_version_id
+      WHERE s.user_id = $1
+      ORDER BY s.updated_at DESC NULLS LAST, s.created_at DESC
+      LIMIT $2`,
+    [userId, safeLimit],
+  );
+  return res.rows.map(serializeSkillRow).filter(Boolean);
 }
 
 async function getLastUserMessage(threadId) {
@@ -2648,24 +3095,52 @@ const runAssistantTurn = async ({
   sessionId,
   userName,
   userId,
+  threadId,
   inputItems,
   model,
   openaiBaseUrl,
   webSearchEnabled,
+  skillsEnabled,
   abortSignal,
 }) => {
   try {
-    const result = await callAgentService({
-      apiKey,
-      sessionId,
-      userName,
-      userId,
-      inputItems,
-      model,
-      openaiBaseUrl,
-      webSearchEnabled,
-      abortSignal,
-    });
+    let result;
+    if (skillsEnabled) {
+      try {
+        result = await callSkillsService({
+          apiKey,
+          sessionId,
+          userName,
+          userId,
+          threadId,
+          inputItems,
+          model,
+          openaiBaseUrl,
+          webSearchEnabled,
+          abortSignal,
+        });
+      } catch (err) {
+        logAssistantEvent('skills_fallback', {
+          sessionId: sessionId ?? null,
+          userId: userId ?? null,
+          threadId: threadId ?? null,
+          error: err?.message ?? String(err),
+        });
+      }
+    }
+    if (!result) {
+      result = await callAgentService({
+        apiKey,
+        sessionId,
+        userName,
+        userId,
+        inputItems,
+        model,
+        openaiBaseUrl,
+        webSearchEnabled,
+        abortSignal,
+      });
+    }
     return {
       output: normalizeAssistantOutput(result?.output ?? '') || '',
       context: result?.context ?? null,
@@ -2696,6 +3171,250 @@ const notifyAgentReply = async ({ userId, sessionId, message }) => {
     },
   ];
   await dispatchAlertEvents(alerts);
+};
+
+const assistantWorkQueue = new Map();
+
+const enqueueAssistantWork = (threadId, work) => {
+  if (!threadId || typeof work !== 'function') {
+    Promise.resolve().then(work).catch((err) => {
+      console.warn('[assistant] queued task failed', err?.message ?? err);
+    });
+    return;
+  }
+  const prev = assistantWorkQueue.get(threadId) ?? Promise.resolve();
+  const next = prev.catch(() => null).then(work);
+  assistantWorkQueue.set(threadId, next);
+  void next.finally(() => {
+    if (assistantWorkQueue.get(threadId) === next) {
+      assistantWorkQueue.delete(threadId);
+    }
+  });
+};
+
+const mapAssistantErrorMessage = (code) => {
+  if (code === 'openai_key_required') {
+    return 'OpenAI API key is missing. Add it in Raven AI.';
+  }
+  if (code === 'invalid_openai_key') {
+    return 'OpenAI API key is invalid. Update it in Raven AI.';
+  }
+  if (code === 'openai_rate_limited') {
+    return 'OpenAI rate limit reached. Please try again later.';
+  }
+  if (code === 'unauthorized') {
+    return 'Please sign in to use the AI assistant.';
+  }
+  if (code === 'thread_not_found') {
+    return 'Chat session is missing. Reopen the assistant to start a new one.';
+  }
+  if (code === 'content_required') {
+    return 'Message is empty. Please type something.';
+  }
+  if (code === 'session_required') {
+    return 'Session is not ready yet. Please wait a moment and try again.';
+  }
+  if (code === 'thread_session_mismatch') {
+    return 'Chat session does not match the current canvas. Reopening the assistant should fix it.';
+  }
+  if (code === 'assistant_chat_deprecated') {
+    return 'Assistant is outdated. Please hard refresh the page.';
+  }
+  if (code && typeof code === 'string') {
+    return `Assistant error: ${code}`;
+  }
+  return 'Assistant request failed. Please try again.';
+};
+
+const resolveAssistantErrorCode = (err) => {
+  const status = err?.statusCode ?? err?.status;
+  if (status === 401) return 'invalid_openai_key';
+  if (status === 429) return 'openai_rate_limited';
+  const code = err?.code ?? err?.error?.code ?? err?.message;
+  if (typeof code === 'string' && code.trim()) return code.trim();
+  return 'assistant_failed';
+};
+
+const processAssistantMessage = async ({
+  apiKey,
+  sessionId,
+  userId,
+  threadId,
+  userText,
+  queuedAt,
+  userMessageId,
+  hasUserKey,
+}) => {
+  let resolvedAi = null;
+  let inputItems = [];
+  let reply = '';
+  let assistantMessage = null;
+  let assistantTrace = null;
+  let userName = null;
+
+  try {
+    const user = await getUserById(userId);
+    userName = user?.name ?? null;
+    const aiSettings = await getRavenAiSettings(userId);
+    resolvedAi = resolveRavenAiSettings(aiSettings);
+    logAssistantEvent('message_start', {
+      userId,
+      threadId,
+      sessionId,
+      userMessageId,
+      queueWaitMs: Number.isFinite(queuedAt) ? Math.max(0, Date.now() - queuedAt) : null,
+    });
+
+    const contextBuild = await buildAssistantContext({
+      threadId,
+      userId,
+      apiKey,
+      model: resolvedAi.model,
+      openaiBaseUrl: resolvedAi.baseUrl,
+    });
+    inputItems = contextBuild.items ?? [];
+    logAssistantEvent('message_context_ready', {
+      userId,
+      threadId,
+      items: inputItems.length,
+      model: resolvedAi.model,
+    });
+
+    const assistantResult = await runAssistantTurn({
+      apiKey,
+      sessionId,
+      userName,
+      userId,
+      threadId,
+      inputItems,
+      model: resolvedAi.model,
+      openaiBaseUrl: resolvedAi.baseUrl,
+      webSearchEnabled: resolvedAi.webSearchEnabled,
+      skillsEnabled: resolvedAi.skillsEnabled,
+    });
+    const assistantText = assistantResult?.output ?? '';
+    reply = assistantText || 'No response returned.';
+    assistantTrace = assistantResult?.trace ? { trace: assistantResult.trace } : null;
+    assistantMessage = await insertAssistantMessage({
+      threadId,
+      role: 'assistant',
+      content: reply,
+      meta: assistantTrace,
+    });
+    logAssistantEvent('message_response', {
+      userId,
+      threadId,
+      assistantMessageId: assistantMessage?.id ?? null,
+      replyChars: reply.length,
+    });
+
+    const initialContext = assistantResult?.context ?? null;
+    sendAssistantUpdateToUser({
+      sessionId,
+      userId,
+      threadId,
+      message: assistantMessage,
+      context: initialContext,
+    });
+    void notifyAgentReply({
+      userId,
+      sessionId: sessionId ?? null,
+      message: reply,
+    }).catch((err) => {
+      console.warn('[alerting] agent reply failed', err?.message ?? err);
+    });
+
+    let context = initialContext;
+    if (!context) {
+      const contextItems = inputItems.concat({ role: 'assistant', content: reply });
+      context = await callAgentContext({
+        model: resolvedAi.model,
+        input: contextItems,
+        userName,
+      }).catch(() => null);
+      if (context) {
+        logAssistantEvent('message_context_rebuilt', {
+          userId,
+          threadId,
+          remainingRatio: Number.isFinite(context?.remainingRatio) ? context.remainingRatio : null,
+        });
+      }
+    }
+    if (context) {
+      if (!initialContext) {
+        sendAssistantUpdateToUser({
+          sessionId,
+          userId,
+          threadId,
+          message: assistantMessage,
+          context,
+        });
+      }
+      void upsertAssistantContext({ threadId, context }).catch((err) => {
+        console.warn('[assistant] context_upsert_failed', err?.message ?? err);
+      });
+      const remainingRatio = Number.isFinite(context?.remainingRatio) ? context.remainingRatio : null;
+      if (remainingRatio !== null && remainingRatio <= getSummaryRemainingRatio()) {
+        scheduleSummaryRefresh({
+          threadId,
+          apiKey,
+          remainingRatio,
+          openaiBaseUrl: resolvedAi.baseUrl,
+          model: resolvedAi.model,
+        });
+      }
+    }
+    if (userText && reply) {
+      await addAssistantMemory({
+        threadId,
+        userId,
+        apiKey,
+        userText,
+        assistantText: reply,
+        openaiBaseUrl: resolvedAi.baseUrl,
+      });
+    }
+    if (hasUserKey) {
+      await touchOpenAiKey(userId);
+    }
+    logAssistantEvent('message_done', {
+      userId,
+      threadId,
+      assistantMessageId: assistantMessage?.id ?? null,
+    });
+  } catch (err) {
+    const status = err?.statusCode ?? err?.status;
+    const code = resolveAssistantErrorCode(err);
+    logAssistantEvent('message_error', {
+      userId,
+      threadId,
+      status: status ?? null,
+      code,
+      type: err?.error?.type ?? null,
+      detail: err?.error?.message ?? null,
+      error: err?.message ?? String(err),
+    });
+    const errorMessage = mapAssistantErrorMessage(code);
+    sendAssistantUpdateToUser({
+      sessionId,
+      userId,
+      threadId,
+      message: {
+        role: 'assistant',
+        content: errorMessage,
+        createdAt: new Date().toISOString(),
+        meta: { error: code },
+      },
+    });
+  } finally {
+    sendAssistantStatusToUser({
+      sessionId,
+      userId,
+      threadId,
+      status: 'idle',
+      reason: 'user_message',
+    });
+  }
 };
 
 async function createSession(id, state, opts = {}) {
@@ -4158,12 +4877,23 @@ app.get('/api/raven-ai/settings', async (req, res) => {
   });
 });
 
+app.get('/api/raven-ai/skills', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const rawLimit = req.query?.limit;
+  const parsedLimit = typeof rawLimit === 'string' ? Number(rawLimit) : Number(rawLimit ?? NaN);
+  const limit = Number.isFinite(parsedLimit) ? parsedLimit : 60;
+  const skills = await listAssistantSkills(auth.userId, limit);
+  res.json({ skills });
+});
+
 app.post('/api/raven-ai/settings', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const hasModel = Object.prototype.hasOwnProperty.call(body, 'model');
   const hasWebSearch = Object.prototype.hasOwnProperty.call(body, 'webSearchEnabled');
+  const hasSkillsEnabled = Object.prototype.hasOwnProperty.call(body, 'skillsEnabled');
   const hasBaseUrl = Object.prototype.hasOwnProperty.call(body, 'baseUrl');
   const rawBaseUrl = typeof body.baseUrl === 'string' ? body.baseUrl.trim() : '';
   const baseUrl = rawBaseUrl ? sanitizeWebhookUrl(rawBaseUrl) : null;
@@ -4176,6 +4906,7 @@ app.post('/api/raven-ai/settings', async (req, res) => {
   const merged = {
     model: hasModel ? normalized.model : current?.model ?? null,
     webSearchEnabled: hasWebSearch ? normalized.webSearchEnabled : current?.webSearchEnabled ?? false,
+    skillsEnabled: hasSkillsEnabled ? normalized.skillsEnabled : current?.skillsEnabled ?? false,
     baseUrl: hasBaseUrl ? baseUrl : current?.baseUrl ?? null,
   };
   const saved = await upsertRavenAiSettings({ userId: auth.userId, settings: merged });
@@ -4183,6 +4914,52 @@ app.post('/api/raven-ai/settings', async (req, res) => {
     settings: saved,
     defaults: resolveRavenAiSettings(null),
   });
+});
+
+app.post('/api/raven-ai/skills/feedback', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const ratingRaw = typeof body.rating === 'string' ? body.rating.trim().toLowerCase() : '';
+  const rating = ratingRaw === 'positive' || ratingRaw === 'neutral' || ratingRaw === 'negative' ? ratingRaw : '';
+  if (!rating) return res.status(400).json({ error: 'bad_rating' });
+  const feedback = typeof body.feedback === 'string' ? body.feedback.trim() : null;
+  let runId = typeof body.runId === 'string' ? body.runId.trim() : '';
+  const messageId = typeof body.assistantMessageId === 'string' ? body.assistantMessageId.trim() : '';
+  if (!runId && messageId) {
+    const meta = await getAssistantMessageMetaForUser({ messageId, userId: auth.userId });
+    runId = meta?.trace?.skill?.runId ?? '';
+  }
+  if (!runId) return res.status(400).json({ error: 'run_id_required' });
+
+  const keyRow = await getOpenAiKeyForUser(auth.userId);
+  const apiKey = keyRow?.api_key ?? OPENAI_API_KEY;
+  if (!apiKey) return res.status(400).json({ error: 'openai_key_required' });
+
+  const aiSettings = await getRavenAiSettings(auth.userId);
+  const resolvedAi = resolveRavenAiSettings(aiSettings);
+  try {
+    const result = await callSkillsFeedback({
+      apiKey,
+      model: resolvedAi.model,
+      userId: auth.userId,
+      runId,
+      rating,
+      feedback,
+      openaiBaseUrl: resolvedAi.baseUrl,
+    });
+    logAssistantEvent('skills_feedback', {
+      userId: auth.userId,
+      runId,
+      rating,
+      updated: result?.updated === true,
+      newVersionId: typeof result?.newVersionId === 'string' ? result.newVersionId : null,
+    });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const status = err?.statusCode ?? err?.status ?? 502;
+    res.status(status).json({ error: err?.code ?? 'skills_feedback_failed', message: err?.message ?? 'skills_feedback_failed' });
+  }
 });
 
 app.get('/api/integrations/ai/key', async (req, res) => {
@@ -4434,10 +5211,12 @@ app.post('/api/integrations/telegram/webhook', async (req, res) => {
           sessionId: alert.sessionId,
           userName: senderUser.name ?? null,
           userId: senderUser.id,
+          threadId: thread.id,
           inputItems,
           model: resolvedAi.model,
           openaiBaseUrl: resolvedAi.baseUrl,
           webSearchEnabled: resolvedAi.webSearchEnabled,
+          skillsEnabled: resolvedAi.skillsEnabled,
         });
         const assistantText = assistantResult?.output ?? '';
         const reply = assistantText || 'No response returned.';
@@ -4738,130 +5517,54 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
   if (!userText) return res.status(400).json({ error: 'content_required' });
   const selectionContext = normalizeSelectionContext(req.body?.selectionContext);
 
-  const user = await getUserById(auth.userId);
   const keyRow = await getOpenAiKeyForUser(auth.userId);
   const apiKey = keyRow?.api_key ?? OPENAI_API_KEY;
   if (!apiKey) return res.status(400).json({ error: 'openai_key_required' });
-  const aiSettings = await getRavenAiSettings(auth.userId);
-  const resolvedAi = resolveRavenAiSettings(aiSettings);
-  const requestAbort = new AbortController();
-  let connectionClosed = false;
-  req.on('close', () => {
-    if (res.writableEnded) return;
-    connectionClosed = true;
-    requestAbort.abort();
-  });
-
   try {
-    logAssistantEvent('message_start', {
-      userId: auth.userId,
-      threadId,
-      sessionId: thread.sessionId ?? null,
-      content: userText,
-    });
     const userMessage = await insertAssistantMessage({
       threadId,
       role: 'user',
       content: userText,
       meta: selectionContext ? { selectionContext } : null,
     });
-    const { items: inputItems } = await buildAssistantContext({
+    const queuedAt = Date.now();
+    const alreadyQueued = assistantWorkQueue.has(threadId);
+    logAssistantEvent('message_queued', {
+      userId: auth.userId,
       threadId,
-      userId: auth.userId,
-      apiKey,
-      model: resolvedAi.model,
-      openaiBaseUrl: resolvedAi.baseUrl,
-    });
-    const assistantResult = await runAssistantTurn({
-      apiKey,
-      sessionId: thread.sessionId,
-      userName: user?.name ?? null,
-      userId: auth.userId,
-      inputItems,
-      model: resolvedAi.model,
-      openaiBaseUrl: resolvedAi.baseUrl,
-      webSearchEnabled: resolvedAi.webSearchEnabled,
-      abortSignal: requestAbort.signal,
-    });
-    const assistantText = assistantResult?.output ?? '';
-    const reply = assistantText || 'No response returned.';
-    const assistantTrace = assistantResult?.trace ? { trace: assistantResult.trace } : null;
-    const assistantMessage = await insertAssistantMessage({
-      threadId,
-      role: 'assistant',
-      content: reply,
-      meta: assistantTrace,
-    });
-    void notifyAgentReply({
-      userId: auth.userId,
       sessionId: thread.sessionId ?? null,
-      message: reply,
-    }).catch((err) => {
-      console.warn('[alerting] agent reply failed', err?.message ?? err);
+      userMessageId: userMessage?.id ?? null,
+      queuedBehind: alreadyQueued,
     });
-    let context = assistantResult?.context ?? null;
-    if (!context) {
-      const contextItems = inputItems.concat({ role: 'assistant', content: reply });
-      context = await callAgentContext({
-        model: resolvedAi.model,
-        input: contextItems,
-        userName: user?.name ?? null,
-      }).catch(() => null);
-    }
-    if (context) {
-      void upsertAssistantContext({ threadId, context }).catch((err) => {
-        console.warn('[assistant] context_upsert_failed', err?.message ?? err);
-      });
-    }
-    const remainingRatio = Number.isFinite(context?.remainingRatio) ? context.remainingRatio : null;
-    if (remainingRatio !== null && remainingRatio <= getSummaryRemainingRatio()) {
-      scheduleSummaryRefresh({
-        threadId,
-        apiKey,
-        remainingRatio,
-        openaiBaseUrl: resolvedAi.baseUrl,
-        model: resolvedAi.model,
-      });
-    }
-    if (userText && reply) {
-      await addAssistantMemory({
-        threadId,
-        userId: auth.userId,
-        apiKey,
-        userText,
-        assistantText: reply,
-        openaiBaseUrl: resolvedAi.baseUrl,
-      });
-    }
-    if (keyRow) {
-      await touchOpenAiKey(auth.userId);
-    }
-    logAssistantEvent('message_done', {
+    sendAssistantStatusToUser({
+      sessionId: thread.sessionId ?? null,
       userId: auth.userId,
       threadId,
-      assistantMessageId: assistantMessage?.id ?? null,
+      status: 'thinking',
+      reason: 'user_message',
     });
-    if (connectionClosed) return;
-    res.json({
-      message: reply,
+    res.status(202).json({
+      queued: true,
       userMessage,
-      assistantMessage,
-      context,
     });
+    enqueueAssistantWork(threadId, () => processAssistantMessage({
+      apiKey,
+      sessionId: thread.sessionId ?? null,
+      userId: auth.userId,
+      threadId: thread.id,
+      userText,
+      queuedAt,
+      userMessageId: userMessage?.id ?? null,
+      hasUserKey: !!keyRow,
+    }));
   } catch (err) {
-    if (connectionClosed || err?.name === 'AbortError') return;
-    const status = err?.statusCode ?? err?.status;
     logAssistantEvent('message_error', {
       userId: auth.userId,
       threadId,
-      status: status ?? null,
+      status: err?.statusCode ?? err?.status ?? null,
       code: err?.code ?? err?.error?.code ?? null,
-      type: err?.error?.type ?? null,
-      detail: err?.error?.message ?? null,
       error: err?.message ?? String(err),
     });
-    if (status === 401) return res.status(401).json({ error: 'invalid_openai_key' });
-    if (status === 429) return res.status(429).json({ error: 'openai_rate_limited' });
     res.status(502).json({ error: err?.message ?? 'assistant_failed' });
   }
 });
