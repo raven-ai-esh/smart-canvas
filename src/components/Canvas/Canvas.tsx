@@ -6,7 +6,7 @@ import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
 import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpToLine, Bot, Link2, MessageCircle, Paperclip, X, Zap, ZapOff } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
-import type { Attachment, Comment, EdgeData, NodeData, SessionSaver, TextBox as TextBoxType } from '../../types';
+import type { Attachment, Comment, EdgeData, NodeData, SessionSaver, StrokePoint, TextBox as TextBoxType } from '../../types';
 import type { AssistantSelectionContext } from '../../types/assistant';
 import { debugLog } from '../../utils/debug';
 import { TextBox } from '../TextBox/TextBox';
@@ -36,6 +36,79 @@ const GANTT_DAY_WIDTH = 70;
 const GANTT_BAR_HEIGHT = 30;
 const GANTT_LANE_HEIGHT = 50;
 const GANTT_PARKING_DAYS = 4;
+const PEN_BASE_WIDTH = 3;
+const HIGHLIGHTER_BASE_WIDTH = 20;
+const PRESSURE_MIN_SCALE = 0.6;
+const PRESSURE_MAX_SCALE = 1.4;
+const TILT_MAX_SCALE = 1.6;
+const DEFAULT_PRESSURE = 0.5;
+
+const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
+
+const normalizePressure = (raw: number | undefined, pointerType: string, buttons: number, hover: boolean) => {
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+        if (raw === 0 && pointerType !== 'pen' && buttons > 0) return DEFAULT_PRESSURE;
+        if (pointerType === 'pen' && hover) return 0;
+        return clamp01(raw);
+    }
+    if (pointerType === 'pen') return hover ? 0 : DEFAULT_PRESSURE;
+    if (buttons > 0) return DEFAULT_PRESSURE;
+    return 0;
+};
+
+const readOptionalNumber = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : undefined);
+
+const extractPointerMeta = (e: PointerEvent, hover = false) => {
+    const pointerType = e.pointerType || 'mouse';
+    const buttons = e.buttons ?? 0;
+    const pressure = normalizePressure(e.pressure, pointerType, buttons, hover);
+    const tiltX = Number.isFinite(e.tiltX) ? e.tiltX : undefined;
+    const tiltY = Number.isFinite(e.tiltY) ? e.tiltY : undefined;
+    const azimuth = readOptionalNumber((e as any).azimuthAngle);
+    const altitude = readOptionalNumber((e as any).altitudeAngle);
+    const twist = readOptionalNumber((e as any).twist);
+    return { pressure, tiltX, tiltY, azimuth, altitude, twist };
+};
+
+const extractTouchMeta = (touch: Touch) => {
+    const pressure = normalizePressure(readOptionalNumber((touch as any).force), 'pen', 1, false);
+    return { pressure, tiltX: undefined, tiltY: undefined, azimuth: undefined, altitude: undefined, twist: undefined };
+};
+
+const getAltitudeNorm = (meta: { altitude?: number; tiltX?: number; tiltY?: number }) => {
+    if (typeof meta.altitude === 'number' && Number.isFinite(meta.altitude)) {
+        return clamp01(meta.altitude / (Math.PI / 2));
+    }
+    const tiltX = Math.abs(meta.tiltX ?? 0);
+    const tiltY = Math.abs(meta.tiltY ?? 0);
+    const tilt = Math.min(90, Math.hypot(tiltX, tiltY));
+    return clamp01(1 - tilt / 90);
+};
+
+const computeStrokeWidth = (baseWidth: number, meta: { pressure?: number; tiltX?: number; tiltY?: number; altitude?: number }) => {
+    const pressure = typeof meta.pressure === 'number' ? clamp01(meta.pressure) : DEFAULT_PRESSURE;
+    const altitudeNorm = getAltitudeNorm(meta);
+    const pressureScale = PRESSURE_MIN_SCALE + (PRESSURE_MAX_SCALE - PRESSURE_MIN_SCALE) * pressure;
+    const tiltScale = 1 + (1 - altitudeNorm) * (TILT_MAX_SCALE - 1);
+    const width = baseWidth * pressureScale * tiltScale;
+    return Math.min(baseWidth * 2.2, Math.max(baseWidth * 0.4, width));
+};
+
+const computeAverageStrokeWidth = (points: StrokePoint[], baseWidth: number) => {
+    if (!points.length) return baseWidth;
+    let total = 0;
+    for (const p of points) {
+        total += computeStrokeWidth(baseWidth, p);
+    }
+    const avg = total / points.length;
+    return Math.min(baseWidth * 2.2, Math.max(baseWidth * 0.4, avg));
+};
+
+const getToolStrokeStyle = (tool: 'pen' | 'highlighter') => ({
+    stroke: tool === 'highlighter' ? 'var(--accent-primary)' : 'var(--text-primary)',
+    width: tool === 'highlighter' ? HIGHLIGHTER_BASE_WIDTH : PEN_BASE_WIDTH,
+    opacity: tool === 'highlighter' ? 0.3 : 1,
+});
 
 const toUtcDay = (valueMs: number) => {
     const d = new Date(valueMs);
@@ -592,13 +665,29 @@ export const Canvas: React.FC = () => {
     const penStrokeActiveRef = useRef(false);
     const stylusTouchIdRef = useRef<number | null>(null);
     const lastPenPointerDownAtRef = useRef<number | null>(null);
-    const currentStrokePointsRef = useRef<{ x: number; y: number }[]>([]);
-    const pendingStrokePointsRef = useRef<{ x: number; y: number }[]>([]);
-    const lastStrokePointRef = useRef<{ x: number; y: number } | null>(null);
+    const currentStrokePointsRef = useRef<StrokePoint[]>([]);
+    const pendingStrokePointsRef = useRef<StrokePoint[]>([]);
+    const lastStrokePointRef = useRef<StrokePoint | null>(null);
     const livePathRef = useRef<SVGPathElement | null>(null);
     const livePathDRef = useRef<string>('');
     const livePathRafRef = useRef<number | null>(null);
-    const liveStrokeStyleRef = useRef<{ stroke: string; width: number; opacity: number } | null>(null);
+    const liveStrokeStyleRef = useRef<{ stroke: string; baseWidth: number; opacity: number } | null>(null);
+    const liveStrokeWidthRef = useRef<number | null>(null);
+    const penHoverRef = useRef<HTMLDivElement | null>(null);
+    const penHoverRafRef = useRef<number | null>(null);
+    const penHoverStateRef = useRef<{
+        x: number;
+        y: number;
+        visible: boolean;
+        azimuth?: number;
+        altitude?: number;
+        tiltX?: number;
+        tiltY?: number;
+    }>({
+        x: 0,
+        y: 0,
+        visible: false,
+    });
 
     const lastPointerPos = useRef({ x: 0, y: 0 }); // Screen coordinates
     const lastPointerKnownRef = useRef(false);
@@ -948,12 +1037,23 @@ export const Canvas: React.FC = () => {
     }, [getNodeSize, nodeById, visibleEdges, visibleNodes, visibleTextBoxes]);
 
     const applyLiveStrokeStyle = (style: { stroke: string; width: number; opacity: number }) => {
-        liveStrokeStyleRef.current = style;
+        liveStrokeStyleRef.current = { stroke: style.stroke, baseWidth: style.width, opacity: style.opacity };
+        liveStrokeWidthRef.current = style.width;
         const el = livePathRef.current;
         if (!el) return;
         el.setAttribute('stroke', style.stroke);
         el.setAttribute('stroke-width', String(style.width));
         el.style.opacity = String(style.opacity);
+    };
+
+    const updateLiveStrokeWidth = (width: number) => {
+        const el = livePathRef.current;
+        if (!el) return;
+        const next = Math.max(0.2, width);
+        const prev = liveStrokeWidthRef.current;
+        if (typeof prev === 'number' && Math.abs(prev - next) < 0.15) return;
+        liveStrokeWidthRef.current = next;
+        el.setAttribute('stroke-width', String(next));
     };
 
     const clearLiveStroke = () => {
@@ -965,8 +1065,68 @@ export const Canvas: React.FC = () => {
         pendingStrokePointsRef.current = [];
         lastStrokePointRef.current = null;
         livePathDRef.current = '';
+        liveStrokeWidthRef.current = null;
         const el = livePathRef.current;
         if (el) el.setAttribute('d', '');
+    };
+
+    const schedulePenHoverUpdate = () => {
+        if (penHoverRafRef.current) return;
+        penHoverRafRef.current = requestAnimationFrame(() => {
+            penHoverRafRef.current = null;
+            const el = penHoverRef.current;
+            if (!el) return;
+            const state = penHoverStateRef.current;
+            if (!state.visible) {
+                el.style.opacity = '0';
+                return;
+            }
+            const altitudeNorm = getAltitudeNorm(state);
+            const tiltMag = 1 - altitudeNorm;
+            const size = 14 + tiltMag * 12;
+            const opacity = 0.15 + tiltMag * 0.35;
+            const offsetStrength = 6 + tiltMag * 10;
+            let offsetX = 0;
+            let offsetY = 0;
+            if (typeof state.azimuth === 'number' && Number.isFinite(state.azimuth)) {
+                offsetX = Math.cos(state.azimuth) * offsetStrength;
+                offsetY = Math.sin(state.azimuth) * offsetStrength;
+            } else if (typeof state.tiltX === 'number' || typeof state.tiltY === 'number') {
+                offsetX = ((state.tiltX ?? 0) / 90) * offsetStrength;
+                offsetY = ((state.tiltY ?? 0) / 90) * offsetStrength;
+            }
+            el.style.width = `${size}px`;
+            el.style.height = `${size}px`;
+            el.style.opacity = String(opacity);
+            el.style.transform = `translate(${state.x + offsetX}px, ${state.y + offsetY}px) translate(-50%, -50%)`;
+        });
+    };
+
+    const setPenHoverState = (next: typeof penHoverStateRef.current) => {
+        penHoverStateRef.current = next;
+        schedulePenHoverUpdate();
+    };
+
+    const hidePenHover = () => {
+        if (!penHoverStateRef.current.visible) return;
+        penHoverStateRef.current = { ...penHoverStateRef.current, visible: false };
+        schedulePenHoverUpdate();
+    };
+
+    const updatePenHoverFromPointer = (e: PointerEvent) => {
+        const container = containerRef.current;
+        if (!container) return;
+        const rect = container.getBoundingClientRect();
+        const meta = extractPointerMeta(e, true);
+        setPenHoverState({
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+            visible: true,
+            azimuth: meta.azimuth,
+            altitude: meta.altitude,
+            tiltX: meta.tiltX,
+            tiltY: meta.tiltY,
+        });
     };
 
     const requestAuthForComment = useCallback((message = 'Для комментария нужна авторизация') => {
@@ -1415,7 +1575,7 @@ export const Canvas: React.FC = () => {
         container.addEventListener('wheel', handleWheel, { passive: false });
 
         // Touch start - track for double-tap and pinch
-	        const handleTouchStart = (e: TouchEvent) => {
+        const handleTouchStart = (e: TouchEvent) => {
                 const attachPenTouch = () => {
                     if (!penMode || !penStrokeActiveRef.current || !isDrawing.current) return false;
                     if (stylusTouchIdRef.current !== null) return false;
@@ -1424,10 +1584,14 @@ export const Canvas: React.FC = () => {
                     if (!candidate) return false;
                     stylusTouchIdRef.current = candidate.identifier;
                     const worldPos = screenToWorldLatest(candidate.clientX, candidate.clientY);
+                    const meta = extractTouchMeta(candidate);
                     if (penTool === 'eraser') {
                         handleEraser(worldPos);
                     } else {
-                        pendingStrokePointsRef.current.push(worldPos);
+                        pendingStrokePointsRef.current.push({ x: worldPos.x, y: worldPos.y, ...meta, time: e.timeStamp });
+                        if (liveStrokeStyleRef.current) {
+                            updateLiveStrokeWidth(computeStrokeWidth(liveStrokeStyleRef.current.baseWidth, meta));
+                        }
                         scheduleLiveStrokeFlush();
                     }
                     e.preventDefault();
@@ -1452,15 +1616,14 @@ export const Canvas: React.FC = () => {
                                 drawingPointerTypeRef.current = 'touch';
                                 clearLiveStroke();
                                 const worldPos = screenToWorldLatest(stylusTouch.clientX, stylusTouch.clientY);
+                                const meta = extractTouchMeta(stylusTouch);
                                 if (penTool === 'eraser') {
                                     handleEraser(worldPos);
                                 } else {
-                                    applyLiveStrokeStyle({
-                                        stroke: penTool === 'highlighter' ? 'var(--accent-primary)' : 'var(--text-primary)',
-                                        width: penTool === 'highlighter' ? 20 : 3,
-                                        opacity: penTool === 'highlighter' ? 0.3 : 1,
-                                    });
-                                    pendingStrokePointsRef.current.push(worldPos);
+                                    const baseStyle = getToolStrokeStyle(penTool);
+                                    applyLiveStrokeStyle(baseStyle);
+                                    updateLiveStrokeWidth(computeStrokeWidth(baseStyle.width, meta));
+                                    pendingStrokePointsRef.current.push({ x: worldPos.x, y: worldPos.y, ...meta, time: e.timeStamp });
                                     scheduleLiveStrokeFlush();
                                 }
                             }
@@ -1499,7 +1662,7 @@ export const Canvas: React.FC = () => {
         };
 
         // Touch move - handle pinch-to-zoom
-	        const handleTouchMove = (e: TouchEvent) => {
+        const handleTouchMove = (e: TouchEvent) => {
                 if (
                     stylusTouchIdRef.current === null
                     && penMode
@@ -1518,10 +1681,14 @@ export const Canvas: React.FC = () => {
                         ?? getTouchById(e.changedTouches, stylusTouchIdRef.current);
                     if (!touch) return;
                     const worldPos = screenToWorldLatest(touch.clientX, touch.clientY);
+                    const meta = extractTouchMeta(touch);
                     if (penTool === 'eraser') {
                         handleEraser(worldPos);
                     } else {
-                        pendingStrokePointsRef.current.push(worldPos);
+                        pendingStrokePointsRef.current.push({ x: worldPos.x, y: worldPos.y, ...meta, time: e.timeStamp });
+                        if (liveStrokeStyleRef.current) {
+                            updateLiveStrokeWidth(computeStrokeWidth(liveStrokeStyleRef.current.baseWidth, meta));
+                        }
                         scheduleLiveStrokeFlush();
                     }
                     e.preventDefault();
@@ -1575,7 +1742,7 @@ export const Canvas: React.FC = () => {
         };
 
         // Touch end - detect double-tap
-	        const handleTouchEnd = (e: TouchEvent) => {
+        const handleTouchEnd = (e: TouchEvent) => {
                 if (stylusTouchIdRef.current !== null) {
                     const ended = getTouchById(e.changedTouches, stylusTouchIdRef.current);
                     if (ended) {
@@ -2488,12 +2655,15 @@ export const Canvas: React.FC = () => {
         updateConnectionTargetFromClientPoint(e.clientX, e.clientY, nodeId);
     };
 
-	    const handlePointerDown = (e: React.PointerEvent) => {
+    const handlePointerDown = (e: React.PointerEvent) => {
 	        // Palm rejection: ignore touch pointers while a pencil stroke is active.
 	        if (penStrokeActiveRef.current && e.pointerType === 'touch') {
 	            e.preventDefault();
 	            return;
 	        }
+            if (e.pointerType === 'pen') {
+                hidePenHover();
+            }
             if (stylusTouchIdRef.current !== null && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
                 e.preventDefault();
                 return;
@@ -2733,13 +2903,12 @@ export const Canvas: React.FC = () => {
                     drawingPointerTypeRef.current = e.pointerType;
                     penStrokeActiveRef.current = e.pointerType === 'pen';
                     const worldPos = screenToWorld(e.clientX, e.clientY);
+                    const meta = extractPointerMeta(e.nativeEvent as PointerEvent);
                     clearLiveStroke();
-                    applyLiveStrokeStyle({
-                        stroke: penTool === 'highlighter' ? 'var(--accent-primary)' : 'var(--text-primary)',
-                        width: penTool === 'highlighter' ? 20 : 3,
-                        opacity: penTool === 'highlighter' ? 0.3 : 1,
-                    });
-                    pendingStrokePointsRef.current.push(worldPos);
+                    const baseStyle = getToolStrokeStyle(penTool);
+                    applyLiveStrokeStyle(baseStyle);
+                    updateLiveStrokeWidth(computeStrokeWidth(baseStyle.width, meta));
+                    pendingStrokePointsRef.current.push({ x: worldPos.x, y: worldPos.y, ...meta, time: e.timeStamp });
                     scheduleLiveStrokeFlush();
                 } else if (penTool === 'eraser') {
                     isDrawing.current = true;
@@ -2800,15 +2969,16 @@ export const Canvas: React.FC = () => {
         flushPendingStrokePoints();
         const points = currentStrokePointsRef.current;
         if (points.length > 1 && penTool !== 'eraser') {
+            const baseStyle = getToolStrokeStyle(penTool);
+            const avgWidth = computeAverageStrokeWidth(points, baseStyle.width);
+            const beautified = beautifyStroke(points.map((p) => ({ x: p.x, y: p.y })));
             addDrawing({
                 id: uuidv4(),
-                ...(() => {
-                    const { points: beautifiedPoints, path } = beautifyStroke(points);
-                    return { points: beautifiedPoints, path };
-                })(),
-                color: penTool === 'highlighter' ? 'var(--accent-primary)' : 'var(--text-primary)',
-                width: penTool === 'highlighter' ? 20 : 3,
-                opacity: penTool === 'highlighter' ? 0.3 : 1,
+                points,
+                path: beautified.path,
+                color: baseStyle.stroke,
+                width: avgWidth,
+                opacity: baseStyle.opacity,
                 tool: penTool,
             });
         }
@@ -2829,6 +2999,15 @@ export const Canvas: React.FC = () => {
     };
 
     const handlePointerMove = (e: React.PointerEvent) => {
+        if (e.pointerType === 'pen') {
+            const native = e.nativeEvent as PointerEvent;
+            const hoverCandidate = !isDrawing.current && native.buttons === 0 && native.pressure <= 0.01;
+            if (hoverCandidate) {
+                updatePenHoverFromPointer(native);
+            } else {
+                hidePenHover();
+            }
+        }
         // Palm rejection: ignore touch pointers while a pencil stroke is active.
         if (penStrokeActiveRef.current && e.pointerType === 'touch') return;
         if (stylusTouchIdRef.current !== null && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
@@ -3021,15 +3200,23 @@ export const Canvas: React.FC = () => {
             if (drawingPointerIdRef.current !== null && e.pointerId !== drawingPointerIdRef.current) return;
             const native = e.nativeEvent as PointerEvent;
             const events = native.getCoalescedEvents?.() ?? [native];
+            let lastMeta: ReturnType<typeof extractPointerMeta> | null = null;
             for (const ev of events) {
                 const worldPos = screenToWorld(ev.clientX, ev.clientY);
+                const meta = extractPointerMeta(ev);
                 if (penTool === 'eraser') {
                     handleEraser(worldPos);
                 } else {
-                    pendingStrokePointsRef.current.push(worldPos);
+                    pendingStrokePointsRef.current.push({ x: worldPos.x, y: worldPos.y, ...meta, time: ev.timeStamp });
+                    lastMeta = meta;
                 }
             }
-            if (penTool !== 'eraser') scheduleLiveStrokeFlush();
+            if (penTool !== 'eraser') {
+                if (lastMeta && liveStrokeStyleRef.current) {
+                    updateLiveStrokeWidth(computeStrokeWidth(liveStrokeStyleRef.current.baseWidth, lastMeta));
+                }
+                scheduleLiveStrokeFlush();
+            }
         } else if (mode === 'panning' && !isPinching.current) {
             const next = clampGanttTransform(canvas.x + screenDeltaX, canvas.y + screenDeltaY, canvas.scale);
             setCanvasTransform(next.x, next.y, next.scale);
@@ -3147,7 +3334,7 @@ export const Canvas: React.FC = () => {
 	        }
     };
 
-		    const handlePointerUp = (e: React.PointerEvent) => {
+    const handlePointerUp = (e: React.PointerEvent) => {
         // Palm rejection: ignore touch pointers while a pencil stroke is active.
         if (penStrokeActiveRef.current && e.pointerType === 'touch') return;
         if (stylusTouchIdRef.current !== null && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
@@ -3442,6 +3629,9 @@ export const Canvas: React.FC = () => {
             if (stylusTouchIdRef.current !== null && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
                 return;
             }
+            if (e.pointerType === 'pen') {
+                hidePenHover();
+            }
 		        // If a touch-based context connection drag is active, ignore pointercancel;
 		        // some browsers emit cancel when UI overlays unmount, but touchend will finalize/cleanup.
 		        if (e.pointerType === 'touch' && contextConnectActiveRef.current) return;
@@ -3484,6 +3674,9 @@ export const Canvas: React.FC = () => {
         // On touch devices pointerleave can fire mid-gesture when the finger crosses fixed UI,
         // which would prematurely finalize drags/connections. Let touch gestures finish via touchend/pointerup.
         if (e.pointerType === 'touch') return;
+        if (e.pointerType === 'pen') {
+            hidePenHover();
+        }
         handlePointerUp(e);
     };
 
@@ -3695,7 +3888,7 @@ export const Canvas: React.FC = () => {
     }, []);
 
     // Helper to generate SVG path from points
-    const getSvgPath = (points: { x: number; y: number }[]) => {
+    const getSvgPath = (points: StrokePoint[]) => {
         if (points.length === 0) return '';
         const d = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
         return d;
@@ -3950,6 +4143,7 @@ export const Canvas: React.FC = () => {
                     e.currentTarget.value = '';
                 }}
             />
+            <div ref={penHoverRef} className={styles.penHover} aria-hidden="true" />
 	            {contextMenu && (
 	                <div
 	                    className={styles.contextMenuOverlay}

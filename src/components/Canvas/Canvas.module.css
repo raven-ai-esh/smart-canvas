@@ -27,6 +27,28 @@
     will-change: transform;
 }
 
+.penHover {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(0, 0, 0, 0.32) 0%, rgba(0, 0, 0, 0.12) 55%, rgba(0, 0, 0, 0) 72%);
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.25);
+    opacity: 0;
+    transform: translate(-9999px, -9999px);
+    pointer-events: none;
+    z-index: 1400;
+    transition: opacity 80ms ease-out, transform 80ms ease-out;
+    mix-blend-mode: multiply;
+}
+
+:global(body.light-theme) .penHover {
+    background: radial-gradient(circle, rgba(0, 0, 0, 0.18) 0%, rgba(0, 0, 0, 0.08) 55%, rgba(0, 0, 0, 0) 72%);
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18);
+}
+
 .nodeLayer {
     pointer-events: none;
 }

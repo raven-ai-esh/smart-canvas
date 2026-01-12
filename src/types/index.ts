@@ -69,10 +69,22 @@ export interface EdgeControlPoint {
 
 export type PenToolType = 'pen' | 'eraser' | 'highlighter';
 
+export type StrokePoint = {
+  x: number;
+  y: number;
+  pressure?: number;
+  tiltX?: number;
+  tiltY?: number;
+  azimuth?: number;
+  altitude?: number;
+  twist?: number;
+  time?: number;
+};
+
 export interface Drawing {
   id: string;
   layerId?: string;
-  points: { x: number; y: number }[];
+  points: StrokePoint[];
   path?: string; // beautified SVG path
   color: string;
   width: number;
