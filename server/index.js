@@ -17,6 +17,12 @@ import Redis from 'ioredis';
 import { Gauge } from 'prom-client';
 import { createHttpLogger, createMetrics, getLogger } from './observability.js';
 
+const resolveTimeoutMs = (value) => {
+  if (!Number.isFinite(value)) return null;
+  const ms = Math.floor(value);
+  return ms > 0 ? ms : null;
+};
+
 const PORT = Number(process.env.PORT ?? 8787);
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/smart_tracker';
 const DEFAULT_SESSION_ID = process.env.DEFAULT_SESSION_ID;
@@ -97,6 +103,9 @@ const EMBEDDING_DIM = Number(process.env.OPENAI_EMBEDDING_DIM ?? 1536);
 const MODEL_CONTEXT_TOKENS = {
   'gpt-5.2': 400000,
 };
+const AGENT_SERVICE_TIMEOUT = resolveTimeoutMs(AGENT_SERVICE_TIMEOUT_MS);
+const SKILLS_SERVICE_TIMEOUT = resolveTimeoutMs(SKILLS_SERVICE_TIMEOUT_MS);
+const OPENAI_TIMEOUT = resolveTimeoutMs(OPENAI_TIMEOUT_MS);
 
 const logger = getLogger('smart-tracker-api');
 const metrics = createMetrics({ serviceName: 'smart-tracker-api' });
@@ -2295,7 +2304,7 @@ const formatSelectionContextForAgent = (selectionContext) => {
 const createOpenAiClient = (apiKey, baseUrl) => new OpenAI({
   apiKey,
   baseURL: baseUrl || OPENAI_API_BASE_URL,
-  timeout: OPENAI_TIMEOUT_MS,
+  ...(OPENAI_TIMEOUT ? { timeout: OPENAI_TIMEOUT } : {}),
 });
 
 const getAgentContextUrl = () => {
@@ -2328,7 +2337,7 @@ const callAgentService = async ({
     input: inputItems,
     temperature: 0.3,
     openaiBaseUrl: resolvedBaseUrl,
-    openaiTimeoutMs: OPENAI_TIMEOUT_MS,
+    ...(OPENAI_TIMEOUT ? { openaiTimeoutMs: OPENAI_TIMEOUT } : {}),
     webSearchEnabled: !!webSearchEnabled,
     mcp: MCP_SERVER_URL
       ? {
@@ -2349,7 +2358,7 @@ const callAgentService = async ({
       abortSignal.addEventListener('abort', onAbort, { once: true });
     }
   }
-  const timeout = setTimeout(() => controller.abort(), AGENT_SERVICE_TIMEOUT_MS);
+  const timeout = AGENT_SERVICE_TIMEOUT ? setTimeout(() => controller.abort(), AGENT_SERVICE_TIMEOUT) : null;
   try {
     const res = await fetch(AGENT_SERVICE_URL, {
       method: 'POST',
@@ -2371,7 +2380,7 @@ const callAgentService = async ({
       trace: body?.trace ?? null,
     };
   } finally {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
     if (abortSignal) {
       abortSignal.removeEventListener?.('abort', onAbort);
     }
@@ -2411,7 +2420,7 @@ const callSkillsService = async ({
     input: inputItems,
     temperature: 0.3,
     openaiBaseUrl: resolvedBaseUrl,
-    openaiTimeoutMs: OPENAI_TIMEOUT_MS,
+    ...(OPENAI_TIMEOUT ? { openaiTimeoutMs: OPENAI_TIMEOUT } : {}),
     webSearchEnabled: !!webSearchEnabled,
     mcp: MCP_SERVER_URL
       ? {
@@ -2432,7 +2441,7 @@ const callSkillsService = async ({
       abortSignal.addEventListener('abort', onAbort, { once: true });
     }
   }
-  const timeout = setTimeout(() => controller.abort(), SKILLS_SERVICE_TIMEOUT_MS);
+  const timeout = SKILLS_SERVICE_TIMEOUT ? setTimeout(() => controller.abort(), SKILLS_SERVICE_TIMEOUT) : null;
   try {
     const res = await fetch(SKILLS_SERVICE_URL, {
       method: 'POST',
@@ -2461,7 +2470,7 @@ const callSkillsService = async ({
       trace,
     };
   } finally {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
     if (abortSignal) {
       abortSignal.removeEventListener?.('abort', onAbort);
     }
@@ -2500,7 +2509,7 @@ const callSkillsFeedback = async ({
     openaiBaseUrl,
   };
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SKILLS_SERVICE_TIMEOUT_MS);
+  const timeout = SKILLS_SERVICE_TIMEOUT ? setTimeout(() => controller.abort(), SKILLS_SERVICE_TIMEOUT) : null;
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -2518,7 +2527,7 @@ const callSkillsFeedback = async ({
     }
     return body ?? {};
   } finally {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
   }
 };
 
@@ -2529,7 +2538,7 @@ const callAgentContext = async ({ model, input, userName }) => {
     userName,
   };
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), AGENT_SERVICE_TIMEOUT_MS);
+  const timeout = AGENT_SERVICE_TIMEOUT ? setTimeout(() => controller.abort(), AGENT_SERVICE_TIMEOUT) : null;
   try {
     const res = await fetch(getAgentContextUrl(), {
       method: 'POST',
@@ -2547,7 +2556,7 @@ const callAgentContext = async ({ model, input, userName }) => {
     }
     return body?.context ?? null;
   } finally {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
   }
 };
 
@@ -5418,15 +5427,15 @@ app.post('/api/assistant/threads', async (req, res) => {
   if (!sessionId) return res.status(400).json({ error: 'session_required' });
   const rawTitle = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
   const title = rawTitle ? rawTitle.slice(0, 120) : null;
-  const thread = await getOrCreateAssistantThreadForSession({
-    userId: auth.userId,
-    sessionId,
-    title,
-  });
+  const forceNew = req.body?.forceNew === true;
+  const thread = forceNew
+    ? await createAssistantThread({ userId: auth.userId, sessionId, title })
+    : await getOrCreateAssistantThreadForSession({ userId: auth.userId, sessionId, title });
   logAssistantEvent('thread_create', {
     userId: auth.userId,
     threadId: thread?.id ?? null,
     sessionId: thread?.sessionId ?? null,
+    forceNew,
   });
   res.json({ thread });
 });

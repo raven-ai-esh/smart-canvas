@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, ChevronDown, ChevronUp, Link2, MessageCircle, ThumbsDown, ThumbsUp, X } from 'lucide-react';
+import { Bot, ChevronDown, ChevronUp, Link2, MessageCircle, ThumbsDown, ThumbsUp, Trash2, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/useStore';
@@ -115,6 +115,8 @@ export const AgentWidget: React.FC = () => {
   const [contextInfo, setContextInfo] = useState<{ remainingRatio?: number | null } | null>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [loadingThread, setLoadingThread] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [panelSize, setPanelSize] = useState({ width: PANEL_DEFAULT_WIDTH, height: PANEL_DEFAULT_HEIGHT });
   const [isNarrow, setIsNarrow] = useState(() => window.matchMedia?.('(max-width: 520px)').matches ?? false);
 
@@ -173,6 +175,12 @@ export const AgentWidget: React.FC = () => {
 
   useEffect(() => {
     openRef.current = open;
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      setShowResetConfirm(false);
+    }
   }, [open]);
 
   useEffect(() => {
@@ -346,14 +354,18 @@ export const AgentWidget: React.FC = () => {
     setThreadId(id);
   }, [threadKey]);
 
-  const createThread = useCallback(async () => {
+  const createThread = useCallback(async ({ forceNew = false }: { forceNew?: boolean } = {}) => {
     if (!sessionReady || !sessionId) {
       throw new Error('Session is not ready yet. Please wait a moment and try again.');
+    }
+    const payload: Record<string, unknown> = { sessionId };
+    if (forceNew) {
+      payload.forceNew = true;
     }
     const res = await fetch('/api/assistant/threads', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-assistant-client': 'widget-v2' },
-      body: JSON.stringify({ sessionId }),
+      body: JSON.stringify(payload),
     });
     const raw = await res.text();
     let data: any = {};
@@ -483,8 +495,32 @@ export const AgentWidget: React.FC = () => {
     setFeedbackBusy({});
   }, [threadKey]);
 
+  const confirmResetConversation = useCallback(async () => {
+    setShowResetConfirm(false);
+    setResetting(true);
+    stopRequest();
+    clearThread();
+    setMessages([]);
+    setInput('');
+    setError(null);
+    setPending(false);
+    setAssistantStatus(null);
+    setLoadingThread(false);
+    if (sessionReady && sessionId) {
+      try {
+        await createThread({ forceNew: true });
+      } catch (err) {
+        const message = isNetworkError(err)
+          ? NETWORK_ERROR_MESSAGE
+          : (err instanceof Error ? err.message : 'Failed to start a new chat.');
+        setError(message);
+      }
+    }
+    setResetting(false);
+  }, [clearThread, createThread, sessionId, sessionReady, stopRequest]);
+
   useEffect(() => {
-    if (!open || !me || !threadKey) return;
+    if (!open || !me || !threadKey || resetting) return;
     let cancelled = false;
     const bootstrap = async () => {
       setLoadingThread(true);
@@ -534,7 +570,7 @@ export const AgentWidget: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [createThread, ensureThread, loadMessages, open, me?.id, threadKey]);
+  }, [createThread, ensureThread, loadMessages, open, me?.id, resetting, threadKey]);
 
   useEffect(() => {
     const onAssistantUpdate = (evt: Event) => {
@@ -571,7 +607,7 @@ export const AgentWidget: React.FC = () => {
 
   const sendMessage = async () => {
     const text = input.trim();
-    if (!text || pending || loadingThread || !me || !sessionReady) return;
+    if (!text || pending || loadingThread || resetting || !me || !sessionReady) return;
     const controller = new AbortController();
     requestAbortRef.current = controller;
     const selectionSnapshot = selectionContext ? { ...selectionContext } : null;
@@ -717,7 +753,7 @@ export const AgentWidget: React.FC = () => {
     return 'Connected to your canvas';
   }, [assistantStatus, me, pending]);
 
-  const sendDisabled = !input.trim() || pending || loadingThread || !me || !sessionReady;
+  const sendDisabled = !input.trim() || pending || loadingThread || resetting || !me || !sessionReady;
 
   const markdownComponents = useMemo(() => ({
     p: ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
@@ -1237,22 +1273,46 @@ export const AgentWidget: React.FC = () => {
                     : (sessionReady ? 'Enter to send, Shift+Enter for newline' : 'Waiting for session...')}
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={pending ? stopRequest : () => void sendMessage()}
-                disabled={pending ? false : sendDisabled}
-                style={{
-                  borderRadius: 10,
-                  border: '1px solid var(--border-strong)',
-                  background: pending ? 'rgba(191,97,106,0.85)' : 'var(--accent-primary)',
-                  color: '#fff',
-                  padding: '6px 12px',
-                  fontSize: 12,
-                  cursor: pending ? 'pointer' : (sendDisabled ? 'not-allowed' : 'pointer'),
-                }}
-              >
-                {pending ? 'Stop' : 'Send'}
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => setShowResetConfirm(true)}
+                  disabled={resetting}
+                  aria-label="Start a new Raven chat"
+                  title="Start a new chat"
+                  style={{
+                    borderRadius: 10,
+                    border: '1px solid rgba(191,97,106,0.55)',
+                    background: 'rgba(191,97,106,0.18)',
+                    color: '#BF616A',
+                    padding: '6px 8px',
+                    fontSize: 12,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    cursor: resetting ? 'not-allowed' : 'pointer',
+                    opacity: resetting ? 0.6 : 1,
+                  }}
+                >
+                  <Trash2 size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={pending ? stopRequest : () => void sendMessage()}
+                  disabled={pending ? false : sendDisabled}
+                  style={{
+                    borderRadius: 10,
+                    border: '1px solid var(--border-strong)',
+                    background: pending ? 'rgba(191,97,106,0.85)' : 'var(--accent-primary)',
+                    color: '#fff',
+                    padding: '6px 12px',
+                    fontSize: 12,
+                    cursor: pending ? 'pointer' : (sendDisabled ? 'not-allowed' : 'pointer'),
+                  }}
+                >
+                  {pending ? 'Stop' : 'Send'}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1272,6 +1332,75 @@ export const AgentWidget: React.FC = () => {
                 cursor: RESIZE_FROM_TOP_LEFT ? 'nwse-resize' : 'se-resize',
               }}
             />
+          )}
+          {showResetConfirm && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                background: 'rgba(6, 8, 12, 0.7)',
+                display: 'grid',
+                placeItems: 'center',
+                padding: 20,
+                zIndex: 20,
+              }}
+            >
+              <div
+                style={{
+                  width: 'min(320px, 90%)',
+                  borderRadius: 14,
+                  border: '1px solid var(--border-strong)',
+                  background: 'rgba(18, 22, 32, 0.98)',
+                  padding: '14px 14px 12px',
+                  display: 'grid',
+                  gap: 10,
+                  boxShadow: '0 12px 36px rgba(0,0,0,0.35)',
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  Clear chat history?
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+                  Are you sure you want to clear the Raven chat history?
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowResetConfirm(false)}
+                    disabled={resetting}
+                    style={{
+                      borderRadius: 10,
+                      border: '1px solid var(--border-strong)',
+                      background: 'rgba(15, 20, 28, 0.7)',
+                      color: 'var(--text-secondary)',
+                      padding: '6px 10px',
+                      fontSize: 12,
+                      cursor: resetting ? 'not-allowed' : 'pointer',
+                      opacity: resetting ? 0.6 : 1,
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void confirmResetConversation()}
+                    disabled={resetting}
+                    style={{
+                      borderRadius: 10,
+                      border: '1px solid rgba(191,97,106,0.7)',
+                      background: 'rgba(191,97,106,0.85)',
+                      color: '#fff',
+                      padding: '6px 10px',
+                      fontSize: 12,
+                      cursor: resetting ? 'not-allowed' : 'pointer',
+                      opacity: resetting ? 0.7 : 1,
+                    }}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
         </div>
       )}
