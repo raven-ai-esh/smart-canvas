@@ -1086,7 +1086,7 @@ export const AgentWidget: React.FC = () => {
                       borderRadius: 14,
                       padding: '8px 10px',
                       fontSize: 13,
-                      whiteSpace: isUser ? 'pre-wrap' : 'normal',
+                      whiteSpace: 'pre-wrap',
                       overflowWrap: 'anywhere',
                       wordBreak: 'break-word',
                       lineHeight: 1.45,
