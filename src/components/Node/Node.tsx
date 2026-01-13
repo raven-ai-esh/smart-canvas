@@ -423,17 +423,7 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
             }
         }
         if (e.key === 'Enter') {
-            if ((e.metaKey || e.ctrlKey) && onSubmit) {
-                e.preventDefault();
-                onSubmit();
-                return;
-            }
-            if (exitOnEnter && !(e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                e.currentTarget.blur();
-                return;
-            }
-            if (e.metaKey || e.ctrlKey) {
+            if (e.shiftKey) {
                 e.preventDefault();
                 const el = e.currentTarget;
                 const start = el.selectionStart ?? 0;
@@ -448,6 +438,20 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
                     t.focus();
                     t.setSelectionRange(a + 1, a + 1);
                 });
+                return;
+            }
+            if ((e.metaKey || e.ctrlKey) && onSubmit) {
+                e.preventDefault();
+                onSubmit();
+                return;
+            }
+            if (exitOnEnter && !(e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                e.currentTarget.blur();
+                return;
+            }
+            if (e.metaKey || e.ctrlKey) {
+                e.preventDefault();
                 return;
             }
         }

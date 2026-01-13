@@ -798,6 +798,7 @@
     overflow: auto;
     color: var(--text-secondary);
     cursor: text;
+    white-space: pre-wrap;
     box-sizing: border-box;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
