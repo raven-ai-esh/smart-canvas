@@ -7,6 +7,19 @@
     pointer-events: auto;
 }
 
+.textBox[data-stack-animating="true"] {
+  transition: left 220ms ease, top 220ms ease, box-shadow 220ms ease;
+}
+
+.textBox[data-stack-collapsed="true"] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.textBox[data-stack-collapsed="true"][data-stack-animating="true"] {
+  opacity: 1;
+}
+
 .authorBadge {
   position: absolute;
   top: 0;

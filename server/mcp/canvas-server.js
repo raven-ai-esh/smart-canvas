@@ -26,6 +26,9 @@ const tombstoneFor = (now, updatedAt) => Math.max(now, ts(updatedAt) + 1);
 const AI_AUTHOR_NAME = 'Raven';
 const DEFAULT_LAYER_ID = 'layer-default';
 const DEFAULT_LAYER_NAME = 'Base';
+const STACK_CARD_WIDTH = 240;
+const STACK_CARD_HEIGHT = 160;
+const STACK_OFFSET = { x: 10, y: 7 };
 const MCP_TECH_USER_ID = process.env.MCP_TECH_USER_ID ?? 'raven-bot';
 const MCP_WS_ACK_TIMEOUT_MS = Number(process.env.MCP_WS_ACK_TIMEOUT_MS ?? 4000);
 const MCP_AUTH_CACHE_TTL_MS = Number(process.env.MCP_AUTH_CACHE_TTL_MS ?? 60_000);
@@ -196,6 +199,7 @@ const emptyPatch = () => ({
   drawings: [],
   textBoxes: [],
   comments: [],
+  stacks: [],
   layers: [],
   tombstones: {
     nodes: {},
@@ -204,6 +208,7 @@ const emptyPatch = () => ({
     textBoxes: {},
     comments: {},
     layers: {},
+    stacks: {},
   },
 });
 
@@ -226,6 +231,7 @@ const normalizeTombstones = (input) => {
     textBoxes: toMap(base.textBoxes),
     comments: toMap(base.comments),
     layers: toMap(base.layers),
+    stacks: toMap(base.stacks),
   };
 };
 
@@ -235,6 +241,7 @@ const normalizePatch = (input) => ({
   drawings: Array.isArray(input?.drawings) ? input.drawings : [],
   textBoxes: Array.isArray(input?.textBoxes) ? input.textBoxes : [],
   comments: Array.isArray(input?.comments) ? input.comments : [],
+  stacks: Array.isArray(input?.stacks) ? input.stacks : [],
   layers: Array.isArray(input?.layers) ? input.layers : [],
   tombstones: normalizeTombstones(input?.tombstones),
 });
@@ -770,6 +777,64 @@ const resolveNodeLayerId = (node) => {
   return layerId || DEFAULT_LAYER_ID;
 };
 
+const resolveStackItemLayerId = (item) => {
+  const layerId = typeof item?.layerId === 'string' ? item.layerId : null;
+  return layerId || DEFAULT_LAYER_ID;
+};
+
+const stackItemKey = (item) => `${item.kind}:${item.id}`;
+
+const buildCollapsedOffsets = (count) => {
+  const offsets = [];
+  if (count <= 1) return [{ x: 0, y: 0 }];
+  const start = -(count - 1) / 2;
+  for (let i = 0; i < count; i += 1) {
+    offsets.push({ x: (start + i) * STACK_OFFSET.x, y: (start + i) * STACK_OFFSET.y });
+  }
+  return offsets;
+};
+
+const resolveStackUniformSize = (items) => {
+  return { width: STACK_CARD_WIDTH, height: STACK_CARD_HEIGHT };
+};
+
+const computeStackAnchor = (items) => {
+  if (!items.length) return { x: 0, y: 0 };
+  let sumX = 0;
+  let sumY = 0;
+  items.forEach((item) => {
+    if (item.kind === 'textBox' && Number.isFinite(item.width) && Number.isFinite(item.height)) {
+      sumX += item.x + item.width / 2;
+      sumY += item.y + item.height / 2;
+    } else {
+      sumX += item.x;
+      sumY += item.y;
+    }
+  });
+  return { x: sumX / items.length, y: sumY / items.length };
+};
+
+const buildCollapsedPositionMap = (items, anchor, size) => {
+  const positions = new Map();
+  const offsets = buildCollapsedOffsets(items.length);
+  items.forEach((item, idx) => {
+    const offset = offsets[idx] ?? { x: 0, y: 0 };
+    const centerX = anchor.x + offset.x;
+    const centerY = anchor.y + offset.y;
+    if (item.kind === 'node') {
+      positions.set(stackItemKey(item), { x: centerX, y: centerY });
+      return;
+    }
+    const width = size?.width ?? item.width ?? STACK_CARD_WIDTH;
+    const height = size?.height ?? item.height ?? STACK_CARD_HEIGHT;
+    positions.set(stackItemKey(item), {
+      x: centerX - width / 2,
+      y: centerY - height / 2,
+    });
+  });
+  return positions;
+};
+
 const summarizeLayer = (layer) => ({
   id: layer?.id ?? null,
   name: layer?.name ?? (layer?.id === DEFAULT_LAYER_ID ? DEFAULT_LAYER_NAME : null),
@@ -805,11 +870,38 @@ const summarizeEdge = (edge) => ({
   label: edge.label ?? null,
 });
 
+const summarizeStack = (stack, layerById) => {
+  if (!stack || typeof stack !== 'object') return null;
+  const layerId = typeof stack.layerId === 'string' ? stack.layerId : null;
+  const layerName = layerId ? (layerById?.get(layerId)?.name ?? null) : null;
+  const items = Array.isArray(stack.items)
+    ? stack.items
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null;
+        const kind = item.kind === 'node' || item.kind === 'textBox' ? item.kind : null;
+        const id = typeof item.id === 'string' ? item.id : null;
+        if (!kind || !id) return null;
+        return { kind, id };
+      })
+      .filter(Boolean)
+    : [];
+  return {
+    id: stack.id ?? null,
+    title: typeof stack.title === 'string' ? stack.title : null,
+    collapsed: stack.collapsed !== false,
+    layerId,
+    layerName,
+    itemCount: items.length,
+    items,
+  };
+};
+
 const summarizeState = (state, limit) => {
   const nodes = Array.isArray(state?.nodes) ? state.nodes : [];
   const edges = Array.isArray(state?.edges) ? state.edges : [];
   const drawings = Array.isArray(state?.drawings) ? state.drawings : [];
   const textBoxes = Array.isArray(state?.textBoxes) ? state.textBoxes : [];
+  const stacks = Array.isArray(state?.stacks) ? state.stacks : [];
   const files = Array.isArray(state?.files) ? state.files : null;
   const images = Array.isArray(state?.images) ? state.images : null;
   const split = files || images
@@ -821,12 +913,14 @@ const summarizeState = (state, limit) => {
   const layerById = buildLayerById(layers);
   const limitedNodes = limitList(nodes, limit);
   const limitedEdges = limitList(edges, limit);
+  const limitedStacks = limitList(stacks, limit);
   const limitedLayers = limitList(orderedLayers, limit);
   return {
     theme: state?.theme ?? 'dark',
     layers: limitedLayers.items.map(summarizeLayer),
     nodes: limitedNodes.items.map((node) => summarizeNode(node, layerById)),
     edges: limitedEdges.items.map(summarizeEdge),
+    stacks: limitedStacks.items.map((stack) => summarizeStack(stack, layerById)).filter(Boolean),
     counts: {
       nodes: nodes.length,
       edges: edges.length,
@@ -836,11 +930,13 @@ const summarizeState = (state, limit) => {
       images: split.images.length,
       comments: comments.length,
       layers: layers.length,
+      stacks: stacks.length,
     },
     truncated: {
       nodes: limitedNodes.truncated,
       edges: limitedEdges.truncated,
       layers: limitedLayers.truncated,
+      stacks: limitedStacks.truncated,
     },
     limit: limitedNodes.limit,
   };
@@ -870,7 +966,7 @@ registerTool(
   'get_state',
   {
     title: 'Get Canvas State',
-    description: 'Fetches the current session state (nodes, edges, drawings, textBoxes, files, images, comments) and includes participants.',
+    description: 'Fetches the current session state (nodes, edges, stacks, drawings, textBoxes, files, images, comments) and includes participants.',
     inputSchema: { mode: StateMode.optional(), limit: z.number().optional() },
     outputSchema: { id: z.string(), version: z.number(), state: z.any(), meta: z.any(), participants: z.array(z.any()) },
   },
@@ -1955,6 +2051,185 @@ registerTool(
     }
 
     throw new Error('action_not_supported');
+  }
+);
+
+registerTool(
+  'stack_objects',
+  {
+    title: 'Stack Objects',
+    description: 'Groups nodes and text boxes into a single stack (collapsed).',
+    inputSchema: {
+      items: z.array(z.object({
+        kind: z.enum(['node', 'textBox']),
+        id: z.string(),
+      })),
+    },
+    outputSchema: {
+      stackId: z.string().optional(),
+      stack: z.any().optional(),
+      sessionId: z.string().optional(),
+      requestId: z.string().optional(),
+    },
+  },
+  async (input) => {
+    const items = Array.isArray(input?.items) ? input.items : [];
+    const unique = new Map();
+    items.forEach((item) => {
+      const kind = item?.kind;
+      const id = typeof item?.id === 'string' ? item.id : '';
+      if ((kind !== 'node' && kind !== 'textBox') || !id) return;
+      unique.set(`${kind}:${id}`, { kind, id });
+    });
+    const candidates = Array.from(unique.values());
+    if (candidates.length < 2) throw new Error('stack_requires_two_items');
+
+    const state = await client.fetchState(input.sessionId);
+    const nodes = Array.isArray(state?.nodes) ? state.nodes : [];
+    const textBoxes = Array.isArray(state?.textBoxes) ? state.textBoxes : [];
+    const stacks = Array.isArray(state?.stacks) ? state.stacks : [];
+    const stackByItem = new Map();
+    stacks.forEach((stack) => {
+      if (!Array.isArray(stack?.items)) return;
+      stack.items.forEach((item) => {
+        stackByItem.set(stackItemKey(item), stack);
+      });
+    });
+    const existingStackIds = new Set();
+    let stackedCount = 0;
+    candidates.forEach((item) => {
+      const existing = stackByItem.get(stackItemKey(item));
+      if (!existing) return;
+      stackedCount += 1;
+      existingStackIds.add(existing.id);
+    });
+    if (stackedCount === candidates.length && existingStackIds.size === 1) {
+      const existingId = Array.from(existingStackIds)[0];
+      const existingStack = stacks.find((stack) => stack.id === existingId) ?? null;
+      return toolResult({ stackId: existingId, stack: existingStack });
+    }
+    if (stackedCount > 0) {
+      throw new Error('items_already_stacked');
+    }
+
+    let layerId = null;
+    const resolvedItems = [];
+    candidates.forEach((item) => {
+      if (item.kind === 'node') {
+        const node = nodes.find((n) => n.id === item.id);
+        if (!node) return;
+        const itemLayerId = resolveStackItemLayerId(node);
+        if (!layerId) layerId = itemLayerId;
+        if (layerId !== itemLayerId) return;
+        resolvedItems.push({ kind: 'node', id: node.id, x: node.x, y: node.y });
+        return;
+      }
+      const textBox = textBoxes.find((tb) => tb.id === item.id);
+      if (!textBox) return;
+      const itemLayerId = resolveStackItemLayerId(textBox);
+      if (!layerId) layerId = itemLayerId;
+      if (layerId !== itemLayerId) return;
+      resolvedItems.push({
+        kind: 'textBox',
+        id: textBox.id,
+        x: textBox.x,
+        y: textBox.y,
+        width: textBox.width,
+        height: textBox.height,
+      });
+    });
+
+    if (resolvedItems.length < 2) throw new Error('stack_requires_two_items');
+
+    const anchor = computeStackAnchor(resolvedItems);
+    const collapsedSize = resolveStackUniformSize(resolvedItems);
+    const collapsedPositions = buildCollapsedPositionMap(resolvedItems, anchor, collapsedSize);
+    const now = nowTs();
+    const stack = {
+      id: randomUUID(),
+      title: '',
+      items: resolvedItems,
+      collapsed: true,
+      collapsedSize,
+      anchor,
+      layerId: layerId ?? undefined,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const patch = emptyPatch();
+    patch.stacks.push(stack);
+    resolvedItems.forEach((item) => {
+      const pos = collapsedPositions.get(stackItemKey(item));
+      if (!pos) return;
+      if (item.kind === 'node') {
+        const node = nodes.find((n) => n.id === item.id);
+        if (!node) return;
+        patch.nodes.push({ ...node, x: pos.x, y: pos.y, updatedAt: now });
+        return;
+      }
+      const textBox = textBoxes.find((tb) => tb.id === item.id);
+      if (!textBox) return;
+      patch.textBoxes.push({
+        ...textBox,
+        x: pos.x,
+        y: pos.y,
+        width: collapsedSize.width,
+        height: collapsedSize.height,
+        updatedAt: now,
+      });
+    });
+
+    const result = await client.sendPatch(input.sessionId, patch);
+    return toolResult({ stackId: stack.id, stack, ...result });
+  }
+);
+
+registerTool(
+  'ungroup_stack',
+  {
+    title: 'Ungroup Stack',
+    description: 'Ungroups a stack and restores its objects.',
+    inputSchema: {
+      id: z.string(),
+    },
+    outputSchema: {
+      stackId: z.string().optional(),
+      sessionId: z.string().optional(),
+      requestId: z.string().optional(),
+    },
+  },
+  async (input) => {
+    if (!input?.id) throw new Error('id_required');
+    const state = await client.fetchState(input.sessionId);
+    const stack = state?.stacks?.find((item) => item.id === input.id);
+    if (!stack) throw new Error('stack_not_found');
+    const nodes = Array.isArray(state?.nodes) ? state.nodes : [];
+    const textBoxes = Array.isArray(state?.textBoxes) ? state.textBoxes : [];
+    const patch = emptyPatch();
+    const now = nowTs();
+    const items = Array.isArray(stack.items) ? stack.items : [];
+    items.forEach((item) => {
+      if (item?.kind === 'node') {
+        const node = nodes.find((n) => n.id === item.id);
+        if (!node) return;
+        patch.nodes.push({ ...node, x: item.x, y: item.y, updatedAt: now });
+        return;
+      }
+      if (item?.kind === 'textBox') {
+        const textBox = textBoxes.find((tb) => tb.id === item.id);
+        if (!textBox) return;
+        const next = { ...textBox, x: item.x, y: item.y, updatedAt: now };
+        if (Number.isFinite(item.width) && Number.isFinite(item.height)) {
+          next.width = item.width;
+          next.height = item.height;
+        }
+        patch.textBoxes.push(next);
+      }
+    });
+    patch.tombstones.stacks[input.id] = tombstoneFor(now, stack.updatedAt);
+    const result = await client.sendPatch(input.sessionId, patch);
+    return toolResult({ stackId: input.id, ...result });
   }
 );
 

@@ -2189,7 +2189,13 @@ const normalizeAssistantSkillTrace = (value) => {
 const normalizeAssistantTrace = (value) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const reasoning = clampText(value.reasoning, 2400) || undefined;
-  const rawTools = Array.isArray(value.tools) ? value.tools : [];
+  const rawTools = Array.isArray(value.tools)
+    ? value.tools
+    : Array.isArray(value.tool_calls)
+      ? value.tool_calls
+      : Array.isArray(value.toolCalls)
+        ? value.toolCalls
+        : [];
   const tools = rawTools.slice(0, 30).map((tool) => {
     if (!tool || typeof tool !== 'object') return null;
     const name = clampText(tool.name, 160);
@@ -2324,10 +2330,13 @@ const callAgentService = async ({
   webSearchEnabled,
   abortSignal,
 }) => {
-  const allowedTools = (MCP_AGENT_ALLOWED_TOOLS || '')
+  const baseAllowedTools = (MCP_AGENT_ALLOWED_TOOLS || '')
     .split(',')
     .map((v) => v.trim())
     .filter(Boolean);
+  const allowedTools = baseAllowedTools.length
+    ? Array.from(new Set([...baseAllowedTools, 'stack_objects', 'ungroup_stack']))
+    : baseAllowedTools;
   const resolvedModel = model || OPENAI_MODEL;
   const resolvedBaseUrl = openaiBaseUrl || OPENAI_API_BASE_URL;
   const payload = {
@@ -2404,10 +2413,13 @@ const callSkillsService = async ({
     err.code = 'skills_service_unavailable';
     throw err;
   }
-  const allowedTools = (MCP_AGENT_ALLOWED_TOOLS || '')
+  const baseAllowedTools = (MCP_AGENT_ALLOWED_TOOLS || '')
     .split(',')
     .map((v) => v.trim())
     .filter(Boolean);
+  const allowedTools = baseAllowedTools.length
+    ? Array.from(new Set([...baseAllowedTools, 'stack_objects', 'ungroup_stack']))
+    : baseAllowedTools;
   const resolvedModel = model || OPENAI_MODEL;
   const resolvedBaseUrl = openaiBaseUrl || OPENAI_API_BASE_URL;
   const payload = {
@@ -3508,7 +3520,7 @@ function ensureItemLayerId(items, layers) {
 }
 
 function normalizeTombstones(raw) {
-  if (!raw || typeof raw !== 'object') return { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {} };
+  if (!raw || typeof raw !== 'object') return { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {}, stacks: {} };
   return {
     nodes: raw.nodes && typeof raw.nodes === 'object' ? raw.nodes : {},
     edges: raw.edges && typeof raw.edges === 'object' ? raw.edges : {},
@@ -3516,6 +3528,7 @@ function normalizeTombstones(raw) {
     textBoxes: raw.textBoxes && typeof raw.textBoxes === 'object' ? raw.textBoxes : {},
     comments: raw.comments && typeof raw.comments === 'object' ? raw.comments : {},
     layers: raw.layers && typeof raw.layers === 'object' ? raw.layers : {},
+    stacks: raw.stacks && typeof raw.stacks === 'object' ? raw.stacks : {},
   };
 }
 
@@ -3526,6 +3539,7 @@ function normalizeState(raw) {
   const drawings = Array.isArray(obj.drawings) ? obj.drawings : [];
   const textBoxes = Array.isArray(obj.textBoxes) ? obj.textBoxes : [];
   const comments = Array.isArray(obj.comments) ? obj.comments : [];
+  const stacks = Array.isArray(obj.stacks) ? obj.stacks : [];
   const baseLayers = normalizeLayers(obj.layers, now);
   const layers = ensureLayersForItems(
     baseLayers,
@@ -3538,6 +3552,7 @@ function normalizeState(raw) {
     drawings: ensureItemLayerId(drawings, layers),
     textBoxes: ensureItemLayerId(textBoxes, layers),
     comments: ensureItemLayerId(comments, layers),
+    stacks,
     layers,
     theme: obj.theme === 'light' ? 'light' : 'dark',
     tombstones: normalizeTombstones(obj.tombstones),
@@ -3559,6 +3574,7 @@ function needsStateRepair(raw, normalized) {
   const tombstones = raw.tombstones;
   if (!tombstones || typeof tombstones !== 'object') return true;
   if (!tombstones.layers || typeof tombstones.layers !== 'object') return true;
+  if (!tombstones.stacks || typeof tombstones.stacks !== 'object') return true;
   return false;
 }
 
@@ -3572,6 +3588,7 @@ function mergeTombstones(a, b) {
     textBoxes: { ...ta.textBoxes },
     comments: { ...ta.comments },
     layers: { ...ta.layers },
+    stacks: { ...ta.stacks },
   };
   for (const [id, t] of Object.entries(tb.nodes)) out.nodes[id] = Math.max(ts(out.nodes[id]), ts(t));
   for (const [id, t] of Object.entries(tb.edges)) out.edges[id] = Math.max(ts(out.edges[id]), ts(t));
@@ -3579,6 +3596,7 @@ function mergeTombstones(a, b) {
   for (const [id, t] of Object.entries(tb.textBoxes)) out.textBoxes[id] = Math.max(ts(out.textBoxes[id]), ts(t));
   for (const [id, t] of Object.entries(tb.comments)) out.comments[id] = Math.max(ts(out.comments[id]), ts(t));
   for (const [id, t] of Object.entries(tb.layers)) out.layers[id] = Math.max(ts(out.layers[id]), ts(t));
+  for (const [id, t] of Object.entries(tb.stacks)) out.stacks[id] = Math.max(ts(out.stacks[id]), ts(t));
   return out;
 }
 
@@ -3622,6 +3640,7 @@ function mergeState(currentRaw, incomingRaw) {
   const drawings = mergeById(current.drawings, incoming.drawings, tombstones.drawings);
   const textBoxes = mergeById(current.textBoxes, incoming.textBoxes, tombstones.textBoxes);
   const comments = mergeById(current.comments, incoming.comments, tombstones.comments);
+  const stacks = mergeById(current.stacks, incoming.stacks, tombstones.stacks);
   const layers = mergeById(current.layers, incoming.layers, tombstones.layers);
 
   return {
@@ -3630,6 +3649,7 @@ function mergeState(currentRaw, incomingRaw) {
     drawings,
     textBoxes,
     comments,
+    stacks,
     layers,
     theme: current.theme,
     tombstones,
