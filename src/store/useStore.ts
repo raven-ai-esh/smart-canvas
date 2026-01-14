@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { Comment, NodeData, EdgeData, CanvasState, Drawing, LayerData, PenToolType, Tombstones, TextBox, SessionSaver } from '../types';
+import type { Comment, NodeData, EdgeData, CanvasState, Drawing, LayerData, PenToolType, Tombstones, TextBox, SessionSaver, StackGroup, StackItemKind, StackItemRef } from '../types';
 import type { AssistantSelectionContext } from '../types/assistant';
 import { clampEnergy, computeEffectiveEnergy } from '../utils/energy';
 import { debugLog } from '../utils/debug';
@@ -14,11 +14,13 @@ type UndoSnapshot = {
     edges: EdgeData[];
     drawings: Drawing[];
     textBoxes: TextBox[];
+    stacks: StackGroup[];
     layers: LayerData[];
     tombstones: Tombstones;
 };
 
 type StackMoveAction = 'up' | 'down' | 'top' | 'bottom';
+type StackCollapsedSize = { width: number; height: number };
 
 const ts = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
 const clampProgress = (x: unknown) => Math.min(100, Math.max(0, Number.isFinite(Number(x)) ? Number(x) : 0));
@@ -35,6 +37,8 @@ const progressFromStatus = (status?: NodeData['status'], legacyInWork?: boolean)
     return 0;
 };
 const tombstoneFor = (now: number, updatedAt?: number) => Math.max(now, ts(updatedAt) + 1);
+const STACK_CARD_WIDTH = 240;
+const STACK_CARD_HEIGHT = 160;
 
 const resolveAuthor = (state: AppState) => {
     const me = state.me;
@@ -117,11 +121,15 @@ interface AppState {
     setCanvasViewCommand: (command: CanvasViewCommand | null) => void;
     textBoxes: TextBox[];
     comments: Comment[];
+    stacks: StackGroup[];
     editingTextBoxId: string | null;
     setEditingTextBoxId: (id: string | null) => void;
     selectedTextBoxId: string | null;
     selectTextBox: (id: string | null) => void;
     selectedTextBoxes: string[];
+    selectedStackId: string | null;
+    selectStack: (id: string | null) => void;
+    selectedStacks: string[];
 
     selectedNode: string | null;
     selectedNodes: string[];
@@ -192,7 +200,7 @@ interface AppState {
     selectEdge: (id: string | null) => void;
     selectEdgeHandle: (edgeId: string, handleId: string) => void;
     setSelectedEdgeHandle: (handle: { edgeId: string; handleId: string } | null) => void;
-    setMultiSelection: (sel: { nodes: string[]; edges?: string[]; textBoxes?: string[] }) => void;
+    setMultiSelection: (sel: { nodes: string[]; edges?: string[]; textBoxes?: string[]; stacks?: string[] }) => void;
     deleteSelection: () => void;
 
     connectionTargetId: string | null;
@@ -216,6 +224,13 @@ interface AppState {
     addComment: (comment: Comment) => void;
     deleteComment: (id: string) => void;
     moveStackItem: (kind: StackKind, id: string, action: StackMoveAction) => void;
+    createStack: (items: Array<{ kind: StackItemKind; id: string }>, options?: { collapsedSize?: StackCollapsedSize }) => void;
+    expandStack: (id: string) => void;
+    collapseStack: (id: string, options?: { collapsedSize?: StackCollapsedSize }) => void;
+    toggleStack: (id: string) => void;
+    ungroupStack: (id: string) => void;
+    updateStackTitle: (id: string, title: string) => void;
+    moveStack: (id: string, delta: { dx: number; dy: number }) => void;
 
     theme: 'dark' | 'light';
     toggleTheme: () => void;
@@ -234,11 +249,12 @@ type CanvasViewCommand = {
     scale?: number | null;
 };
 
-const snapshotOf = (state: Pick<AppState, 'nodes' | 'edges' | 'drawings' | 'textBoxes' | 'layers' | 'tombstones'>): UndoSnapshot => ({
+const snapshotOf = (state: Pick<AppState, 'nodes' | 'edges' | 'drawings' | 'textBoxes' | 'stacks' | 'layers' | 'tombstones'>): UndoSnapshot => ({
     nodes: state.nodes,
     edges: state.edges,
     drawings: state.drawings,
     textBoxes: state.textBoxes,
+    stacks: state.stacks,
     layers: state.layers,
     tombstones: state.tombstones,
 });
@@ -329,6 +345,117 @@ const resolveStackItem = (state: Pick<AppState, 'nodes' | 'textBoxes' | 'comment
     return state.comments.find((comment) => comment.id === id) ?? null;
 };
 
+const stackItemKey = (item: { kind: StackItemKind; id: string }) => `${item.kind}:${item.id}`;
+
+const resolveStackItemLayerId = (state: Pick<AppState, 'nodes' | 'textBoxes'>, item: { kind: StackItemKind; id: string }) => {
+    if (item.kind === 'node') {
+        const node = state.nodes.find((n) => n.id === item.id);
+        return node ? stackableLayerId(node) : null;
+    }
+    const textBox = state.textBoxes.find((tb) => tb.id === item.id);
+    return textBox ? stackableLayerId(textBox) : null;
+};
+
+const resolveStackItemPosition = (state: Pick<AppState, 'nodes' | 'textBoxes'>, item: { kind: StackItemKind; id: string }) => {
+    if (item.kind === 'node') {
+        const node = state.nodes.find((n) => n.id === item.id);
+        return node ? { x: node.x, y: node.y, width: 0, height: 0 } : null;
+    }
+    const textBox = state.textBoxes.find((tb) => tb.id === item.id);
+    return textBox ? { x: textBox.x, y: textBox.y, width: textBox.width, height: textBox.height } : null;
+};
+
+const resolveStackItemCenter = (state: Pick<AppState, 'textBoxes'>, item: StackItemRef) => {
+    if (item.kind === 'node') return { x: item.x, y: item.y };
+    const textBox = state.textBoxes.find((tb) => tb.id === item.id);
+    const width = Number.isFinite(textBox?.width) ? (textBox!.width as number) : (item.width ?? 0);
+    const height = Number.isFinite(textBox?.height) ? (textBox!.height as number) : (item.height ?? 0);
+    return { x: item.x + width / 2, y: item.y + height / 2 };
+};
+
+const computeStackAnchor = (state: Pick<AppState, 'textBoxes'>, items: StackItemRef[]) => {
+    if (items.length === 0) return { x: 0, y: 0 };
+    let sumX = 0;
+    let sumY = 0;
+    items.forEach((item) => {
+        const center = resolveStackItemCenter(state, item);
+        sumX += center.x;
+        sumY += center.y;
+    });
+    return { x: sumX / items.length, y: sumY / items.length };
+};
+
+const buildCollapsedOffsets = (count: number) => {
+    const offsets: Array<{ x: number; y: number }> = [];
+    if (count <= 1) return [{ x: 0, y: 0 }];
+    const spreadX = 10;
+    const spreadY = 7;
+    const start = -(count - 1) / 2;
+    for (let i = 0; i < count; i += 1) {
+        offsets.push({ x: (start + i) * spreadX, y: (start + i) * spreadY });
+    }
+    return offsets;
+};
+
+const buildCollapsedPositionMap = (
+    state: Pick<AppState, 'textBoxes'>,
+    items: StackItemRef[],
+    anchor: { x: number; y: number },
+    collapsedSize?: { width: number; height: number },
+) => {
+    const offsets = buildCollapsedOffsets(items.length);
+    const positions = new Map<string, { x: number; y: number }>();
+    items.forEach((item, idx) => {
+        const offset = offsets[idx] ?? { x: 0, y: 0 };
+        const centerX = anchor.x + offset.x;
+        const centerY = anchor.y + offset.y;
+        if (item.kind === 'node') {
+            positions.set(stackItemKey(item), { x: centerX, y: centerY });
+            return;
+        }
+        const textBox = state.textBoxes.find((tb) => tb.id === item.id);
+        if (!textBox) return;
+        const width = collapsedSize?.width ?? textBox.width;
+        const height = collapsedSize?.height ?? textBox.height;
+        positions.set(stackItemKey(item), {
+            x: centerX - width / 2,
+            y: centerY - height / 2,
+        });
+    });
+    return positions;
+};
+
+const resolveStackUniformSize = (size?: Partial<StackCollapsedSize>) => {
+    const width = typeof size?.width === 'number' && Number.isFinite(size.width) && size.width > 0
+        ? size.width
+        : STACK_CARD_WIDTH;
+    const height = typeof size?.height === 'number' && Number.isFinite(size.height) && size.height > 0
+        ? size.height
+        : STACK_CARD_HEIGHT;
+    return { width, height };
+};
+
+const pruneStacks = (stacks: StackGroup[], nodes: NodeData[], textBoxes: TextBox[]) => {
+    if (!stacks.length) return { stacks, removedStacks: [] as StackGroup[] };
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    const textBoxIds = new Set(textBoxes.map((tb) => tb.id));
+    const removedStacks: StackGroup[] = [];
+    const nextStacks = stacks
+        .map((stack) => {
+            const nextItems = stack.items.filter((item) => (
+                item.kind === 'node' ? nodeIds.has(item.id) : textBoxIds.has(item.id)
+            ));
+            if (nextItems.length < 2) {
+                removedStacks.push(stack);
+                return null;
+            }
+            if (nextItems.length === stack.items.length) return stack;
+            return { ...stack, items: nextItems, updatedAt: Date.now() };
+        })
+        .filter(Boolean) as StackGroup[];
+    return { stacks: nextStacks, removedStacks };
+};
+
 export const useStore = create<AppState>()(
     persist(
         (set, get) => ({
@@ -338,7 +465,7 @@ export const useStore = create<AppState>()(
             activeLayerId: initialActiveLayerId,
             canvas: { x: 0, y: 0, scale: 1 },
             effectiveEnergy: {},
-            tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {} },
+            tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {}, stacks: {} },
             setActiveLayerId: (id) => set((state) => {
                 const resolved = resolveLayerId(state.layers, id);
                 const layers = ensureActiveLayerVisible(state.layers, resolved);
@@ -426,6 +553,9 @@ export const useStore = create<AppState>()(
                     if (moveSet.has(commentLayerId)) return { ...comment, layerId: resolvedTarget, updatedAt: now };
                     return comment;
                 });
+                const stacks = state.stacks.map((stack) => (
+                    moveSet.has(stack.layerId ?? DEFAULT_LAYER_ID) ? { ...stack, layerId: resolvedTarget, updatedAt: now } : stack
+                ));
                 const layers = state.layers.filter((layer) => !removeSet.has(layer.id)).map((layer) => (
                     layer.id === resolvedTarget ? { ...layer, updatedAt: now } : layer
                 ));
@@ -443,6 +573,7 @@ export const useStore = create<AppState>()(
                     drawings,
                     textBoxes,
                     comments,
+                    stacks,
                     layers,
                     tombstones,
                     activeLayerId: resolvedTarget,
@@ -484,6 +615,7 @@ export const useStore = create<AppState>()(
                 const drawings = state.drawings.filter((drawing) => !removeDrawingSet.has(drawing.id));
                 const comments = state.comments.filter((comment) => !removeCommentSet.has(comment.id));
                 const layers = remaining;
+                const pruneResult = pruneStacks(state.stacks, nodes, textBoxes);
                 const tombstones: Tombstones = {
                     ...state.tombstones,
                     nodes: { ...state.tombstones.nodes },
@@ -493,6 +625,12 @@ export const useStore = create<AppState>()(
                     comments: { ...state.tombstones.comments },
                     layers: { ...state.tombstones.layers },
                 };
+                if (pruneResult.removedStacks.length) {
+                    tombstones.stacks = { ...state.tombstones.stacks };
+                    pruneResult.removedStacks.forEach((stack) => {
+                        tombstones.stacks[stack.id] = tombstoneFor(now, stack.updatedAt);
+                    });
+                }
                 for (const node of removeNodes) tombstones.nodes[node.id] = tombstoneFor(now, node.updatedAt);
                 for (const edge of removeEdges) tombstones.edges[edge.id] = tombstoneFor(now, edge.updatedAt);
                 for (const drawing of removeDrawings) tombstones.drawings[drawing.id] = tombstoneFor(now, drawing.updatedAt);
@@ -512,6 +650,7 @@ export const useStore = create<AppState>()(
                     drawings,
                     textBoxes,
                     comments,
+                    stacks: pruneResult.stacks,
                     layers,
                     tombstones,
                     effectiveEnergy,
@@ -550,6 +689,7 @@ export const useStore = create<AppState>()(
             setCanvasViewCommand: (command) => set({ canvasViewCommand: command }),
             textBoxes: [],
             comments: [],
+            stacks: [],
             editingTextBoxId: null,
             setEditingTextBoxId: (id) => set({ editingTextBoxId: id }),
             selectedTextBoxId: null,
@@ -558,6 +698,8 @@ export const useStore = create<AppState>()(
                 set({
                     selectedTextBoxId: id,
                     selectedTextBoxes: id ? [id] : [],
+                    selectedStackId: null,
+                    selectedStacks: [],
                     selectedNode: null,
                     selectedNodes: [],
                     selectedEdge: null,
@@ -571,6 +713,29 @@ export const useStore = create<AppState>()(
                     kind: id ? 'textBox' : 'none',
                     id: id ?? null,
                     selection: { node: null, edge: null, textBox: id ?? null },
+                });
+            },
+            selectedStackId: null,
+            selectedStacks: [],
+            selectStack: (id) => {
+                set({
+                    selectedStackId: id,
+                    selectedStacks: id ? [id] : [],
+                    selectedNode: null,
+                    selectedNodes: [],
+                    selectedEdge: null,
+                    selectedEdges: [],
+                    selectedEdgeHandle: null,
+                    selectedTextBoxId: null,
+                    selectedTextBoxes: [],
+                    neighbors: {},
+                });
+                debugLog({
+                    type: 'select',
+                    t: performance.now(),
+                    kind: id ? 'stack' : 'none',
+                    id: id ?? null,
+                    selection: { node: null, edge: null, textBox: null },
                 });
             },
 
@@ -635,6 +800,7 @@ export const useStore = create<AppState>()(
                     edges: prev.edges,
                     drawings: prev.drawings,
                     textBoxes: prev.textBoxes,
+                    stacks: prev.stacks,
                     layers: prev.layers,
                     activeLayerId: resolveLayerId(prev.layers, state.activeLayerId),
                     tombstones: prev.tombstones,
@@ -663,6 +829,7 @@ export const useStore = create<AppState>()(
                     edges: next.edges,
                     drawings: next.drawings,
                     textBoxes: next.textBoxes,
+                    stacks: next.stacks,
                     layers: next.layers,
                     activeLayerId: resolveLayerId(next.layers, state.activeLayerId),
                     tombstones: next.tombstones,
@@ -731,6 +898,17 @@ export const useStore = create<AppState>()(
                 if (Object.prototype.hasOwnProperty.call(nextData, 'layerId')) {
                     nextData.layerId = resolveLayerId(state.layers, nextData.layerId ?? null);
                 }
+                const stackPositionUpdate = Object.prototype.hasOwnProperty.call(nextData, 'x')
+                    || Object.prototype.hasOwnProperty.call(nextData, 'y');
+                if (stackPositionUpdate) {
+                    const inCollapsedStack = state.stacks.some((stack) => (
+                        stack.collapsed && stack.items.some((item) => item.kind === 'node' && item.id === id)
+                    ));
+                    if (inCollapsedStack) {
+                        delete (nextData as Partial<NodeData>).x;
+                        delete (nextData as Partial<NodeData>).y;
+                    }
+                }
                 if (Object.prototype.hasOwnProperty.call(nextData, 'energy')) {
                     nextData.energy = clampEnergy(Number(nextData.energy));
                 }
@@ -757,8 +935,28 @@ export const useStore = create<AppState>()(
                     nextData.progress = progress;
                     nextData.status = statusFromProgress(progress);
                 }
+                if (Object.keys(nextData).length === 0) return {};
                 const hasEnergyUpdate = Object.prototype.hasOwnProperty.call(nextData, 'energy');
                 const nodes = state.nodes.map((node) => (node.id === id ? { ...node, ...nextData, updatedAt: now } : node));
+                let nextStacks = state.stacks;
+                const shouldUpdateStackPos = Object.prototype.hasOwnProperty.call(nextData, 'x')
+                    || Object.prototype.hasOwnProperty.call(nextData, 'y');
+                if (shouldUpdateStackPos) {
+                    const updatedNode = nodes.find((node) => node.id === id);
+                    if (updatedNode) {
+                        let changed = false;
+                        nextStacks = state.stacks.map((stack) => {
+                            if (stack.collapsed) return stack;
+                            const idx = stack.items.findIndex((item) => item.kind === 'node' && item.id === id);
+                            if (idx < 0) return stack;
+                            const nextItems = stack.items.slice();
+                            nextItems[idx] = { ...nextItems[idx], x: updatedNode.x, y: updatedNode.y };
+                            changed = true;
+                            return { ...stack, items: nextItems, updatedAt: now };
+                        });
+                        if (!changed) nextStacks = state.stacks;
+                    }
+                }
                 let workingNodes = nodes;
                 let normalizedEnergy: ReturnType<typeof normalizeEnergies> | null = null;
                 if (hasEnergyUpdate) {
@@ -773,7 +971,9 @@ export const useStore = create<AppState>()(
                     || Object.prototype.hasOwnProperty.call(nextData, 'type')
                     || childProgressResult.progressChanged
                 );
-                if (!hasEnergyUpdate && !affectsMonitoring) return { nodes: finalNodes };
+                if (!hasEnergyUpdate && !affectsMonitoring) {
+                    return nextStacks === state.stacks ? { nodes: finalNodes } : { nodes: finalNodes, stacks: nextStacks };
+                }
                 if (hasEnergyUpdate) {
                     const effectiveEnergy = effectiveForMode(
                         finalNodes,
@@ -781,10 +981,14 @@ export const useStore = create<AppState>()(
                         state.monitoringMode,
                         normalizedEnergy?.effectiveEnergy,
                     );
-                    return { nodes: finalNodes, effectiveEnergy };
+                    return nextStacks === state.stacks
+                        ? { nodes: finalNodes, effectiveEnergy }
+                        : { nodes: finalNodes, effectiveEnergy, stacks: nextStacks };
                 }
                 const effectiveEnergy = effectiveForMode(finalNodes, state.edges, state.monitoringMode, state.effectiveEnergy);
-                return { nodes: finalNodes, effectiveEnergy };
+                return nextStacks === state.stacks
+                    ? { nodes: finalNodes, effectiveEnergy }
+                    : { nodes: finalNodes, effectiveEnergy, stacks: nextStacks };
             }),
 
             deleteNode: (id) => set((state) => {
@@ -793,6 +997,7 @@ export const useStore = create<AppState>()(
                 const nodes = state.nodes.filter((node) => node.id !== id);
                 const removedEdges = state.edges.filter((edge) => edge.source === id || edge.target === id);
                 const edges = state.edges.filter((edge) => edge.source !== id && edge.target !== id);
+                const pruneResult = pruneStacks(state.stacks, nodes, state.textBoxes);
                 const tombstoneNode = tombstoneFor(now, node?.updatedAt);
                 const tombstones: Tombstones = {
                     ...state.tombstones,
@@ -803,6 +1008,12 @@ export const useStore = create<AppState>()(
                     comments: { ...state.tombstones.comments },
                     layers: { ...state.tombstones.layers },
                 };
+                if (pruneResult.removedStacks.length) {
+                    tombstones.stacks = { ...state.tombstones.stacks };
+                    pruneResult.removedStacks.forEach((stack) => {
+                        tombstones.stacks[stack.id] = tombstoneFor(now, stack.updatedAt);
+                    });
+                }
                 for (const e of removedEdges) {
                     tombstones.edges[e.id] = tombstoneFor(now, e.updatedAt);
                 }
@@ -813,6 +1024,7 @@ export const useStore = create<AppState>()(
                     ...pushHistoryReducer(state),
                     nodes: childProgressResult.nodes,
                     edges,
+                    stacks: pruneResult.stacks,
                     tombstones,
                     effectiveEnergy,
                 };
@@ -919,6 +1131,8 @@ export const useStore = create<AppState>()(
                         selectedEdges: [],
                         selectedTextBoxId: null,
                         selectedTextBoxes: [],
+                        selectedStackId: null,
+                        selectedStacks: [],
                         selectedEdgeHandle: null,
                         neighbors: {},
                     });
@@ -938,6 +1152,8 @@ export const useStore = create<AppState>()(
                     selectedEdges: [],
                     selectedTextBoxId: null,
                     selectedTextBoxes: [],
+                    selectedStackId: null,
+                    selectedStacks: [],
                     selectedEdgeHandle: null,
                     selectedNodes: [id],
                 });
@@ -984,6 +1200,8 @@ export const useStore = create<AppState>()(
                         neighbors: {},
                         selectedTextBoxId: null,
                         selectedTextBoxes: [],
+                        selectedStackId: null,
+                        selectedStacks: [],
                         selectedEdgeHandle: null,
                     });
                     debugLog({
@@ -994,7 +1212,13 @@ export const useStore = create<AppState>()(
                         selection: { node: null, edge: id, textBox: null },
                     });
                 } else {
-                    set({ selectedEdge: null, selectedEdges: [], selectedEdgeHandle: null });
+                    set({
+                        selectedEdge: null,
+                        selectedEdges: [],
+                        selectedStackId: null,
+                        selectedStacks: [],
+                        selectedEdgeHandle: null,
+                    });
                     debugLog({
                         type: 'select',
                         t: performance.now(),
@@ -1014,31 +1238,46 @@ export const useStore = create<AppState>()(
                     neighbors: {},
                     selectedTextBoxId: null,
                     selectedTextBoxes: [],
+                    selectedStackId: null,
+                    selectedStacks: [],
                     selectedEdgeHandle: { edgeId, handleId },
                 });
             },
 
             setSelectedEdgeHandle: (handle) => set({ selectedEdgeHandle: handle }),
 
-            setMultiSelection: ({ nodes, edges, textBoxes }) => {
+            setMultiSelection: ({ nodes, edges, textBoxes, stacks }) => {
                 const n = Array.from(new Set((nodes ?? []).filter(Boolean)));
                 const e = Array.from(new Set((edges ?? []).filter(Boolean)));
                 const t = Array.from(new Set((textBoxes ?? []).filter(Boolean)));
+                const s = Array.from(new Set((stacks ?? []).filter(Boolean)));
                 set({
                     selectedNodes: n,
                     selectedEdges: e,
                     selectedTextBoxes: t,
-                    selectedNode: n.length === 1 && e.length === 0 && t.length === 0 ? n[0] : null,
-                    selectedEdge: e.length === 1 && n.length === 0 && t.length === 0 ? e[0] : null,
-                    selectedTextBoxId: t.length === 1 && n.length === 0 && e.length === 0 ? t[0] : null,
+                    selectedStacks: s,
+                    selectedNode: n.length === 1 && e.length === 0 && t.length === 0 && s.length === 0 ? n[0] : null,
+                    selectedEdge: e.length === 1 && n.length === 0 && t.length === 0 && s.length === 0 ? e[0] : null,
+                    selectedTextBoxId: t.length === 1 && n.length === 0 && e.length === 0 && s.length === 0 ? t[0] : null,
+                    selectedStackId: s.length === 1 && n.length === 0 && e.length === 0 && t.length === 0 ? s[0] : null,
                     selectedEdgeHandle: null,
                     neighbors: {},
                 });
                 debugLog({
                     type: 'select',
                     t: performance.now(),
-                    kind: (n.length + e.length + t.length) > 1 ? 'none' : n.length === 1 ? 'node' : e.length === 1 ? 'edge' : t.length === 1 ? 'textBox' : 'none',
-                    id: (n.length === 1 ? n[0] : e.length === 1 ? e[0] : t.length === 1 ? t[0] : null),
+                    kind: (n.length + e.length + t.length + s.length) > 1
+                        ? 'none'
+                        : n.length === 1
+                            ? 'node'
+                            : e.length === 1
+                                ? 'edge'
+                                : t.length === 1
+                                    ? 'textBox'
+                                    : s.length === 1
+                                        ? 'stack'
+                                        : 'none',
+                    id: (n.length === 1 ? n[0] : e.length === 1 ? e[0] : t.length === 1 ? t[0] : s.length === 1 ? s[0] : null),
                     selection: { node: n.length === 1 ? n[0] : null, edge: e.length === 1 ? e[0] : null, textBox: t.length === 1 ? t[0] : null },
                 });
             },
@@ -1048,17 +1287,32 @@ export const useStore = create<AppState>()(
                 const selectedNodes = state.selectedNodes.length ? state.selectedNodes : (state.selectedNode ? [state.selectedNode] : []);
                 const selectedEdges = state.selectedEdges.length ? state.selectedEdges : (state.selectedEdge ? [state.selectedEdge] : []);
                 const selectedTextBoxes = state.selectedTextBoxes.length ? state.selectedTextBoxes : (state.selectedTextBoxId ? [state.selectedTextBoxId] : []);
+                const selectedStacks = state.selectedStacks.length ? state.selectedStacks : (state.selectedStackId ? [state.selectedStackId] : []);
+                const stackById = new Map(state.stacks.map((stack) => [stack.id, stack]));
+                const stackNodeIds: string[] = [];
+                const stackTextBoxIds: string[] = [];
+                selectedStacks.forEach((stackId) => {
+                    const stack = stackById.get(stackId);
+                    if (!stack) return;
+                    stack.items.forEach((item) => {
+                        if (item.kind === 'node') stackNodeIds.push(item.id);
+                        else stackTextBoxIds.push(item.id);
+                    });
+                });
+                const allSelectedNodes = Array.from(new Set([...selectedNodes, ...stackNodeIds]));
+                const allSelectedTextBoxes = Array.from(new Set([...selectedTextBoxes, ...stackTextBoxIds]));
 
-                if (selectedNodes.length === 0 && selectedEdges.length === 0 && selectedTextBoxes.length === 0) return {};
+                if (allSelectedNodes.length === 0 && selectedEdges.length === 0 && allSelectedTextBoxes.length === 0) return {};
 
                 // Remove nodes + edges connected to removed nodes
-                const removeNodeSet = new Set(selectedNodes);
+                const removeNodeSet = new Set(allSelectedNodes);
                 const removedEdgesByNode = state.edges.filter((e) => removeNodeSet.has(e.source) || removeNodeSet.has(e.target));
                 const removeEdgeSet = new Set([...selectedEdges, ...removedEdgesByNode.map((e) => e.id)]);
 
                 const nodes = state.nodes.filter((n) => !removeNodeSet.has(n.id));
                 const edges = state.edges.filter((e) => !removeEdgeSet.has(e.id));
-                const textBoxes = state.textBoxes.filter((tb) => !selectedTextBoxes.includes(tb.id));
+                const textBoxes = state.textBoxes.filter((tb) => !allSelectedTextBoxes.includes(tb.id));
+                const pruneResult = pruneStacks(state.stacks, nodes, textBoxes);
 
                 const tombstones: Tombstones = {
                     ...state.tombstones,
@@ -1069,6 +1323,12 @@ export const useStore = create<AppState>()(
                     comments: { ...state.tombstones.comments },
                     layers: { ...state.tombstones.layers },
                 };
+                if (pruneResult.removedStacks.length) {
+                    tombstones.stacks = { ...state.tombstones.stacks };
+                    pruneResult.removedStacks.forEach((stack) => {
+                        tombstones.stacks[stack.id] = tombstoneFor(now, stack.updatedAt);
+                    });
+                }
 
                 for (const nodeId of removeNodeSet) {
                     const node = state.nodes.find((n) => n.id === nodeId);
@@ -1078,7 +1338,7 @@ export const useStore = create<AppState>()(
                     const edge = state.edges.find((e) => e.id === edgeId);
                     tombstones.edges[edgeId] = tombstoneFor(now, edge?.updatedAt);
                 }
-                for (const tbId of selectedTextBoxes) {
+                for (const tbId of allSelectedTextBoxes) {
                     const tb = state.textBoxes.find((t) => t.id === tbId);
                     tombstones.textBoxes[tbId] = tombstoneFor(now, tb?.updatedAt);
                 }
@@ -1091,6 +1351,7 @@ export const useStore = create<AppState>()(
                     nodes: normalizedEnergy.nodes,
                     edges,
                     textBoxes,
+                    stacks: pruneResult.stacks,
                     tombstones,
                     effectiveEnergy,
                     selectedNode: null,
@@ -1100,6 +1361,8 @@ export const useStore = create<AppState>()(
                     selectedEdgeHandle: null,
                     selectedTextBoxId: null,
                     selectedTextBoxes: [],
+                    selectedStackId: null,
+                    selectedStacks: [],
                     neighbors: {},
                     editingTextBoxId: null,
                 };
@@ -1206,14 +1469,58 @@ export const useStore = create<AppState>()(
                     if (Object.prototype.hasOwnProperty.call(nextData, 'layerId')) {
                         nextData.layerId = resolveLayerId(state.layers, nextData.layerId ?? null);
                     }
+                    const stackPositionUpdate = Object.prototype.hasOwnProperty.call(nextData, 'x')
+                        || Object.prototype.hasOwnProperty.call(nextData, 'y');
+                    const stackSizeUpdate = Object.prototype.hasOwnProperty.call(nextData, 'width')
+                        || Object.prototype.hasOwnProperty.call(nextData, 'height');
+                    if (stackPositionUpdate || stackSizeUpdate) {
+                        const inCollapsedStack = state.stacks.some((stack) => (
+                            stack.collapsed && stack.items.some((item) => item.kind === 'textBox' && item.id === id)
+                        ));
+                        if (inCollapsedStack) {
+                            delete (nextData as Partial<TextBox>).x;
+                            delete (nextData as Partial<TextBox>).y;
+                            delete (nextData as Partial<TextBox>).width;
+                            delete (nextData as Partial<TextBox>).height;
+                        }
+                    }
+                    if (Object.keys(nextData).length === 0) return {};
                     const textBoxes = state.textBoxes.map((t) => (t.id === id ? { ...t, ...nextData, updatedAt: now } : t));
-                    return { textBoxes };
+                    let nextStacks = state.stacks;
+                    const shouldUpdateStackItem = Object.prototype.hasOwnProperty.call(nextData, 'x')
+                        || Object.prototype.hasOwnProperty.call(nextData, 'y')
+                        || Object.prototype.hasOwnProperty.call(nextData, 'width')
+                        || Object.prototype.hasOwnProperty.call(nextData, 'height');
+                    if (shouldUpdateStackItem) {
+                        const updatedTextBox = textBoxes.find((t) => t.id === id);
+                        if (updatedTextBox) {
+                            let changed = false;
+                            nextStacks = state.stacks.map((stack) => {
+                                if (stack.collapsed) return stack;
+                                const idx = stack.items.findIndex((item) => item.kind === 'textBox' && item.id === id);
+                                if (idx < 0) return stack;
+                                const nextItems = stack.items.slice();
+                                nextItems[idx] = {
+                                    ...nextItems[idx],
+                                    x: updatedTextBox.x,
+                                    y: updatedTextBox.y,
+                                    width: updatedTextBox.width,
+                                    height: updatedTextBox.height,
+                                };
+                                changed = true;
+                                return { ...stack, items: nextItems, updatedAt: now };
+                            });
+                            if (!changed) nextStacks = state.stacks;
+                        }
+                    }
+                    return nextStacks === state.stacks ? { textBoxes } : { textBoxes, stacks: nextStacks };
                 }),
-	            deleteTextBox: (id) =>
-	                set((state) => {
+            deleteTextBox: (id) =>
+                set((state) => {
                     const now = Date.now();
                     const tb = state.textBoxes.find((t) => t.id === id);
                     const textBoxes = state.textBoxes.filter((t) => t.id !== id);
+                    const pruneResult = pruneStacks(state.stacks, state.nodes, textBoxes);
                     const tombstoneTextBox = tombstoneFor(now, tb?.updatedAt);
                     const tombstones: Tombstones = {
                         ...state.tombstones,
@@ -1221,12 +1528,18 @@ export const useStore = create<AppState>()(
                         comments: { ...state.tombstones.comments },
                         layers: { ...state.tombstones.layers },
                     };
-	                    debugLog({ type: 'delete_call', t: performance.now(), kind: 'textBox', id, now, updatedAt: tb?.updatedAt, tombstone: tombstoneTextBox });
-	                    const editingTextBoxId = state.editingTextBoxId === id ? null : state.editingTextBoxId;
-	                    const selectedTextBoxId = state.selectedTextBoxId === id ? null : state.selectedTextBoxId;
-	                    const selectedTextBoxes = state.selectedTextBoxes.filter((x) => x !== id);
-	                    return { ...pushHistoryReducer(state), textBoxes, tombstones, editingTextBoxId, selectedTextBoxId, selectedTextBoxes };
-	                }),
+                    if (pruneResult.removedStacks.length) {
+                        tombstones.stacks = { ...state.tombstones.stacks };
+                        pruneResult.removedStacks.forEach((stack) => {
+                            tombstones.stacks[stack.id] = tombstoneFor(now, stack.updatedAt);
+                        });
+                    }
+                    debugLog({ type: 'delete_call', t: performance.now(), kind: 'textBox', id, now, updatedAt: tb?.updatedAt, tombstone: tombstoneTextBox });
+                    const editingTextBoxId = state.editingTextBoxId === id ? null : state.editingTextBoxId;
+                    const selectedTextBoxId = state.selectedTextBoxId === id ? null : state.selectedTextBoxId;
+                    const selectedTextBoxes = state.selectedTextBoxes.filter((x) => x !== id);
+                    return { ...pushHistoryReducer(state), textBoxes, stacks: pruneResult.stacks, tombstones, editingTextBoxId, selectedTextBoxId, selectedTextBoxes };
+                }),
 
             addComment: (comment) =>
                 set((state) => {
@@ -1357,6 +1670,234 @@ export const useStore = create<AppState>()(
                     ))
                     : state.comments;
                 return { ...pushHistoryReducer(state), nodes, textBoxes, comments };
+            }),
+
+            createStack: (items, options) => set((state) => {
+                const unique = new Map<string, { kind: StackItemKind; id: string }>();
+                items.forEach((item) => {
+                    if (!item?.id) return;
+                    unique.set(stackItemKey(item), item);
+                });
+                const candidates = Array.from(unique.values());
+                if (candidates.length < 2) return {};
+                const stackedKeys = new Set(state.stacks.flatMap((stack) => stack.items.map(stackItemKey)));
+                const filtered = candidates.filter((item) => !stackedKeys.has(stackItemKey(item)));
+                if (filtered.length < 2) return {};
+
+                let layerId: string | null = null;
+                const resolvedItems: StackItemRef[] = [];
+                filtered.forEach((item) => {
+                    const pos = resolveStackItemPosition(state, item);
+                    if (!pos) return;
+                    const itemLayerId = resolveStackItemLayerId(state, item);
+                    if (!itemLayerId) return;
+                    if (!layerId) layerId = itemLayerId;
+                    if (layerId !== itemLayerId) return;
+                    const nextItem: StackItemRef = { ...item, x: pos.x, y: pos.y };
+                    if (item.kind === 'textBox') {
+                        nextItem.width = pos.width;
+                        nextItem.height = pos.height;
+                    }
+                    resolvedItems.push(nextItem);
+                });
+                if (resolvedItems.length < 2) return {};
+
+                const anchor = computeStackAnchor(state, resolvedItems);
+                const collapsedSize = resolveStackUniformSize(options?.collapsedSize);
+                const collapsedPositions = buildCollapsedPositionMap(state, resolvedItems, anchor, collapsedSize);
+                const now = Date.now();
+                const stack: StackGroup = {
+                    id: crypto.randomUUID(),
+                    title: '',
+                    items: resolvedItems,
+                    collapsed: true,
+                    collapsedSize,
+                    anchor,
+                    layerId: layerId ?? undefined,
+                    createdAt: now,
+                    updatedAt: now,
+                };
+                const stackTextBoxIds = new Set(
+                    resolvedItems.filter((item) => item.kind === 'textBox').map((item) => item.id),
+                );
+                const nodes = state.nodes.map((node) => {
+                    const pos = collapsedPositions.get(`node:${node.id}`);
+                    return pos ? { ...node, x: pos.x, y: pos.y, updatedAt: now } : node;
+                });
+                const textBoxes = state.textBoxes.map((tb) => {
+                    const pos = collapsedPositions.get(`textBox:${tb.id}`);
+                    if (!pos) return tb;
+                    if (!stackTextBoxIds.has(tb.id)) return { ...tb, x: pos.x, y: pos.y, updatedAt: now };
+                    return {
+                        ...tb,
+                        x: pos.x,
+                        y: pos.y,
+                        width: collapsedSize.width,
+                        height: collapsedSize.height,
+                        updatedAt: now,
+                    };
+                });
+                const tombstones: Tombstones = {
+                    ...state.tombstones,
+                    stacks: { ...state.tombstones.stacks },
+                };
+                delete tombstones.stacks[stack.id];
+                return {
+                    ...pushHistoryReducer(state),
+                    nodes,
+                    textBoxes,
+                    stacks: [...state.stacks, stack],
+                    tombstones,
+                };
+            }),
+
+            expandStack: (id) => set((state) => {
+                const stack = state.stacks.find((item) => item.id === id);
+                if (!stack || !stack.collapsed) return {};
+                const now = Date.now();
+                const nodes = state.nodes.map((node) => {
+                    const entry = stack.items.find((item) => item.kind === 'node' && item.id === node.id);
+                    return entry ? { ...node, x: entry.x, y: entry.y, updatedAt: now } : node;
+                });
+                const textBoxes = state.textBoxes.map((tb) => {
+                    const entry = stack.items.find((item) => item.kind === 'textBox' && item.id === tb.id);
+                    if (!entry) return tb;
+                    const next = { ...tb, x: entry.x, y: entry.y, updatedAt: now };
+                    if (Number.isFinite(entry.width) && Number.isFinite(entry.height)) {
+                        next.width = entry.width as number;
+                        next.height = entry.height as number;
+                    }
+                    return next;
+                });
+                const stacks = state.stacks.map((item) => (
+                    item.id === id ? { ...item, collapsed: false, updatedAt: now } : item
+                ));
+                return { ...pushHistoryReducer(state), nodes, textBoxes, stacks };
+            }),
+
+            collapseStack: (id, options) => set((state) => {
+                const stack = state.stacks.find((item) => item.id === id);
+                if (!stack || stack.collapsed) return {};
+                const now = Date.now();
+                const updatedItems = stack.items.map((item) => {
+                    const pos = resolveStackItemPosition(state, item);
+                    if (!pos) return item;
+                    if (item.kind === 'textBox') {
+                        return { ...item, x: pos.x, y: pos.y, width: pos.width, height: pos.height };
+                    }
+                    return { ...item, x: pos.x, y: pos.y };
+                });
+                const anchor = computeStackAnchor(state, updatedItems);
+                const collapsedSize = resolveStackUniformSize(options?.collapsedSize ?? stack.collapsedSize);
+                const collapsedPositions = buildCollapsedPositionMap(state, updatedItems, anchor, collapsedSize);
+                const nodes = state.nodes.map((node) => {
+                    const pos = collapsedPositions.get(`node:${node.id}`);
+                    return pos ? { ...node, x: pos.x, y: pos.y, updatedAt: now } : node;
+                });
+                const stackTextBoxIds = new Set(
+                    updatedItems.filter((item) => item.kind === 'textBox').map((item) => item.id),
+                );
+                const textBoxes = state.textBoxes.map((tb) => {
+                    const pos = collapsedPositions.get(`textBox:${tb.id}`);
+                    if (!pos) return tb;
+                    if (!stackTextBoxIds.has(tb.id)) return { ...tb, x: pos.x, y: pos.y, updatedAt: now };
+                    return {
+                        ...tb,
+                        x: pos.x,
+                        y: pos.y,
+                        width: collapsedSize.width,
+                        height: collapsedSize.height,
+                        updatedAt: now,
+                    };
+                });
+                const stacks = state.stacks.map((item) => (
+                    item.id === id
+                        ? {
+                            ...item,
+                            items: updatedItems,
+                            collapsed: true,
+                            collapsedSize,
+                            anchor,
+                            updatedAt: now,
+                        }
+                        : item
+                ));
+                return { ...pushHistoryReducer(state), nodes, textBoxes, stacks };
+            }),
+
+            toggleStack: (id) => {
+                const stack = get().stacks.find((item) => item.id === id);
+                if (!stack) return;
+                if (stack.collapsed) {
+                    get().expandStack(id);
+                } else {
+                    get().collapseStack(id);
+                }
+            },
+
+            ungroupStack: (id) => set((state) => {
+                const stack = state.stacks.find((item) => item.id === id);
+                if (!stack) return {};
+                const now = Date.now();
+                let nodes = state.nodes;
+                let textBoxes = state.textBoxes;
+                if (stack.collapsed) {
+                    nodes = state.nodes.map((node) => {
+                        const entry = stack.items.find((item) => item.kind === 'node' && item.id === node.id);
+                        return entry ? { ...node, x: entry.x, y: entry.y, updatedAt: now } : node;
+                    });
+                    textBoxes = state.textBoxes.map((tb) => {
+                        const entry = stack.items.find((item) => item.kind === 'textBox' && item.id === tb.id);
+                        if (!entry) return tb;
+                        const next = { ...tb, x: entry.x, y: entry.y, updatedAt: now };
+                        if (Number.isFinite(entry.width) && Number.isFinite(entry.height)) {
+                            next.width = entry.width as number;
+                            next.height = entry.height as number;
+                        }
+                        return next;
+                    });
+                }
+                const stacks = state.stacks.filter((item) => item.id !== id);
+                const tombstones: Tombstones = {
+                    ...state.tombstones,
+                    stacks: { ...state.tombstones.stacks, [id]: tombstoneFor(now, stack.updatedAt) },
+                };
+                return { ...pushHistoryReducer(state), nodes, textBoxes, stacks, tombstones };
+            }),
+
+            updateStackTitle: (id, title) => set((state) => {
+                const stack = state.stacks.find((item) => item.id === id);
+                if (!stack) return {};
+                const nextTitle = typeof title === 'string' ? title.trim() : '';
+                if ((stack.title ?? '') === nextTitle) return {};
+                const now = Date.now();
+                const stacks = state.stacks.map((item) => (
+                    item.id === id ? { ...item, title: nextTitle, updatedAt: now } : item
+                ));
+                return { ...pushHistoryReducer(state), stacks };
+            }),
+
+            moveStack: (id, delta) => set((state) => {
+                const stack = state.stacks.find((item) => item.id === id);
+                if (!stack) return {};
+                const dx = Number.isFinite(delta?.dx) ? delta.dx : 0;
+                const dy = Number.isFinite(delta?.dy) ? delta.dy : 0;
+                if (dx === 0 && dy === 0) return {};
+                const now = Date.now();
+                const nodeIds = new Set(stack.items.filter((item) => item.kind === 'node').map((item) => item.id));
+                const textBoxIds = new Set(stack.items.filter((item) => item.kind === 'textBox').map((item) => item.id));
+                const nodes = state.nodes.map((node) => (
+                    nodeIds.has(node.id) ? { ...node, x: node.x + dx, y: node.y + dy, updatedAt: now } : node
+                ));
+                const textBoxes = state.textBoxes.map((tb) => (
+                    textBoxIds.has(tb.id) ? { ...tb, x: tb.x + dx, y: tb.y + dy, updatedAt: now } : tb
+                ));
+                const updatedItems = stack.items.map((item) => ({ ...item, x: item.x + dx, y: item.y + dy }));
+                const anchor = stack.anchor ? { x: stack.anchor.x + dx, y: stack.anchor.y + dy } : undefined;
+                const stacks = state.stacks.map((item) => (
+                    item.id === id ? { ...item, items: updatedItems, anchor, updatedAt: now } : item
+                ));
+                return { nodes, textBoxes, stacks };
             }),
 
             theme: 'dark',

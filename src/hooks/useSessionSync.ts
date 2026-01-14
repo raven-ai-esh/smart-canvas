@@ -44,6 +44,7 @@ function pickSessionState(state: ReturnType<typeof useStore.getState>) {
     drawings: state.drawings,
     textBoxes: state.textBoxes,
     comments: state.comments,
+    stacks: state.stacks,
     layers: state.layers,
     tombstones: state.tombstones,
   };
@@ -61,6 +62,7 @@ function applySessionState(state: SessionState) {
     drawings: state.drawings as any,
     textBoxes: state.textBoxes as any,
     comments: state.comments as any,
+    stacks: state.stacks as any,
     layers: nextLayers,
     activeLayerId,
     tombstones: state.tombstones,

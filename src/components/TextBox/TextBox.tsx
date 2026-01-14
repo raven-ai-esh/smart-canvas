@@ -2,10 +2,10 @@ import React from 'react';
 import { createPortal } from 'react-dom';
 import { Download, FileText, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import type { TextBox as TextBoxType } from '../../types';
 import { useStore } from '../../store/useStore';
 import { formatBytes, resolveAttachmentUrl } from '../../utils/attachments';
+import { markdownComponents, markdownPlugins } from '../../utils/markdown';
 import styles from './TextBox.module.css';
 
 const MIN_W = 80;
@@ -51,6 +51,20 @@ const yieldToUi = () => new Promise((resolve) => setTimeout(resolve, 0));
 const createPreviewWorker = () =>
   new Worker(new URL('../../workers/filePreview.worker.ts', import.meta.url), { type: 'module' });
 
+type TextBoxProps = {
+  box: TextBoxType;
+  screenToWorld: (x: number, y: number) => { x: number; y: number };
+  snapMode?: boolean;
+  resolveSnap?: (req: SnapRequest) => { x: number; y: number };
+  clearAlignmentGuides?: () => void;
+  onRequestContextMenu?: (args: { id: string; x: number; y: number }) => void;
+  stackId?: string | null;
+  stackCollapsed?: boolean;
+  stackAnimating?: boolean;
+  onToggleStack?: (stackId: string) => void;
+  onCollapseExpandedStacks?: (excludeStackId?: string | null) => void;
+};
+
 export function TextBox({
   box,
   screenToWorld,
@@ -58,14 +72,12 @@ export function TextBox({
   resolveSnap,
   clearAlignmentGuides,
   onRequestContextMenu,
-}: {
-  box: TextBoxType;
-  screenToWorld: (x: number, y: number) => { x: number; y: number };
-  snapMode?: boolean;
-  resolveSnap?: (req: SnapRequest) => { x: number; y: number };
-  clearAlignmentGuides?: () => void;
-  onRequestContextMenu?: (args: { id: string; x: number; y: number }) => void;
-}) {
+  stackId,
+  stackCollapsed = false,
+  stackAnimating = false,
+  onToggleStack,
+  onCollapseExpandedStacks,
+}: TextBoxProps) {
   const updateTextBox = useStore((s) => s.updateTextBox);
   const editingId = useStore((s) => s.editingTextBoxId);
   const setEditingId = useStore((s) => s.setEditingTextBoxId);
@@ -652,10 +664,20 @@ export function TextBox({
         height: box.height,
       }}
       data-textbox-id={box.id}
+      data-stack-animating={stackAnimating ? 'true' : undefined}
+      data-stack-collapsed={stackCollapsed ? 'true' : undefined}
       data-interactive="true"
       onPointerEnter={() => setIsHovered(true)}
       onPointerLeave={() => setIsHovered(false)}
       onPointerDown={(e) => {
+        onCollapseExpandedStacks?.(stackCollapsed ? null : (stackId ?? null));
+        if (stackCollapsed && stackId && !isEditing) {
+          if (!(e.pointerType === 'mouse' && e.button === 2)) {
+            e.stopPropagation();
+            onToggleStack?.(stackId);
+          }
+          return;
+        }
         e.stopPropagation();
         if (e.pointerType === 'touch' && !isEditing) {
           // Touch UX: tap selects, drag after threshold moves, long-press opens context menu.
@@ -876,7 +898,9 @@ export function TextBox({
                     <pre className={styles.previewText}>{previewState.text}</pre>
                   ) : (
                     <div className={styles.previewMarkdown}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewState.text}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={markdownPlugins} components={markdownComponents}>
+                        {previewState.text}
+                      </ReactMarkdown>
                     </div>
                   )}
                   {previewState.truncated && (

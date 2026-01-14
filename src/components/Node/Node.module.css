@@ -7,6 +7,19 @@
     transition: box-shadow 0.2s ease, opacity 0.2s ease;
 }
 
+.nodeWrapper[data-stack-animating="true"] {
+    transition: box-shadow 0.2s ease, opacity 0.2s ease, left 220ms ease, top 220ms ease;
+}
+
+.nodeWrapper[data-stack-collapsed="true"] {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.nodeWrapper[data-stack-collapsed="true"][data-stack-animating="true"] {
+    opacity: 1;
+}
+
 .authorBadge {
     position: absolute;
     top: 0;

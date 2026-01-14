@@ -17,7 +17,7 @@ type DebugEvent =
   | {
       type: 'select';
       t: number;
-      kind: 'node' | 'edge' | 'textBox' | 'none';
+      kind: 'node' | 'edge' | 'textBox' | 'stack' | 'none';
       id: string | null;
       selection: { node: string | null; edge: string | null; textBox: string | null };
     }

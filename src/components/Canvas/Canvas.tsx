@@ -4,9 +4,9 @@ import { Node, NoteView } from '../Node/Node';
 import { Edge, ConnectionLine, LayerBridgeEdge } from '../Edge/Edge';
 import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
-import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpToLine, Bot, Link2, MessageCircle, Paperclip, X, Zap, ZapOff } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpToLine, Bot, Layers, Link2, MessageCircle, Paperclip, Pencil, Ungroup, X, Zap, ZapOff } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
-import type { Attachment, Comment, EdgeData, NodeData, SessionSaver, StrokePoint, TextBox as TextBoxType } from '../../types';
+import type { Attachment, Comment, EdgeData, NodeData, SessionSaver, StackGroup, StrokePoint, TextBox as TextBoxType } from '../../types';
 import type { AssistantSelectionContext } from '../../types/assistant';
 import { debugLog } from '../../utils/debug';
 import { TextBox } from '../TextBox/TextBox';
@@ -42,6 +42,11 @@ const PRESSURE_MIN_SCALE = 0.6;
 const PRESSURE_MAX_SCALE = 1.4;
 const TILT_MAX_SCALE = 1.6;
 const DEFAULT_PRESSURE = 0.5;
+const STACK_ANIM_MS = 240;
+const STACK_CARD_WIDTH = 240;
+const STACK_CARD_HEIGHT = 160;
+
+const stackItemKey = (kind: 'node' | 'textBox', id: string) => `${kind}:${id}`;
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 
@@ -262,7 +267,7 @@ const getTouchById = (touches: TouchList | null | undefined, id: number) => {
     return null;
 };
 
-    type InteractionMode = 'idle' | 'panning' | 'draggingNode' | 'connecting' | 'textPlacing' | 'selecting' | 'ganttResize' | 'ganttMove';
+    type InteractionMode = 'idle' | 'panning' | 'draggingNode' | 'draggingStack' | 'connecting' | 'textPlacing' | 'selecting' | 'ganttResize' | 'ganttMove';
 type AlignmentGuide = { axis: 'x' | 'y'; pos: number; length: number };
 type SnapAnchor = 'center' | 'topleft';
 type SnapRequest = {
@@ -280,7 +285,7 @@ type ClipboardPayload =
     | { kind: 'selection'; nodes: NodeData[]; edges: EdgeData[]; textBoxes: TextBoxType[] };
 
 type ContextMenuState = {
-    kind: 'node' | 'textBox' | 'edge' | 'selection' | 'canvas' | 'comment';
+    kind: 'node' | 'textBox' | 'edge' | 'selection' | 'canvas' | 'comment' | 'stack';
     id?: string;
     x: number;
     y: number;
@@ -324,8 +329,12 @@ export const Canvas: React.FC = () => {
     const effectiveEnergy = useStore((state) => state.effectiveEnergy);
     const selectedNode = useStore((state) => state.selectedNode);
     const selectedNodes = useStore((state) => state.selectedNodes);
+    const selectedTextBoxes = useStore((state) => state.selectedTextBoxes);
+    const selectedStackId = useStore((state) => state.selectedStackId);
+    const selectedStacks = useStore((state) => state.selectedStacks);
     const selectedEdge = useStore((state) => state.selectedEdge);
     const selectedEdges = useStore((state) => state.selectedEdges);
+    const stacks = useStore((state) => state.stacks);
     const uploadPointRef = useRef<{ x: number; y: number } | null>(null);
     const filePickerRef = useRef<HTMLInputElement | null>(null);
     const ganttResizeRef = useRef<{
@@ -350,6 +359,99 @@ export const Canvas: React.FC = () => {
         lastDeltaDays: number;
     } | null>(null);
     const [ganttDetailNodeId, setGanttDetailNodeId] = useState<string | null>(null);
+    const [stackAnimatingKeys, setStackAnimatingKeys] = useState<string[]>([]);
+    const [peekingStackId, setPeekingStackId] = useState<string | null>(null);
+    const [editingStackTitleId, setEditingStackTitleId] = useState<string | null>(null);
+    const [stackTitleDraft, setStackTitleDraft] = useState('');
+    const stackAnimTimerRef = useRef<number | null>(null);
+    const stackPeekTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const stackPeekRef = useRef<{ stackId: string; pointerId: number; startClientX: number; startClientY: number } | null>(null);
+    const stackPeekActiveRef = useRef<string | null>(null);
+    const collapseStack = useStore((state) => state.collapseStack);
+
+    const stackByItem = useMemo(() => {
+        const map = new Map<string, StackGroup>();
+        stacks.forEach((stack) => {
+            stack.items.forEach((item) => {
+                map.set(stackItemKey(item.kind, item.id), stack);
+            });
+        });
+        return map;
+    }, [stacks]);
+    const textBoxById = useMemo(() => new Map(textBoxes.map((tb) => [tb.id, tb])), [textBoxes]);
+    const stackById = useMemo(() => new Map(stacks.map((stack) => [stack.id, stack])), [stacks]);
+    const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+
+    const resolveStackAnchor = useCallback((stack: { anchor?: { x: number; y: number }; items: Array<{ kind: 'node' | 'textBox'; id: string; x: number; y: number }> }) => {
+        if (stack.anchor && Number.isFinite(stack.anchor.x) && Number.isFinite(stack.anchor.y)) {
+            return stack.anchor;
+        }
+        let sumX = 0;
+        let sumY = 0;
+        let count = 0;
+        stack.items.forEach((item) => {
+            if (item.kind === 'node') {
+                sumX += item.x;
+                sumY += item.y;
+                count += 1;
+                return;
+            }
+            const tb = textBoxById.get(item.id);
+            if (!tb) return;
+            sumX += item.x + tb.width / 2;
+            sumY += item.y + tb.height / 2;
+            count += 1;
+        });
+        return count ? { x: sumX / count, y: sumY / count } : { x: 0, y: 0 };
+    }, [textBoxById]);
+
+    const resolveStackZIndex = useCallback((stack: { items: Array<{ kind: 'node' | 'textBox'; id: string }> }) => {
+        let zIndex = 0;
+        let hasZ = false;
+        stack.items.forEach((item) => {
+            if (item.kind === 'node') {
+                const node = nodeById.get(item.id);
+                if (Number.isFinite(node?.zIndex)) {
+                    zIndex = Math.max(zIndex, node!.zIndex as number);
+                    hasZ = true;
+                }
+                return;
+            }
+            const tb = textBoxById.get(item.id);
+            if (Number.isFinite(tb?.zIndex)) {
+                zIndex = Math.max(zIndex, tb!.zIndex as number);
+                hasZ = true;
+            }
+        });
+        return hasZ ? zIndex + 1 : undefined;
+    }, [nodeById, textBoxById]);
+
+    const stackAnimatingSet = useMemo(() => new Set(stackAnimatingKeys), [stackAnimatingKeys]);
+
+    const triggerStackAnimation = useCallback((items: Array<{ kind: 'node' | 'textBox'; id: string }>) => {
+        const keys = items.map((item) => stackItemKey(item.kind, item.id));
+        setStackAnimatingKeys(keys);
+        if (stackAnimTimerRef.current) window.clearTimeout(stackAnimTimerRef.current);
+        stackAnimTimerRef.current = window.setTimeout(() => {
+            setStackAnimatingKeys([]);
+            stackAnimTimerRef.current = null;
+        }, STACK_ANIM_MS);
+    }, []);
+
+    const clearStackPeek = useCallback(() => {
+        if (stackPeekTimerRef.current) {
+            window.clearTimeout(stackPeekTimerRef.current);
+            stackPeekTimerRef.current = null;
+        }
+        stackPeekRef.current = null;
+        stackPeekActiveRef.current = null;
+        setPeekingStackId(null);
+    }, []);
+
+    useEffect(() => () => {
+        if (stackAnimTimerRef.current) window.clearTimeout(stackAnimTimerRef.current);
+        if (stackPeekTimerRef.current) window.clearTimeout(stackPeekTimerRef.current);
+    }, []);
 
 	    // Actions
 	    const setCanvasTransform = useStore((state) => state.setCanvasTransform);
@@ -357,7 +459,13 @@ export const Canvas: React.FC = () => {
 	    const addEdge = useStore((state) => state.addEdge);
 	    const addNode = useStore((state) => state.addNode);
 	    const selectNode = useStore((state) => state.selectNode);
+        const selectStack = useStore((state) => state.selectStack);
 	    const addDrawing = useStore((state) => state.addDrawing);
+        const createStack = useStore((state) => state.createStack);
+        const expandStack = useStore((state) => state.expandStack);
+        const ungroupStack = useStore((state) => state.ungroupStack);
+        const moveStack = useStore((state) => state.moveStack);
+        const updateStackTitle = useStore((state) => state.updateStackTitle);
 	    const removeDrawing = useStore((state) => state.removeDrawing);
 	    const addTextBox = useStore((state) => state.addTextBox);
 	    const setEditingTextBoxId = useStore((state) => state.setEditingTextBoxId);
@@ -369,12 +477,25 @@ export const Canvas: React.FC = () => {
     const setCanvasViewCommand = useStore((state) => state.setCanvasViewCommand);
 
     const layerById = useMemo(() => new Map(layers.map((layer) => [layer.id, layer])), [layers]);
+
+    const beginEditStackTitle = useCallback((stack: StackGroup) => {
+        setEditingStackTitleId(stack.id);
+        setStackTitleDraft(stack.title ?? '');
+    }, []);
+
+    const cancelEditStackTitle = useCallback(() => {
+        setEditingStackTitleId(null);
+    }, []);
+
+    const commitStackTitle = useCallback((stackId: string) => {
+        updateStackTitle(stackId, stackTitleDraft);
+        setEditingStackTitleId(null);
+    }, [stackTitleDraft, updateStackTitle]);
     const visibleLayerIds = useMemo(() => {
         const visible = layers.filter((layer) => layer.visible).map((layer) => layer.id);
         const resolved = visible.length ? visible : layers.map((layer) => layer.id);
         return new Set(resolved.length ? resolved : [DEFAULT_LAYER_ID]);
     }, [layers]);
-    const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
     const visibleNodes = useMemo(
         () => nodes.filter((node) => visibleLayerIds.has(node.layerId ?? DEFAULT_LAYER_ID)),
         [nodes, visibleLayerIds],
@@ -389,6 +510,19 @@ export const Canvas: React.FC = () => {
         [textBoxes, visibleLayerIds],
     );
     const visibleTextBoxIds = useMemo(() => new Set(visibleTextBoxes.map((tb) => tb.id)), [visibleTextBoxes]);
+    const visibleStacks = useMemo(
+        () => stacks.filter((stack) => visibleLayerIds.has(stack.layerId ?? DEFAULT_LAYER_ID)),
+        [stacks, visibleLayerIds],
+    );
+
+    useEffect(() => {
+        if (!editingStackTitleId) return;
+        const exists = stacks.some((stack) => stack.id === editingStackTitleId);
+        if (!exists) {
+            setEditingStackTitleId(null);
+            setStackTitleDraft('');
+        }
+    }, [editingStackTitleId, stacks]);
     const ganttTasks = useMemo(() => visibleNodes.filter((node) => node.type === 'task'), [visibleNodes]);
     const ganttLayout = useMemo(() => {
         if (!ganttMode) return null;
@@ -599,6 +733,13 @@ export const Canvas: React.FC = () => {
         lastT: number;
 	        lastPosByNode: Record<string, { x: number; y: number }>;
 	    }>(null);
+        const stackDragRef = useRef<null | {
+            pointerId: number;
+            stackId: string;
+            startWorld: { x: number; y: number };
+            lastWorld: { x: number; y: number };
+            committed: boolean;
+        }>(null);
 
 	    const clearMarqueeHover = () => {
 	        document.querySelectorAll<HTMLElement>('[data-marquee-hover="true"]').forEach((el) => {
@@ -613,19 +754,26 @@ export const Canvas: React.FC = () => {
 	        const selBottom = rect.top + rect.height;
 	        const intersects = (r: DOMRect) => !(r.right < selLeft || r.left > selRight || r.bottom < selTop || r.top > selBottom);
 
-	        document.querySelectorAll<HTMLElement>('[data-node-bounds="true"]').forEach((el) => {
-	            const r = el.getBoundingClientRect();
-	            const hit = intersects(r);
-	            if (hit) el.setAttribute('data-marquee-hover', 'true');
-	            else el.removeAttribute('data-marquee-hover');
-	        });
+        document.querySelectorAll<HTMLElement>('[data-node-bounds="true"]:not([data-stack-collapsed="true"])').forEach((el) => {
+            const r = el.getBoundingClientRect();
+            const hit = intersects(r);
+            if (hit) el.setAttribute('data-marquee-hover', 'true');
+            else el.removeAttribute('data-marquee-hover');
+        });
 
-	        document.querySelectorAll<HTMLElement>('[data-textbox-id]').forEach((el) => {
-	            const r = el.getBoundingClientRect();
-	            const hit = intersects(r);
-	            if (hit) el.setAttribute('data-marquee-hover', 'true');
-	            else el.removeAttribute('data-marquee-hover');
-	        });
+        document.querySelectorAll<HTMLElement>('[data-textbox-id]:not([data-stack-collapsed="true"])').forEach((el) => {
+            const r = el.getBoundingClientRect();
+            const hit = intersects(r);
+            if (hit) el.setAttribute('data-marquee-hover', 'true');
+            else el.removeAttribute('data-marquee-hover');
+        });
+
+        document.querySelectorAll<HTMLElement>('[data-stack-bounds="true"]').forEach((el) => {
+            const r = el.getBoundingClientRect();
+            const hit = intersects(r);
+            if (hit) el.setAttribute('data-marquee-hover', 'true');
+            else el.removeAttribute('data-marquee-hover');
+        });
 
 	        // Edge hit areas are SVG paths; HTMLElement typing is looser but works in the browser.
 	        (document.querySelectorAll('[data-edge-id]') as any as Element[]).forEach((el) => {
@@ -707,7 +855,7 @@ export const Canvas: React.FC = () => {
     const pasteCountRef = useRef(0);
     const pasteEventHandledAtRef = useRef(0);
     const pasteFallbackTimerRef = useRef<number | null>(null);
-	    const pendingDragUndoSnapshotRef = useRef<{ nodes: NodeData[]; edges: EdgeData[]; drawings: any[]; textBoxes: any[]; tombstones: any } | null>(null);
+    const pendingDragUndoSnapshotRef = useRef<{ nodes: NodeData[]; edges: EdgeData[]; drawings: any[]; textBoxes: any[]; stacks: any[]; tombstones: any } | null>(null);
     const dragUndoCommittedRef = useRef(false);
     const dragStartPosRef = useRef<{ x: number; y: number } | null>(null);
 
@@ -855,6 +1003,72 @@ export const Canvas: React.FC = () => {
         const scale = Math.max(0.0001, canvasRef.current.scale);
         return { width: rect.width / scale, height: rect.height / scale };
     }, []);
+
+    const getNodeCardSize = useCallback((id: string) => {
+        const el = document.querySelector<HTMLElement>(`[data-node-card-rect="true"][data-node-card-id="${id}"]`);
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        const scale = Math.max(0.0001, canvasRef.current.scale);
+        const rawScale = Number(el.getAttribute('data-node-card-scale') ?? '1');
+        const viewScale = Number.isFinite(rawScale) && rawScale > 0 ? rawScale : 1;
+        return { width: rect.width / (scale * viewScale), height: rect.height / (scale * viewScale) };
+    }, []);
+
+    const getAnyCardSize = useCallback(() => {
+        const el = document.querySelector<HTMLElement>('[data-node-card-rect="true"]');
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        const scale = Math.max(0.0001, canvasRef.current.scale);
+        const rawScale = Number(el.getAttribute('data-node-card-scale') ?? '1');
+        const viewScale = Number.isFinite(rawScale) && rawScale > 0 ? rawScale : 1;
+        return { width: rect.width / (scale * viewScale), height: rect.height / (scale * viewScale) };
+    }, []);
+
+    const resolveStackCardSize = useCallback((items: Array<{ kind: 'node' | 'textBox'; id: string }>) => {
+        let width = STACK_CARD_WIDTH;
+        let height = STACK_CARD_HEIGHT;
+        let found = false;
+        items.forEach((item) => {
+            if (item.kind !== 'node') return;
+            const size = getNodeCardSize(item.id);
+            if (!size || !Number.isFinite(size.width) || !Number.isFinite(size.height)) return;
+            if (!found) {
+                width = size.width;
+                height = size.height;
+                found = true;
+                return;
+            }
+            width = Math.max(width, size.width);
+            height = Math.max(height, size.height);
+            found = true;
+        });
+        if (!found) {
+            const fallback = getAnyCardSize();
+            if (fallback && Number.isFinite(fallback.width) && Number.isFinite(fallback.height)) {
+                width = fallback.width;
+                height = fallback.height;
+            }
+        }
+        return { width, height };
+    }, [getAnyCardSize, getNodeCardSize]);
+
+    const resolveStackSize = useCallback((stack: { items: Array<{ kind: 'node' | 'textBox'; id: string }>; collapsedSize?: { width: number; height: number } }) => {
+        const stored = stack.collapsedSize;
+        if (stored && Number.isFinite(stored.width) && Number.isFinite(stored.height) && stored.width > 0 && stored.height > 0) {
+            return { width: stored.width, height: stored.height };
+        }
+        return resolveStackCardSize(stack.items);
+    }, [resolveStackCardSize]);
+
+    const collapseExpandedStacks = useCallback((excludeStackId?: string | null) => {
+        const targets = stacks.filter((stack) => !stack.collapsed && stack.id !== excludeStackId);
+        if (!targets.length) return;
+        targets.forEach((stack) => {
+            const collapsedSize = resolveStackCardSize(stack.items);
+            triggerStackAnimation(stack.items);
+            collapseStack(stack.id, { collapsedSize });
+        });
+    }, [collapseStack, resolveStackCardSize, stacks, triggerStackAnimation]);
 
     const getViewportMetrics = useCallback(() => {
         const viewport = window.visualViewport;
@@ -2474,9 +2688,11 @@ export const Canvas: React.FC = () => {
                     !!st.selectedNode ||
                     !!st.selectedEdge ||
                     !!st.selectedTextBoxId ||
+                    !!st.selectedStackId ||
                     (st.selectedNodes?.length ?? 0) > 0 ||
                     (st.selectedEdges?.length ?? 0) > 0 ||
-                    (st.selectedTextBoxes?.length ?? 0) > 0;
+                    (st.selectedTextBoxes?.length ?? 0) > 0 ||
+                    (st.selectedStacks?.length ?? 0) > 0;
                 if (!hasSelection) return;
                 e.preventDefault();
                 st.deleteSelection();
@@ -2509,6 +2725,7 @@ export const Canvas: React.FC = () => {
     const velocities = useRef<Record<string, { vx: number, vy: number }>>({});
     const physicsStartTime = useRef<number | null>(null);
     const draggingNodeIdRef = useRef<string | null>(null);
+    const draggingStackIdRef = useRef<string | null>(null);
     const lastDragTime = useRef<number>(0);
     const lastDragPos = useRef<{ x: number; y: number } | null>(null);
 
@@ -2664,13 +2881,27 @@ export const Canvas: React.FC = () => {
             if (e.pointerType === 'pen') {
                 hidePenHover();
             }
-            if (stylusTouchIdRef.current !== null && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
-                e.preventDefault();
-                return;
-            }
+        if (stylusTouchIdRef.current !== null && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
+            e.preventDefault();
+            return;
+        }
         shiftPressCandidate.current = null;
+        clearStackPeek();
 
         const target = e.target as HTMLElement;
+        const nodeEl = target.closest('[data-node-id]');
+        const textBoxEl = target.closest('[data-textbox-id]');
+        const stackEl = target.closest('[data-stack-id]');
+        const nodeId = nodeEl?.getAttribute('data-node-id');
+        const textBoxId = textBoxEl?.getAttribute('data-textbox-id');
+        const hitKey = nodeId
+            ? stackItemKey('node', nodeId)
+            : textBoxId
+                ? stackItemKey('textBox', textBoxId)
+                : null;
+        const hitStack = hitKey ? stackByItem.get(hitKey) : null;
+        const excludeStackId = hitStack && !hitStack.collapsed ? hitStack.id : null;
+        collapseExpandedStacks(excludeStackId);
         const isInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
         clearCanvasLongPress();
 
@@ -2715,7 +2946,54 @@ export const Canvas: React.FC = () => {
             }
         }
 
-        const nodeElement = target.closest('[data-node-id]');
+        const nodeElement = nodeEl;
+
+        if (stackEl) {
+            const stackId = stackEl.getAttribute('data-stack-id');
+            const stack = stackId ? stackById.get(stackId) : null;
+            if (stackId && stack && stack.collapsed) {
+                const worldPos = screenToWorld(e.clientX, e.clientY);
+                selectStack(stackId);
+                setMode('draggingStack');
+                setActiveId(stackId);
+                draggingStackIdRef.current = stackId;
+                stackDragRef.current = {
+                    pointerId: e.pointerId,
+                    stackId,
+                    startWorld: worldPos,
+                    lastWorld: worldPos,
+                    committed: false,
+                };
+                if (stackPeekTimerRef.current) {
+                    window.clearTimeout(stackPeekTimerRef.current);
+                    stackPeekTimerRef.current = null;
+                }
+                stackPeekRef.current = {
+                    stackId,
+                    pointerId: e.pointerId,
+                    startClientX: e.clientX,
+                    startClientY: e.clientY,
+                };
+                stackPeekTimerRef.current = window.setTimeout(() => {
+                    const candidate = stackPeekRef.current;
+                    if (!candidate || candidate.stackId !== stackId || candidate.pointerId !== e.pointerId) return;
+                    stackPeekActiveRef.current = stackId;
+                    setPeekingStackId(stackId);
+                }, LONG_PRESS_MS);
+                pendingDragUndoSnapshotRef.current = {
+                    nodes: useStore.getState().nodes,
+                    edges: useStore.getState().edges,
+                    drawings: useStore.getState().drawings,
+                    textBoxes: useStore.getState().textBoxes,
+                    stacks: useStore.getState().stacks,
+                    tombstones: useStore.getState().tombstones,
+                };
+                dragUndoCommittedRef.current = false;
+                setContextMenu(null);
+                e.stopPropagation();
+                return;
+            }
+        }
 
         lastPointerPos.current = { x: e.clientX, y: e.clientY };
         lastPointerKnownRef.current = true;
@@ -2729,6 +3007,16 @@ export const Canvas: React.FC = () => {
             const nodeId = nodeElement.getAttribute('data-node-id')!;
             const worldPos = screenToWorld(e.clientX, e.clientY);
             const node = nodes.find(n => n.id === nodeId)!;
+            const stackForNode = stackByItem.get(stackItemKey('node', nodeId));
+            if (stackForNode?.collapsed) {
+                if (!(e.pointerType === 'mouse' && e.button === 2)) {
+                    triggerStackAnimation(stackForNode.items);
+                    expandStack(stackForNode.id);
+                    setContextMenu(null);
+                }
+                e.stopPropagation();
+                return;
+            }
             const ganttBar = target.closest('[data-gantt-bar="true"]');
             const ganttResizeHandle = target.closest('[data-gantt-resize]');
 
@@ -2835,6 +3123,7 @@ export const Canvas: React.FC = () => {
 	                    edges: useStore.getState().edges,
 	                    drawings: useStore.getState().drawings,
 	                    textBoxes: useStore.getState().textBoxes,
+                        stacks: useStore.getState().stacks,
 	                    tombstones: useStore.getState().tombstones,
 	                };
 	                dragUndoCommittedRef.current = false;
@@ -3144,6 +3433,7 @@ export const Canvas: React.FC = () => {
 	                        edges: useStore.getState().edges,
 	                        drawings: useStore.getState().drawings,
 	                        textBoxes: useStore.getState().textBoxes,
+                            stacks: useStore.getState().stacks,
 	                        tombstones: useStore.getState().tombstones,
 	                    };
                     dragUndoCommittedRef.current = false;
@@ -3220,10 +3510,33 @@ export const Canvas: React.FC = () => {
         } else if (mode === 'panning' && !isPinching.current) {
             const next = clampGanttTransform(canvas.x + screenDeltaX, canvas.y + screenDeltaY, canvas.scale);
             setCanvasTransform(next.x, next.y, next.scale);
-	        } else if (mode === 'draggingNode' && activeId) {
-	            const worldPos = screenToWorld(e.clientX, e.clientY);
-	            const group = groupDragRef.current;
-	            if (group && group.pointerId === e.pointerId) {
+        } else if (mode === 'draggingStack') {
+            const drag = stackDragRef.current;
+            if (!drag || drag.pointerId !== e.pointerId) return;
+            const peekCandidate = stackPeekRef.current;
+            if (peekCandidate && peekCandidate.pointerId === e.pointerId) {
+                const dxClient = e.clientX - peekCandidate.startClientX;
+                const dyClient = e.clientY - peekCandidate.startClientY;
+                if (Math.hypot(dxClient, dyClient) > TOUCH_DRAG_THRESHOLD) {
+                    clearStackPeek();
+                }
+            }
+            const worldPos = screenToWorld(e.clientX, e.clientY);
+            const dx = worldPos.x - drag.lastWorld.x;
+            const dy = worldPos.y - drag.lastWorld.y;
+            drag.lastWorld = worldPos;
+            const moved = Math.hypot(worldPos.x - drag.startWorld.x, worldPos.y - drag.startWorld.y) > 2;
+            if (moved && !drag.committed && pendingDragUndoSnapshotRef.current) {
+                useStore.getState().pushHistory(pendingDragUndoSnapshotRef.current as any);
+                pendingDragUndoSnapshotRef.current = null;
+                dragUndoCommittedRef.current = true;
+                drag.committed = true;
+            }
+            moveStack(drag.stackId, { dx, dy });
+        } else if (mode === 'draggingNode' && activeId) {
+            const worldPos = screenToWorld(e.clientX, e.clientY);
+            const group = groupDragRef.current;
+            if (group && group.pointerId === e.pointerId) {
 	                let dx = worldPos.x - group.startWorld.x;
 	                let dy = worldPos.y - group.startWorld.y;
 	                if (snapMode) {
@@ -3398,7 +3711,7 @@ export const Canvas: React.FC = () => {
             const h = rect?.height ?? 0;
             const isDragSelect = w > 6 || h > 6;
 
-            const { selectNode, selectEdge, selectTextBox, setMultiSelection, setEditingTextBoxId } = useStore.getState();
+            const { selectNode, selectEdge, selectTextBox, selectStack, setMultiSelection, setEditingTextBoxId } = useStore.getState();
             selectEdge(null);
             setEditingTextBoxId(null);
 
@@ -3411,7 +3724,7 @@ export const Canvas: React.FC = () => {
                 const intersects = (r: DOMRect) => !(r.right < selLeft || r.left > selRight || r.bottom < selTop || r.top > selBottom);
 
                 const nodeIds: string[] = [];
-                document.querySelectorAll<HTMLElement>('[data-node-bounds="true"]').forEach((el) => {
+                document.querySelectorAll<HTMLElement>('[data-node-bounds="true"]:not([data-stack-collapsed="true"])').forEach((el) => {
                     const id = el.getAttribute('data-node-id');
                     if (!id) return;
                     const r = el.getBoundingClientRect();
@@ -3419,7 +3732,7 @@ export const Canvas: React.FC = () => {
                 });
 
                 const textBoxIds: string[] = [];
-                document.querySelectorAll<HTMLElement>('[data-textbox-id]').forEach((el) => {
+                document.querySelectorAll<HTMLElement>('[data-textbox-id]:not([data-stack-collapsed="true"])').forEach((el) => {
                     const id = el.getAttribute('data-textbox-id');
                     if (!id) return;
                     const r = el.getBoundingClientRect();
@@ -3434,24 +3747,38 @@ export const Canvas: React.FC = () => {
                     if (intersects(r)) edgeIds.push(id);
                 });
 
+                const stackIds: string[] = [];
+                document.querySelectorAll<HTMLElement>('[data-stack-bounds="true"]').forEach((el) => {
+                    const id = el.getAttribute('data-stack-id');
+                    if (!id) return;
+                    const r = el.getBoundingClientRect();
+                    if (intersects(r)) stackIds.push(id);
+                });
+
                 const uniqueNodes = Array.from(new Set(nodeIds));
                 const uniqueText = Array.from(new Set(textBoxIds));
                 const uniqueEdges = Array.from(new Set(edgeIds));
+                const uniqueStacks = Array.from(new Set(stackIds));
 
-                if (uniqueNodes.length === 1 && uniqueText.length === 0 && uniqueEdges.length === 0) {
+                if (uniqueStacks.length === 1 && uniqueNodes.length === 0 && uniqueText.length === 0 && uniqueEdges.length === 0) {
+                    selectNode(null);
+                    selectTextBox(null);
+                    selectEdge(null);
+                    selectStack(uniqueStacks[0]);
+                } else if (uniqueNodes.length === 1 && uniqueText.length === 0 && uniqueEdges.length === 0 && uniqueStacks.length === 0) {
                     selectTextBox(null);
                     selectNode(uniqueNodes[0]);
-                } else if (uniqueText.length === 1 && uniqueNodes.length === 0 && uniqueEdges.length === 0) {
+                } else if (uniqueText.length === 1 && uniqueNodes.length === 0 && uniqueEdges.length === 0 && uniqueStacks.length === 0) {
                     selectNode(null);
                     selectTextBox(uniqueText[0]);
-                } else if (uniqueEdges.length === 1 && uniqueNodes.length === 0 && uniqueText.length === 0) {
+                } else if (uniqueEdges.length === 1 && uniqueNodes.length === 0 && uniqueText.length === 0 && uniqueStacks.length === 0) {
                     selectNode(null);
                     selectTextBox(null);
                     selectEdge(uniqueEdges[0]);
                 } else {
                     selectNode(null);
                     selectTextBox(null);
-                    setMultiSelection({ nodes: uniqueNodes, textBoxes: uniqueText, edges: uniqueEdges });
+                    setMultiSelection({ nodes: uniqueNodes, textBoxes: uniqueText, edges: uniqueEdges, stacks: uniqueStacks });
                 }
             } else {
                 // Click on empty space: clear selection
@@ -3494,6 +3821,59 @@ export const Canvas: React.FC = () => {
             Math.pow(e.clientY - pointerDownPos.current.y, 2)
         );
         const isClick = dist < CLICK_THRESHOLD;
+
+        if (mode === 'draggingStack') {
+            const drag = stackDragRef.current;
+            const stackId = drag?.stackId ?? draggingStackIdRef.current;
+            const wasPeeking = !!stackId && stackPeekActiveRef.current === stackId;
+            clearStackPeek();
+            stackDragRef.current = null;
+            draggingStackIdRef.current = null;
+            setMode('idle');
+            setActiveId(null);
+            if (wasPeeking) {
+                if (stackId) {
+                    const stack = stackById.get(stackId);
+                    if (stack) {
+                        triggerStackAnimation(stack.items);
+                        expandStack(stackId);
+                        setContextMenu(null);
+                    }
+                }
+                if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
+                    try {
+                        const el = containerRef.current as any;
+                        if (el?.hasPointerCapture?.(e.pointerId)) {
+                            el.releasePointerCapture(e.pointerId);
+                        }
+                    } catch {
+                        // ignore
+                    }
+                }
+                clearAlignmentGuides();
+                return;
+            }
+            if (isClick && stackId) {
+                const stack = stackById.get(stackId);
+                if (stack) {
+                    triggerStackAnimation(stack.items);
+                    expandStack(stackId);
+                    setContextMenu(null);
+                }
+            }
+            if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
+                try {
+                    const el = containerRef.current as any;
+                    if (el?.hasPointerCapture?.(e.pointerId)) {
+                        el.releasePointerCapture(e.pointerId);
+                    }
+                } catch {
+                    // ignore
+                }
+            }
+            clearAlignmentGuides();
+            return;
+        }
 
         const shiftCandidate = shiftPressCandidate.current;
         if (shiftCandidate && shiftCandidate.pointerId === e.pointerId) {
@@ -3577,13 +3957,15 @@ export const Canvas: React.FC = () => {
 		        setActiveId(null);
 		        connectingPointerIdRef.current = null;
 		        connectingPointerTypeRef.current = null;
-		        groupDragRef.current = null;
-		        draggingNodeIdRef.current = null;
+	        groupDragRef.current = null;
+	        draggingNodeIdRef.current = null;
+        draggingStackIdRef.current = null;
         shiftPressCandidate.current = null;
-		        lastDragPos.current = null;
+	        lastDragPos.current = null;
 	        pendingDragUndoSnapshotRef.current = null;
 	        dragUndoCommittedRef.current = false;
         dragStartPosRef.current = null;
+        stackDragRef.current = null;
         // Only release capture for mouse/pen events (matching setPointerCapture)
         if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
             try {
@@ -3652,13 +4034,16 @@ export const Canvas: React.FC = () => {
             stylusTouchIdRef.current = null;
         useStore.getState().setConnectionTargetId(null);
 	        clearLongPress();
+            clearStackPeek();
         shiftPressCandidate.current = null;
 	        draggingNodeIdRef.current = null;
+        draggingStackIdRef.current = null;
 	        lastDragPos.current = null;
 	        pendingDragUndoSnapshotRef.current = null;
 	        dragUndoCommittedRef.current = false;
-	        dragStartPosRef.current = null;
+        dragStartPosRef.current = null;
 	        groupDragRef.current = null;
+        stackDragRef.current = null;
         if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
             try {
                 const el = containerRef.current as any;
@@ -3705,12 +4090,109 @@ export const Canvas: React.FC = () => {
         const nodeEl = target.closest('[data-node-id]');
         const textEl = target.closest('[data-textbox-id]');
         const edgeEl = target.closest('[data-edge-id]');
+        const stackEl = target.closest('[data-stack-id]');
 
         const st = useStore.getState();
         const selectedNodes = st.selectedNodes?.length ? st.selectedNodes : (st.selectedNode ? [st.selectedNode] : []);
         const selectedEdges = st.selectedEdges?.length ? st.selectedEdges : (st.selectedEdge ? [st.selectedEdge] : []);
         const selectedTextBoxes = st.selectedTextBoxes?.length ? st.selectedTextBoxes : (st.selectedTextBoxId ? [st.selectedTextBoxId] : []);
-        const multiCount = selectedNodes.length + selectedEdges.length + selectedTextBoxes.length;
+        const selectedStacks = st.selectedStacks?.length ? st.selectedStacks : (st.selectedStackId ? [st.selectedStackId] : []);
+        const multiCount = selectedNodes.length + selectedEdges.length + selectedTextBoxes.length + selectedStacks.length;
+        const worldPos = screenToWorldLatest(e.clientX, e.clientY);
+
+        const stackHit = (() => {
+            if (!stacks.length) return null;
+            const candidates = stacks.filter((stack) => stack.collapsed);
+            if (!candidates.length) return null;
+            const entries = candidates.map((stack) => {
+                const anchor = resolveStackAnchor(stack);
+                const size = resolveStackSize(stack);
+                const zIndex = resolveStackZIndex(stack) ?? 0;
+                return { stack, anchor, size, zIndex };
+            });
+            entries.sort((a, b) => a.zIndex - b.zIndex);
+            for (let i = entries.length - 1; i >= 0; i -= 1) {
+                const { stack, anchor, size } = entries[i];
+                const left = anchor.x - size.width / 2;
+                const top = anchor.y - size.height / 2;
+                if (worldPos.x >= left && worldPos.x <= left + size.width
+                    && worldPos.y >= top && worldPos.y <= top + size.height) {
+                    return stack;
+                }
+            }
+            return null;
+        })();
+
+        if (stackHit) {
+            const id = stackHit.id;
+            if (multiCount > 1 && selectedStacks.includes(id)) {
+                setContextMenu({ kind: 'selection', id: '__selection__', x: e.clientX, y: e.clientY });
+                return;
+            }
+            st.selectStack(id);
+            st.selectEdge(null);
+            st.selectNode(null);
+            st.selectTextBox(null);
+            st.setEditingTextBoxId(null);
+            setContextMenu({ kind: 'stack', id, x: e.clientX, y: e.clientY });
+            return;
+        }
+
+        if (stackEl) {
+            const id = stackEl.getAttribute('data-stack-id');
+            if (!id) return;
+            if (multiCount > 1 && selectedStacks.includes(id)) {
+                setContextMenu({ kind: 'selection', id: '__selection__', x: e.clientX, y: e.clientY });
+                return;
+            }
+            st.selectStack(id);
+            st.selectEdge(null);
+            st.selectNode(null);
+            st.selectTextBox(null);
+            st.setEditingTextBoxId(null);
+            setContextMenu({ kind: 'stack', id, x: e.clientX, y: e.clientY });
+            return;
+        }
+
+        if (nodeEl) {
+            const id = nodeEl.getAttribute('data-node-id');
+            if (id) {
+                const stackForNode = stackByItem.get(stackItemKey('node', id));
+                if (stackForNode?.collapsed) {
+                    if (multiCount > 1 && selectedStacks.includes(stackForNode.id)) {
+                        setContextMenu({ kind: 'selection', id: '__selection__', x: e.clientX, y: e.clientY });
+                        return;
+                    }
+                    st.selectStack(stackForNode.id);
+                    st.selectEdge(null);
+                    st.selectNode(null);
+                    st.selectTextBox(null);
+                    st.setEditingTextBoxId(null);
+                    setContextMenu({ kind: 'stack', id: stackForNode.id, x: e.clientX, y: e.clientY });
+                    return;
+                }
+            }
+        }
+
+        if (textEl) {
+            const id = textEl.getAttribute('data-textbox-id');
+            if (id) {
+                const stackForText = stackByItem.get(stackItemKey('textBox', id));
+                if (stackForText?.collapsed) {
+                    if (multiCount > 1 && selectedStacks.includes(stackForText.id)) {
+                        setContextMenu({ kind: 'selection', id: '__selection__', x: e.clientX, y: e.clientY });
+                        return;
+                    }
+                    st.selectStack(stackForText.id);
+                    st.selectEdge(null);
+                    st.selectNode(null);
+                    st.selectTextBox(null);
+                    st.setEditingTextBoxId(null);
+                    setContextMenu({ kind: 'stack', id: stackForText.id, x: e.clientX, y: e.clientY });
+                    return;
+                }
+            }
+        }
 
         if (nodeEl) {
             const id = nodeEl.getAttribute('data-node-id');
@@ -3757,7 +4239,6 @@ export const Canvas: React.FC = () => {
             return;
         }
 
-        const worldPos = screenToWorldLatest(e.clientX, e.clientY);
         setContextMenu({
             kind: 'canvas',
             id: '__canvas__',
@@ -3766,7 +4247,7 @@ export const Canvas: React.FC = () => {
             worldX: worldPos.x,
             worldY: worldPos.y,
         });
-    }, [screenToWorldLatest]);
+    }, [resolveStackAnchor, resolveStackSize, resolveStackZIndex, screenToWorldLatest, stackByItem, stacks]);
 
     const clampBox = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -3968,6 +4449,10 @@ export const Canvas: React.FC = () => {
         });
         return items;
     }, [orderedVisibleLayers, rootComments, visibleNodes, visibleTextBoxes]);
+    const collapsedStacks = useMemo(
+        () => visibleStacks.filter((stack) => stack.collapsed && stack.id !== peekingStackId),
+        [peekingStackId, visibleStacks],
+    );
     const getCommentLabel = (comment: Comment) => {
         const name = String(comment.authorName ?? 'Guest').trim();
         return name || 'Guest';
@@ -3988,6 +4473,7 @@ export const Canvas: React.FC = () => {
         edgeIds?: string[];
         textBoxIds?: string[];
         commentIds?: string[];
+        stackIds?: string[];
     }): AssistantSelectionContext | null => {
         const st = useStore.getState();
         const selectedNodes = override
@@ -4000,10 +4486,26 @@ export const Canvas: React.FC = () => {
             ? (override.textBoxIds ?? [])
             : (st.selectedTextBoxes?.length ? st.selectedTextBoxes : (st.selectedTextBoxId ? [st.selectedTextBoxId] : []));
         const selectedComments = override ? (override.commentIds ?? []) : [];
+        const selectedStacks = override
+            ? (override.stackIds ?? [])
+            : (st.selectedStacks?.length ? st.selectedStacks : (st.selectedStackId ? [st.selectedStackId] : []));
+        const stackById = new Map(st.stacks.map((stack) => [stack.id, stack]));
+        const stackNodeIds: string[] = [];
+        const stackTextBoxIds: string[] = [];
+        selectedStacks.forEach((stackId) => {
+            const stack = stackById.get(stackId);
+            if (!stack) return;
+            stack.items.forEach((item) => {
+                if (item.kind === 'node') stackNodeIds.push(item.id);
+                else stackTextBoxIds.push(item.id);
+            });
+        });
+        const resolvedNodes = Array.from(new Set([...selectedNodes, ...stackNodeIds]));
+        const resolvedTextBoxes = Array.from(new Set([...selectedTextBoxes, ...stackTextBoxIds]));
         if (
-            selectedNodes.length === 0
+            resolvedNodes.length === 0
             && selectedEdges.length === 0
-            && selectedTextBoxes.length === 0
+            && resolvedTextBoxes.length === 0
             && selectedComments.length === 0
         ) {
             return null;
@@ -4025,7 +4527,7 @@ export const Canvas: React.FC = () => {
         };
 
         const nodeById = new Map(st.nodes.map((node) => [node.id, node]));
-        const nodes = selectedNodes
+        const nodes = resolvedNodes
             .map((id) => nodeById.get(id))
             .filter(Boolean)
             .map((node) => ({
@@ -4055,7 +4557,7 @@ export const Canvas: React.FC = () => {
                 };
             });
 
-        const textBoxes = selectedTextBoxes
+        const textBoxes = resolvedTextBoxes
             .map((id) => st.textBoxes.find((tb) => tb.id === id))
             .filter(Boolean)
             .map((tb) => {
@@ -4095,7 +4597,41 @@ export const Canvas: React.FC = () => {
         : null;
     const contextEdgeEnergyEnabled = contextEdge?.energyEnabled !== false;
     const stackableContext = contextMenu?.kind === 'node' || contextMenu?.kind === 'textBox' || contextMenu?.kind === 'comment';
-    const canComment = contextMenu?.kind !== 'selection' && contextMenu?.kind !== 'comment';
+    const contextStack = contextMenu?.id
+        ? (contextMenu.kind === 'stack'
+            ? stackById.get(contextMenu.id)
+            : (contextMenu.kind === 'node' || contextMenu.kind === 'textBox')
+                ? stackByItem.get(stackItemKey(contextMenu.kind, contextMenu.id))
+                : null)
+        : null;
+    const stackCandidates = useMemo(() => {
+        const selected = [
+            ...selectedNodes.map((id) => ({ kind: 'node' as const, id })),
+            ...selectedTextBoxes.map((id) => ({ kind: 'textBox' as const, id })),
+        ];
+        if (selected.length < 2) return [];
+        const stackedKeys = new Set(stacks.flatMap((stack) => stack.items.map((item) => stackItemKey(item.kind, item.id))));
+        const resolved = selected
+            .map((item) => {
+                if (item.kind === 'node') {
+                    const node = nodes.find((n) => n.id === item.id);
+                    const layerId = node?.layerId ?? DEFAULT_LAYER_ID;
+                    return node ? { ...item, layerId } : null;
+                }
+                const textBox = textBoxes.find((tb) => tb.id === item.id);
+                const layerId = textBox?.layerId ?? DEFAULT_LAYER_ID;
+                return textBox ? { ...item, layerId } : null;
+            })
+            .filter(Boolean) as Array<{ kind: 'node' | 'textBox'; id: string; layerId: string }>;
+        if (resolved.length < 2) return [];
+        const baseLayerId = resolved[0]?.layerId ?? DEFAULT_LAYER_ID;
+        return resolved
+            .filter((item) => item.layerId === baseLayerId)
+            .filter((item) => !stackedKeys.has(stackItemKey(item.kind, item.id)))
+            .map(({ kind, id }) => ({ kind, id }));
+    }, [nodes, selectedNodes, selectedTextBoxes, stacks, textBoxes]);
+    const canCreateStack = contextMenu?.kind === 'selection' && stackCandidates.length >= 2;
+    const canComment = contextMenu?.kind !== 'selection' && contextMenu?.kind !== 'comment' && contextMenu?.kind !== 'stack';
     const canRaven = contextMenu?.kind !== 'canvas';
     const canDelete = contextMenu?.kind !== 'canvas';
     const getContextMenuSelectionContext = () => {
@@ -4107,6 +4643,7 @@ export const Canvas: React.FC = () => {
         if (contextMenu.kind === 'edge') return buildAssistantSelectionContext({ edgeIds: [id] });
         if (contextMenu.kind === 'textBox') return buildAssistantSelectionContext({ textBoxIds: [id] });
         if (contextMenu.kind === 'comment') return buildAssistantSelectionContext({ commentIds: [id] });
+        if (contextMenu.kind === 'stack') return buildAssistantSelectionContext({ stackIds: [id] });
         return null;
     };
 
@@ -4232,6 +4769,57 @@ export const Canvas: React.FC = () => {
                                     <Bot size={18} />
                                 </button>
                             )}
+                            {canCreateStack && (
+                                <button
+                                    type="button"
+                                    className={styles.contextButton}
+                                    title="Create stack"
+                                    data-interactive="true"
+                                    onPointerDown={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        const collapsedSize = resolveStackCardSize(stackCandidates);
+                                        triggerStackAnimation(stackCandidates);
+                                        createStack(stackCandidates, { collapsedSize });
+                                        setContextMenu(null);
+                                    }}
+                                >
+                                    <Layers size={18} />
+                                </button>
+                            )}
+                            {contextMenu.kind === 'stack' && contextStack?.collapsed && (
+                                <button
+                                    type="button"
+                                    className={styles.contextButton}
+                                    title="Expand stack"
+                                    data-interactive="true"
+                                    onPointerDown={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        triggerStackAnimation(contextStack.items);
+                                        expandStack(contextStack.id);
+                                        setContextMenu(null);
+                                    }}
+                                >
+                                    <Layers size={18} />
+                                </button>
+                            )}
+                            {contextMenu.kind === 'stack' && contextStack && (
+                                <button
+                                    type="button"
+                                    className={styles.contextButton}
+                                    title="Rename stack"
+                                    data-interactive="true"
+                                    onPointerDown={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        beginEditStackTitle(contextStack);
+                                        setContextMenu(null);
+                                    }}
+                                >
+                                    <Pencil size={18} />
+                                </button>
+                            )}
 	                        {contextMenu.kind === 'node' && (
 	                            <button
 	                                type="button"
@@ -4311,6 +4899,23 @@ export const Canvas: React.FC = () => {
                                     </button>
                                 </>
                             )}
+                            {contextStack && (
+                                <button
+                                    type="button"
+                                    className={styles.contextButton}
+                                    title="Ungroup stack"
+                                    data-interactive="true"
+                                    onPointerDown={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        triggerStackAnimation(contextStack.items);
+                                        ungroupStack(contextStack.id);
+                                        setContextMenu(null);
+                                    }}
+                                >
+                                    <Ungroup size={18} />
+                                </button>
+                            )}
                             {contextMenu.kind === 'edge' && contextEdge && (
                                 <button
                                     type="button"
@@ -4352,14 +4957,16 @@ export const Canvas: React.FC = () => {
 	                                        st.deleteTextBox(contextMenu.id);
 	                                        st.selectTextBox(null);
 	                                        st.setEditingTextBoxId(null);
-	                                    } else if (contextMenu.kind === 'comment' && contextMenu.id) {
-	                                        deleteComment(contextMenu.id);
-	                                        setOpenCommentId((prev) => (prev === contextMenu.id ? null : prev));
-	                                        setHoverCommentId((prev) => (prev === contextMenu.id ? null : prev));
-	                                    }
-	                                    setContextMenu(null);
-	                                }}
-	                            >
+                                    } else if (contextMenu.kind === 'comment' && contextMenu.id) {
+                                        deleteComment(contextMenu.id);
+                                        setOpenCommentId((prev) => (prev === contextMenu.id ? null : prev));
+                                        setHoverCommentId((prev) => (prev === contextMenu.id ? null : prev));
+                                    } else if (contextMenu.kind === 'stack' && contextMenu.id) {
+                                        st.deleteSelection();
+                                    }
+                                    setContextMenu(null);
+                                }}
+                            >
 	                                <X size={18} />
 	                            </button>
 	                        )}
@@ -4650,14 +5257,36 @@ export const Canvas: React.FC = () => {
                 {stackedItems.map((entry) => {
                     if (entry.kind === 'textBox') {
                         const tb = entry.item as TextBoxType;
+                        const stack = stackByItem.get(stackItemKey('textBox', tb.id));
+                        const isPeeking = !!stack && stack.id === peekingStackId;
+                        const peekEntry = isPeeking ? stack?.items.find((item) => item.kind === 'textBox' && item.id === tb.id) : null;
+                        const previewBox = (isPeeking && peekEntry)
+                            ? {
+                                ...tb,
+                                x: peekEntry.x,
+                                y: peekEntry.y,
+                                width: Number.isFinite(peekEntry.width) ? (peekEntry.width as number) : tb.width,
+                                height: Number.isFinite(peekEntry.height) ? (peekEntry.height as number) : tb.height,
+                            }
+                            : tb;
                         return (
                             <TextBox
                                 key={`textBox-${tb.id}`}
-                                box={tb}
+                                box={previewBox}
                                 screenToWorld={screenToWorld}
                                 snapMode={snapMode}
                                 resolveSnap={resolveSnap}
                                 clearAlignmentGuides={clearAlignmentGuides}
+                                stackId={stack?.id}
+                                stackCollapsed={!!stack?.collapsed && !isPeeking}
+                                stackAnimating={stackAnimatingSet.has(stackItemKey('textBox', tb.id))}
+                                onToggleStack={(stackId) => {
+                                    const target = stacks.find((item) => item.id === stackId);
+                                    if (!target) return;
+                                    triggerStackAnimation(target.items);
+                                    expandStack(stackId);
+                                }}
+                                onCollapseExpandedStacks={collapseExpandedStacks}
                                 onRequestContextMenu={(args) => {
                                     if (args.id === '__selection__') setContextMenu({ kind: 'selection', id: '__selection__', x: args.x, y: args.y });
                                     else setContextMenu({ kind: 'textBox', id: args.id, x: args.x, y: args.y });
@@ -4667,9 +5296,19 @@ export const Canvas: React.FC = () => {
                     }
                     if (entry.kind === 'node') {
                         const node = entry.item as NodeData;
+                        const stack = stackByItem.get(stackItemKey('node', node.id));
+                        const isPeeking = !!stack && stack.id === peekingStackId;
+                        const peekEntry = isPeeking ? stack?.items.find((item) => item.kind === 'node' && item.id === node.id) : null;
+                        const previewNode = (isPeeking && peekEntry)
+                            ? { ...node, x: peekEntry.x, y: peekEntry.y }
+                            : node;
                         return (
                             <div key={`node-${node.id}`} data-node-id={node.id}>
-                                <Node data={node} />
+                                <Node
+                                    data={previewNode}
+                                    stackAnimating={stackAnimatingSet.has(stackItemKey('node', node.id))}
+                                    stackCollapsed={!!stack?.collapsed && !isPeeking}
+                                />
                             </div>
                         );
                     }
@@ -4780,6 +5419,72 @@ export const Canvas: React.FC = () => {
                                     ) : (
                                         <div className={styles.commentReplyNotice}>Sign in to reply.</div>
                                     )
+                                )}
+                            </div>
+                        </div>
+                    );
+                })}
+                {collapsedStacks.map((stack) => {
+                    const anchor = resolveStackAnchor(stack);
+                    const size = resolveStackSize(stack);
+                    const isSelected = selectedStackId === stack.id || selectedStacks.includes(stack.id);
+                    const zIndex = resolveStackZIndex(stack);
+                    const isEditingTitle = editingStackTitleId === stack.id;
+                    const titleValue = stack.title ?? '';
+                    return (
+                        <div
+                            key={`stack-${stack.id}`}
+                            className={`${styles.stackShell} ${isSelected ? styles.stackShellSelected : ''}`}
+                            style={{
+                                left: anchor.x,
+                                top: anchor.y,
+                                width: size.width,
+                                height: size.height,
+                                ...(Number.isFinite(zIndex) ? { zIndex: zIndex as number } : {}),
+                            }}
+                            data-stack-id={stack.id}
+                            data-stack-bounds="true"
+                        >
+                            <div className={`${styles.stackCard} ${styles.stackCardBack}`} />
+                            <div className={`${styles.stackCard} ${styles.stackCardMid}`} />
+                            <div className={`${styles.stackCard} ${styles.stackCardFront}`}>
+                                <div className={styles.stackMeta}>
+                                    <Layers size={14} />
+                                    <span>{stack.items.length}</span>
+                                </div>
+                                {isEditingTitle ? (
+                                    <input
+                                        className={styles.stackTitleInput}
+                                        value={stackTitleDraft}
+                                        onChange={(e) => setStackTitleDraft(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                                e.preventDefault();
+                                                commitStackTitle(stack.id);
+                                            } else if (e.key === 'Escape') {
+                                                e.preventDefault();
+                                                cancelEditStackTitle();
+                                            }
+                                        }}
+                                        onBlur={() => commitStackTitle(stack.id)}
+                                        data-interactive="true"
+                                        autoFocus
+                                        onPointerDown={(e) => {
+                                            e.stopPropagation();
+                                            selectStack(stack.id);
+                                        }}
+                                    />
+                                ) : (
+                                    <div
+                                        className={`${styles.stackTitle}${titleValue ? '' : ` ${styles.stackTitleEmpty}`}`}
+                                        data-interactive="true"
+                                        onPointerDown={(e) => {
+                                            e.stopPropagation();
+                                            selectStack(stack.id);
+                                        }}
+                                    >
+                                        {titleValue || 'Untitled stack'}
+                                    </div>
                                 )}
                             </div>
                         </div>

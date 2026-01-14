@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, ChevronDown, ChevronUp, Link2, MessageCircle, ThumbsDown, ThumbsUp, Trash2, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/useStore';
 import type { AssistantSelectionContext } from '../../types/assistant';
+import { markdownComponents, markdownPlugins } from '../../utils/markdown';
 
 type AssistantTrace = {
   reasoning?: string | null;
@@ -126,6 +126,8 @@ export const AgentWidget: React.FC = () => {
   const requestAbortRef = useRef<AbortController | null>(null);
   const openRef = useRef(open);
   const threadIdRef = useRef<string | null>(null);
+  const forceNewThreadRef = useRef(false);
+  const resetTokenRef = useRef(0);
   const resizeStartRef = useRef<{
     x: number;
     y: number;
@@ -469,8 +471,9 @@ export const AgentWidget: React.FC = () => {
     if (!sessionReady) {
       throw new Error('Session is not ready yet. Please wait a moment and try again.');
     }
-    let id = threadId;
-    if (!id && threadKey) {
+    const forceNew = forceNewThreadRef.current;
+    let id: string | null = forceNew ? null : threadId;
+    if (!id && !forceNew && threadKey) {
       const stored = window.localStorage?.getItem(threadKey);
       if (stored) {
         id = stored;
@@ -478,7 +481,17 @@ export const AgentWidget: React.FC = () => {
       }
     }
     if (!id) {
-      id = await createThread();
+      if (forceNew) {
+        forceNewThreadRef.current = false;
+      }
+      try {
+        id = await createThread({ forceNew });
+      } catch (err) {
+        if (forceNew) {
+          forceNewThreadRef.current = true;
+        }
+        throw err;
+      }
     }
     return id;
   }, [createThread, sessionReady, threadId, threadKey]);
@@ -487,18 +500,23 @@ export const AgentWidget: React.FC = () => {
     if (threadKey) {
       window.localStorage?.removeItem(threadKey);
     }
+    threadIdRef.current = null;
     setThreadId(null);
     setContextInfo(null);
     setExpandedDetails({});
     setHasUnread(false);
     setFeedbackState({});
     setFeedbackBusy({});
-  }, [threadKey]);
+    clearSelectionContext();
+  }, [clearSelectionContext, threadKey]);
 
   const confirmResetConversation = useCallback(async () => {
+    const resetToken = resetTokenRef.current + 1;
+    resetTokenRef.current = resetToken;
     setShowResetConfirm(false);
     setResetting(true);
     stopRequest();
+    forceNewThreadRef.current = true;
     clearThread();
     setMessages([]);
     setInput('');
@@ -506,9 +524,10 @@ export const AgentWidget: React.FC = () => {
     setPending(false);
     setAssistantStatus(null);
     setLoadingThread(false);
+    setContextInfo(null);
     if (sessionReady && sessionId) {
       try {
-        await createThread({ forceNew: true });
+        await ensureThread();
       } catch (err) {
         const message = isNetworkError(err)
           ? NETWORK_ERROR_MESSAGE
@@ -516,12 +535,16 @@ export const AgentWidget: React.FC = () => {
         setError(message);
       }
     }
-    setResetting(false);
-  }, [clearThread, createThread, sessionId, sessionReady, stopRequest]);
+    if (resetTokenRef.current === resetToken) {
+      setResetting(false);
+    }
+  }, [clearThread, ensureThread, sessionId, sessionReady, stopRequest]);
 
   useEffect(() => {
     if (!open || !me || !threadKey || resetting) return;
     let cancelled = false;
+    const bootToken = resetTokenRef.current;
+    const canUpdate = () => !cancelled && resetTokenRef.current === bootToken;
     const bootstrap = async () => {
       setLoadingThread(true);
       setError(null);
@@ -532,12 +555,12 @@ export const AgentWidget: React.FC = () => {
           id = await createThread();
           result = { messages: [], context: null };
         }
-        if (!cancelled) {
+        if (canUpdate()) {
           setMessages(trimMessages(result.messages));
           setContextInfo(result.context);
         }
       } catch (err) {
-        if (cancelled) return;
+        if (!canUpdate()) return;
         if (isNetworkError(err)) {
           try {
             await new Promise((resolve) => setTimeout(resolve, 400));
@@ -547,13 +570,13 @@ export const AgentWidget: React.FC = () => {
               id = await createThread();
               result = { messages: [], context: null };
             }
-            if (!cancelled) {
+            if (canUpdate()) {
               setMessages(trimMessages(result.messages));
               setContextInfo(result.context);
             }
             return;
           } catch (retryErr) {
-            if (!cancelled) {
+            if (canUpdate()) {
               setError(NETWORK_ERROR_MESSAGE);
             }
             return;
@@ -561,7 +584,7 @@ export const AgentWidget: React.FC = () => {
         }
         setError(err instanceof Error ? err.message : 'Failed to load assistant chat.');
       } finally {
-        if (!cancelled) {
+        if (canUpdate()) {
           setLoadingThread(false);
         }
       }
@@ -608,6 +631,8 @@ export const AgentWidget: React.FC = () => {
   const sendMessage = async () => {
     const text = input.trim();
     if (!text || pending || loadingThread || resetting || !me || !sessionReady) return;
+    const requestToken = resetTokenRef.current;
+    const isStale = () => resetTokenRef.current !== requestToken;
     const controller = new AbortController();
     requestAbortRef.current = controller;
     const selectionSnapshot = selectionContext ? { ...selectionContext } : null;
@@ -646,6 +671,9 @@ export const AgentWidget: React.FC = () => {
             data = {};
           }
         }
+        if (isStale()) {
+          return { retry: false, cancelled: true };
+        }
         if (!res.ok) {
           const fallbackError = data?.error ?? (res.status ? `http_${res.status}` : undefined);
           if (fallbackError === 'thread_session_mismatch' || fallbackError === 'thread_not_found') {
@@ -653,8 +681,10 @@ export const AgentWidget: React.FC = () => {
             return { retry: true };
           }
           const msg = mapErrorMessage(fallbackError);
-          setError(msg);
-          setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: msg }]));
+          if (!isStale()) {
+            setError(msg);
+            setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: msg }]));
+          }
           return { retry: false };
         }
         if (res.status === 202 || data?.queued) {
@@ -666,21 +696,23 @@ export const AgentWidget: React.FC = () => {
           : 'No response returned.';
         const assistantMeta = data?.assistantMessage?.meta ?? null;
         const assistantTrace = assistantMeta?.trace ?? null;
-        setMessages((prev) => trimMessages([
-          ...prev,
-          {
-            role: 'assistant',
-            content: reply,
-            trace: assistantTrace,
-            id: data?.assistantMessage?.id,
-            createdAt: data?.assistantMessage?.createdAt ?? null,
-          },
-        ]));
-        if (!openRef.current || !isUiActive()) {
-          setHasUnread(true);
-        }
-        if (data?.context && typeof data.context === 'object') {
-          setContextInfo(data.context);
+        if (!isStale()) {
+          setMessages((prev) => trimMessages([
+            ...prev,
+            {
+              role: 'assistant',
+              content: reply,
+              trace: assistantTrace,
+              id: data?.assistantMessage?.id,
+              createdAt: data?.assistantMessage?.createdAt ?? null,
+            },
+          ]));
+          if (!openRef.current || !isUiActive()) {
+            setHasUnread(true);
+          }
+          if (data?.context && typeof data.context === 'object') {
+            setContextInfo(data.context);
+          }
         }
         return { retry: false, queued: false };
       };
@@ -693,6 +725,9 @@ export const AgentWidget: React.FC = () => {
       }
     } catch (err) {
       if (err && typeof err === 'object' && (err as { name?: string }).name === 'AbortError') {
+        return;
+      }
+      if (isStale()) {
         return;
       }
       const msg = isNetworkError(err)
@@ -754,84 +789,6 @@ export const AgentWidget: React.FC = () => {
   }, [assistantStatus, me, pending]);
 
   const sendDisabled = !input.trim() || pending || loadingThread || resetting || !me || !sessionReady;
-
-  const markdownComponents = useMemo(() => ({
-    p: ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
-      <p style={{ margin: '0 0 8px', lineHeight: 1.55 }} {...props}>{children}</p>
-    ),
-    ul: ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
-      <ul style={{ margin: '0 0 8px 18px', padding: 0 }} {...props}>{children}</ul>
-    ),
-    ol: ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
-      <ol style={{ margin: '0 0 8px 18px', padding: 0 }} {...props}>{children}</ol>
-    ),
-    li: ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
-      <li style={{ margin: '0 0 4px' }} {...props}>{children}</li>
-    ),
-    a: ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
-      <a
-        {...props}
-        style={{ color: 'var(--accent-primary)', textDecoration: 'none' }}
-        target="_blank"
-        rel="noreferrer"
-      >
-        {children}
-      </a>
-    ),
-    blockquote: ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
-      <blockquote
-        {...props}
-        style={{
-          margin: '0 0 8px',
-          padding: '6px 10px',
-          borderLeft: '3px solid rgba(94,129,172,0.6)',
-          color: 'var(--text-secondary)',
-          background: 'rgba(255,255,255,0.04)',
-          borderRadius: 8,
-        }}
-      >
-        {children}
-      </blockquote>
-    ),
-    code: ({
-      node: _node,
-      inline,
-      children,
-      ...props
-    }: {
-      node?: unknown;
-      inline?: boolean;
-      children?: React.ReactNode;
-    }) => (
-      <code
-        {...props}
-        style={{
-          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-          fontSize: 12,
-          padding: inline ? '1px 4px' : '8px 10px',
-          borderRadius: 8,
-          background: 'rgba(15, 20, 28, 0.7)',
-          border: '1px solid rgba(255,255,255,0.08)',
-          display: inline ? 'inline' : 'block',
-          whiteSpace: 'pre-wrap',
-        }}
-      >
-        {children}
-      </code>
-    ),
-    pre: ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
-      <pre
-        {...props}
-        style={{
-          margin: '0 0 8px',
-          whiteSpace: 'pre-wrap',
-          overflowX: 'auto',
-        }}
-      >
-        {children}
-      </pre>
-    ),
-  }), []);
 
   const styleTag = (
     <style>{`
@@ -1097,7 +1054,7 @@ export const AgentWidget: React.FC = () => {
                     {isUser ? (
                       msg.content
                     ) : (
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                      <ReactMarkdown remarkPlugins={markdownPlugins} components={markdownComponents}>
                         {msg.content}
                       </ReactMarkdown>
                     )}

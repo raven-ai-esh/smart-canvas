@@ -136,6 +136,29 @@ export interface Comment {
   avatarColor?: number | null;
 }
 
+export type StackItemKind = 'node' | 'textBox';
+
+export interface StackItemRef {
+  kind: StackItemKind;
+  id: string;
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+}
+
+export interface StackGroup {
+  id: string;
+  layerId?: string;
+  title?: string;
+  items: StackItemRef[];
+  collapsed: boolean;
+  collapsedSize?: { width: number; height: number };
+  anchor?: { x: number; y: number };
+  createdAt?: number; // epoch ms
+  updatedAt?: number; // epoch ms
+}
+
 export interface Tombstones {
   nodes: Record<string, number>;
   edges: Record<string, number>;
@@ -143,6 +166,7 @@ export interface Tombstones {
   textBoxes: Record<string, number>;
   comments: Record<string, number>;
   layers: Record<string, number>;
+  stacks: Record<string, number>;
 }
 
 export interface CanvasState {

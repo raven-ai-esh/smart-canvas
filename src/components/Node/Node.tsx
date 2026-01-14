@@ -1,7 +1,6 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Bold, Italic, Strikethrough, Code, List, ListOrdered, Quote, Paperclip, Trash2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/useStore';
 import type { Attachment, NodeData, MentionToken, SessionSaver } from '../../types';
 import styles from './Node.module.css';
@@ -10,6 +9,7 @@ import { clampEnergy, energyToColor } from '../../utils/energy';
 import { EnergySvgLiquidGauge } from './EnergySvgLiquidGauge';
 import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES, resolveAttachmentUrl } from '../../utils/attachments';
 import { getIncomingProgress } from '../../utils/childProgress';
+import { markdownComponents, markdownPlugins } from '../../utils/markdown';
 
 // View Components
 const GraphView: React.FC<{ data: NodeData; energyColor: string; fillRatio: number }> = ({ data, energyColor, fillRatio }) => (
@@ -524,7 +524,9 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
                     {safeValue.trim().length === 0 ? (
                         <div className={styles.editorPlaceholder}>{resolvedPlaceholder}</div>
                     ) : (
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{safeValue}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={markdownPlugins} components={markdownComponents}>
+                            {safeValue}
+                        </ReactMarkdown>
                     )}
                     <AttachmentList attachments={attachments ?? []} compact />
                 </div>
@@ -1633,9 +1635,11 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
 
 interface NodeProps {
     data: NodeData;
+    stackAnimating?: boolean;
+    stackCollapsed?: boolean;
 }
 
-export const Node: React.FC<NodeProps> = ({ data }) => {
+export const Node: React.FC<NodeProps> = ({ data, stackAnimating = false, stackCollapsed = false }) => {
     const { canvas } = useStore();
     const scale = canvas.scale;
     const [isHovered, setIsHovered] = useState(false);
@@ -1752,6 +1756,8 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
             }}
             data-node-bounds="true"
             data-node-id={data.id}
+            data-stack-animating={stackAnimating ? 'true' : undefined}
+            data-stack-collapsed={stackCollapsed ? 'true' : undefined}
             onPointerEnter={() => setIsHovered(true)}
             onPointerLeave={() => setIsHovered(false)}
         >
@@ -1775,6 +1781,9 @@ export const Node: React.FC<NodeProps> = ({ data }) => {
                 className={cardClass}
                 data-node-rect={isCard ? 'true' : undefined}
                 data-node-rect-id={data.id}
+                data-node-card-rect="true"
+                data-node-card-id={data.id}
+                data-node-card-scale={isCard ? '1' : '0.8'}
             >
                 {renderAuthorBadge()}
                 <CardView data={data} />

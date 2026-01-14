@@ -57,6 +57,91 @@
     pointer-events: auto;
 }
 
+.stackShell {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    pointer-events: auto;
+    cursor: grab;
+    user-select: none;
+}
+
+.stackShell:active {
+    cursor: grabbing;
+}
+
+.stackCard {
+    position: absolute;
+    inset: 0;
+    border-radius: 12px;
+    background: var(--bg-node);
+    border: 1px solid var(--border-subtle);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+    transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.stackCardBack {
+    transform: translate(-10px, -8px) scale(0.98);
+    opacity: 0.45;
+}
+
+.stackCardMid {
+    transform: translate(-5px, -4px) scale(0.99);
+    opacity: 0.65;
+}
+
+.stackCardFront {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.stackMeta {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--text-primary);
+}
+
+.stackTitle {
+    max-width: 90%;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.stackTitleEmpty {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.stackTitleInput {
+    width: 90%;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-family: inherit;
+    text-align: center;
+    outline: none;
+}
+
+.stackShellSelected .stackCardFront,
+.stackShell[data-marquee-hover="true"] .stackCardFront {
+    border-color: #FF9F1C;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 12px rgba(255, 159, 28, 0.3);
+}
+
 /* Optional grid or background pattern can be added here */
 .gridPattern {
     position: absolute;
