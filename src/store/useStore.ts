@@ -21,6 +21,7 @@ type UndoSnapshot = {
 
 type StackMoveAction = 'up' | 'down' | 'top' | 'bottom';
 type StackCollapsedSize = { width: number; height: number };
+type StackItemPosition = { x: number; y: number; width: number; height: number };
 
 const ts = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
 const clampProgress = (x: unknown) => Math.min(100, Math.max(0, Number.isFinite(Number(x)) ? Number(x) : 0));
@@ -224,7 +225,11 @@ interface AppState {
     addComment: (comment: Comment) => void;
     deleteComment: (id: string) => void;
     moveStackItem: (kind: StackKind, id: string, action: StackMoveAction) => void;
-    createStack: (items: Array<{ kind: StackItemKind; id: string }>, options?: { collapsedSize?: StackCollapsedSize }) => void;
+    createStack: (
+        items: Array<{ kind: StackItemKind; id: string }>,
+        options?: { collapsedSize?: StackCollapsedSize; allowStacked?: boolean; positionOverrides?: Map<string, StackItemPosition> },
+    ) => void;
+    addToStack: (stackId: string, items: Array<{ kind: StackItemKind; id: string }>, options?: { collapsedSize?: StackCollapsedSize }) => void;
     expandStack: (id: string) => void;
     collapseStack: (id: string, options?: { collapsedSize?: StackCollapsedSize }) => void;
     toggleStack: (id: string) => void;
@@ -433,6 +438,88 @@ const resolveStackUniformSize = (size?: Partial<StackCollapsedSize>) => {
         ? size.height
         : STACK_CARD_HEIGHT;
     return { width, height };
+};
+
+const removeItemsFromStacks = (
+    state: AppState,
+    removeKeys: Set<string>,
+    options?: { excludeStackId?: string },
+) => {
+    if (!removeKeys.size) {
+        return { stacks: state.stacks, nodes: state.nodes, textBoxes: state.textBoxes, tombstones: state.tombstones };
+    }
+    const now = Date.now();
+    const nodeUpdates = new Map<string, { x: number; y: number }>();
+    const textBoxUpdates = new Map<string, { x: number; y: number; width: number; height: number }>();
+    const removedStacks: StackGroup[] = [];
+    const nextStacks = state.stacks
+        .map((stack) => {
+            if (options?.excludeStackId && stack.id === options.excludeStackId) return stack;
+            const hasRemoval = stack.items.some((item) => removeKeys.has(stackItemKey(item)));
+            if (!hasRemoval) return stack;
+            const nextItems = stack.items.filter((item) => !removeKeys.has(stackItemKey(item)));
+            if (nextItems.length < 2) {
+                removedStacks.push(stack);
+                return null;
+            }
+            if (nextItems.length === stack.items.length) return stack;
+            if (!stack.collapsed) {
+                return { ...stack, items: nextItems, updatedAt: now };
+            }
+            const anchor = computeStackAnchor(state, nextItems);
+            const collapsedSize = resolveStackUniformSize(stack.collapsedSize);
+            const collapsedPositions = buildCollapsedPositionMap(state, nextItems, anchor, collapsedSize);
+            nextItems.forEach((item) => {
+                const pos = collapsedPositions.get(stackItemKey(item));
+                if (!pos) return;
+                if (item.kind === 'node') {
+                    nodeUpdates.set(item.id, { x: pos.x, y: pos.y });
+                } else {
+                    textBoxUpdates.set(item.id, {
+                        x: pos.x,
+                        y: pos.y,
+                        width: collapsedSize.width,
+                        height: collapsedSize.height,
+                    });
+                }
+            });
+            return { ...stack, items: nextItems, anchor, collapsedSize, updatedAt: now };
+        })
+        .filter(Boolean) as StackGroup[];
+
+    let nodes = state.nodes;
+    if (nodeUpdates.size) {
+        nodes = state.nodes.map((node) => {
+            const update = nodeUpdates.get(node.id);
+            return update ? { ...node, x: update.x, y: update.y, updatedAt: now } : node;
+        });
+    }
+    let textBoxes = state.textBoxes;
+    if (textBoxUpdates.size) {
+        textBoxes = state.textBoxes.map((tb) => {
+            const update = textBoxUpdates.get(tb.id);
+            if (!update) return tb;
+            return {
+                ...tb,
+                x: update.x,
+                y: update.y,
+                width: update.width,
+                height: update.height,
+                updatedAt: now,
+            };
+        });
+    }
+    let tombstones = state.tombstones;
+    if (removedStacks.length) {
+        tombstones = {
+            ...state.tombstones,
+            stacks: { ...state.tombstones.stacks },
+        };
+        removedStacks.forEach((stack) => {
+            tombstones.stacks[stack.id] = tombstoneFor(now, stack.updatedAt);
+        });
+    }
+    return { stacks: nextStacks, nodes, textBoxes, tombstones };
 };
 
 const pruneStacks = (stacks: StackGroup[], nodes: NodeData[], textBoxes: TextBox[]) => {
@@ -1681,13 +1768,17 @@ export const useStore = create<AppState>()(
                 const candidates = Array.from(unique.values());
                 if (candidates.length < 2) return {};
                 const stackedKeys = new Set(state.stacks.flatMap((stack) => stack.items.map(stackItemKey)));
-                const filtered = candidates.filter((item) => !stackedKeys.has(stackItemKey(item)));
+                const filtered = options?.allowStacked
+                    ? candidates
+                    : candidates.filter((item) => !stackedKeys.has(stackItemKey(item)));
                 if (filtered.length < 2) return {};
 
+                const positionOverrides = options?.positionOverrides;
                 let layerId: string | null = null;
                 const resolvedItems: StackItemRef[] = [];
                 filtered.forEach((item) => {
-                    const pos = resolveStackItemPosition(state, item);
+                    const override = positionOverrides?.get(stackItemKey(item));
+                    const pos = override ?? resolveStackItemPosition(state, item);
                     if (!pos) return;
                     const itemLayerId = resolveStackItemLayerId(state, item);
                     if (!itemLayerId) return;
@@ -1702,9 +1793,16 @@ export const useStore = create<AppState>()(
                 });
                 if (resolvedItems.length < 2) return {};
 
-                const anchor = computeStackAnchor(state, resolvedItems);
+                const removeKeys = options?.allowStacked
+                    ? new Set(resolvedItems.map((item) => stackItemKey(item)))
+                    : null;
+                const baseState = removeKeys
+                    ? removeItemsFromStacks(state, removeKeys)
+                    : { stacks: state.stacks, nodes: state.nodes, textBoxes: state.textBoxes, tombstones: state.tombstones };
+
+                const anchor = computeStackAnchor({ textBoxes: baseState.textBoxes }, resolvedItems);
                 const collapsedSize = resolveStackUniformSize(options?.collapsedSize);
-                const collapsedPositions = buildCollapsedPositionMap(state, resolvedItems, anchor, collapsedSize);
+                const collapsedPositions = buildCollapsedPositionMap({ textBoxes: baseState.textBoxes }, resolvedItems, anchor, collapsedSize);
                 const now = Date.now();
                 const stack: StackGroup = {
                     id: crypto.randomUUID(),
@@ -1720,11 +1818,11 @@ export const useStore = create<AppState>()(
                 const stackTextBoxIds = new Set(
                     resolvedItems.filter((item) => item.kind === 'textBox').map((item) => item.id),
                 );
-                const nodes = state.nodes.map((node) => {
+                const nodes = baseState.nodes.map((node) => {
                     const pos = collapsedPositions.get(`node:${node.id}`);
                     return pos ? { ...node, x: pos.x, y: pos.y, updatedAt: now } : node;
                 });
-                const textBoxes = state.textBoxes.map((tb) => {
+                const textBoxes = baseState.textBoxes.map((tb) => {
                     const pos = collapsedPositions.get(`textBox:${tb.id}`);
                     if (!pos) return tb;
                     if (!stackTextBoxIds.has(tb.id)) return { ...tb, x: pos.x, y: pos.y, updatedAt: now };
@@ -1738,17 +1836,99 @@ export const useStore = create<AppState>()(
                     };
                 });
                 const tombstones: Tombstones = {
-                    ...state.tombstones,
-                    stacks: { ...state.tombstones.stacks },
+                    ...baseState.tombstones,
+                    stacks: { ...baseState.tombstones.stacks },
                 };
                 delete tombstones.stacks[stack.id];
                 return {
                     ...pushHistoryReducer(state),
                     nodes,
                     textBoxes,
-                    stacks: [...state.stacks, stack],
+                    stacks: [...baseState.stacks, stack],
                     tombstones,
                 };
+            }),
+
+            addToStack: (stackId, items, options) => set((state) => {
+                if (!stackId) return {};
+                const stack = state.stacks.find((item) => item.id === stackId);
+                if (!stack) return {};
+                const unique = new Map<string, { kind: StackItemKind; id: string }>();
+                items.forEach((item) => {
+                    if (!item?.id) return;
+                    unique.set(stackItemKey(item), item);
+                });
+                const candidates = Array.from(unique.values());
+                if (!candidates.length) return {};
+                const stackItemKeys = new Set(stack.items.map(stackItemKey));
+                const filtered = candidates.filter((item) => !stackItemKeys.has(stackItemKey(item)));
+                if (!filtered.length) return {};
+
+                const stackLayerId = stack.layerId ?? DEFAULT_LAYER_ID;
+                const resolvedItems: StackItemRef[] = [];
+                filtered.forEach((item) => {
+                    const pos = resolveStackItemPosition(state, item);
+                    if (!pos) return;
+                    const itemLayerId = resolveStackItemLayerId(state, item);
+                    if (!itemLayerId || itemLayerId !== stackLayerId) return;
+                    const nextItem: StackItemRef = { ...item, x: pos.x, y: pos.y };
+                    if (item.kind === 'textBox') {
+                        nextItem.width = pos.width;
+                        nextItem.height = pos.height;
+                    }
+                    resolvedItems.push(nextItem);
+                });
+                if (!resolvedItems.length) return {};
+
+                const removeKeys = new Set(resolvedItems.map((item) => stackItemKey(item)));
+                const baseState = removeItemsFromStacks(state, removeKeys, { excludeStackId: stackId });
+                const targetStack = baseState.stacks.find((item) => item.id === stackId);
+                if (!targetStack) return {};
+
+                const nextItems = [...targetStack.items, ...resolvedItems];
+                const now = Date.now();
+                let nodes = baseState.nodes;
+                let textBoxes = baseState.textBoxes;
+                let nextStack = targetStack;
+                if (targetStack.collapsed) {
+                    const collapsedSize = resolveStackUniformSize(options?.collapsedSize ?? targetStack.collapsedSize);
+                    const anchor = computeStackAnchor({ textBoxes }, nextItems);
+                    const collapsedPositions = buildCollapsedPositionMap({ textBoxes }, nextItems, anchor, collapsedSize);
+                    const stackTextBoxIds = new Set(
+                        nextItems.filter((item) => item.kind === 'textBox').map((item) => item.id),
+                    );
+                    nodes = nodes.map((node) => {
+                        const pos = collapsedPositions.get(`node:${node.id}`);
+                        return pos ? { ...node, x: pos.x, y: pos.y, updatedAt: now } : node;
+                    });
+                    textBoxes = textBoxes.map((tb) => {
+                        const pos = collapsedPositions.get(`textBox:${tb.id}`);
+                        if (!pos) return tb;
+                        if (!stackTextBoxIds.has(tb.id)) return { ...tb, x: pos.x, y: pos.y, updatedAt: now };
+                        return {
+                            ...tb,
+                            x: pos.x,
+                            y: pos.y,
+                            width: collapsedSize.width,
+                            height: collapsedSize.height,
+                            updatedAt: now,
+                        };
+                    });
+                    nextStack = { ...targetStack, items: nextItems, collapsedSize, anchor, updatedAt: now };
+                } else {
+                    const collapsedSize = options?.collapsedSize
+                        ? resolveStackUniformSize(options.collapsedSize)
+                        : targetStack.collapsedSize;
+                    nextStack = {
+                        ...targetStack,
+                        items: nextItems,
+                        collapsedSize: collapsedSize ?? targetStack.collapsedSize,
+                        updatedAt: now,
+                    };
+                }
+
+                const stacks = baseState.stacks.map((item) => (item.id === stackId ? nextStack : item));
+                return { ...pushHistoryReducer(state), nodes, textBoxes, stacks, tombstones: baseState.tombstones };
             }),
 
             expandStack: (id) => set((state) => {
