@@ -4,7 +4,7 @@ import { Node, NoteView } from '../Node/Node';
 import { Edge, ConnectionLine, LayerBridgeEdge } from '../Edge/Edge';
 import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
-import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpToLine, Bot, Layers, Link2, MessageCircle, Paperclip, Pencil, Ungroup, X, Zap, ZapOff } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpToLine, Bot, Layers, Link2, MessageCircle, Paperclip, Pencil, Plus, Ungroup, X, Zap, ZapOff } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
 import type { Attachment, Comment, EdgeData, NodeData, SessionSaver, StackGroup, StrokePoint, TextBox as TextBoxType } from '../../types';
 import type { AssistantSelectionContext } from '../../types/assistant';
@@ -462,6 +462,7 @@ export const Canvas: React.FC = () => {
         const selectStack = useStore((state) => state.selectStack);
 	    const addDrawing = useStore((state) => state.addDrawing);
         const createStack = useStore((state) => state.createStack);
+        const addToStack = useStore((state) => state.addToStack);
         const expandStack = useStore((state) => state.expandStack);
         const ungroupStack = useStore((state) => state.ungroupStack);
         const moveStack = useStore((state) => state.moveStack);
@@ -4604,14 +4605,47 @@ export const Canvas: React.FC = () => {
                 ? stackByItem.get(stackItemKey(contextMenu.kind, contextMenu.id))
                 : null)
         : null;
+    const selectedStackItems = useMemo(() => {
+        if (!selectedStacks.length) return [];
+        const items: Array<{ kind: 'node' | 'textBox'; id: string }> = [];
+        selectedStacks.forEach((stackId) => {
+            const stack = stackById.get(stackId);
+            if (!stack) return;
+            stack.items.forEach((item) => {
+                items.push({ kind: item.kind, id: item.id });
+            });
+        });
+        return items;
+    }, [selectedStacks, stackById]);
+    const selectedStackPositionOverrides = useMemo(() => {
+        if (!selectedStacks.length) return new Map<string, { x: number; y: number; width: number; height: number }>();
+        const overrides = new Map<string, { x: number; y: number; width: number; height: number }>();
+        selectedStacks.forEach((stackId) => {
+            const stack = stackById.get(stackId);
+            if (!stack) return;
+            stack.items.forEach((item) => {
+                overrides.set(stackItemKey(item.kind, item.id), {
+                    x: item.x,
+                    y: item.y,
+                    width: item.width ?? 0,
+                    height: item.height ?? 0,
+                });
+            });
+        });
+        return overrides;
+    }, [selectedStacks, stackById]);
     const stackCandidates = useMemo(() => {
         const selected = [
             ...selectedNodes.map((id) => ({ kind: 'node' as const, id })),
             ...selectedTextBoxes.map((id) => ({ kind: 'textBox' as const, id })),
+            ...selectedStackItems,
         ];
         if (selected.length < 2) return [];
-        const stackedKeys = new Set(stacks.flatMap((stack) => stack.items.map((item) => stackItemKey(item.kind, item.id))));
-        const resolved = selected
+        const unique = new Map<string, { kind: 'node' | 'textBox'; id: string }>();
+        selected.forEach((item) => {
+            unique.set(stackItemKey(item.kind, item.id), item);
+        });
+        const resolved = Array.from(unique.values())
             .map((item) => {
                 if (item.kind === 'node') {
                     const node = nodes.find((n) => n.id === item.id);
@@ -4627,10 +4661,44 @@ export const Canvas: React.FC = () => {
         const baseLayerId = resolved[0]?.layerId ?? DEFAULT_LAYER_ID;
         return resolved
             .filter((item) => item.layerId === baseLayerId)
-            .filter((item) => !stackedKeys.has(stackItemKey(item.kind, item.id)))
             .map(({ kind, id }) => ({ kind, id }));
-    }, [nodes, selectedNodes, selectedTextBoxes, stacks, textBoxes]);
+    }, [nodes, selectedNodes, selectedTextBoxes, selectedStackItems, textBoxes]);
+    const addToStackTarget = selectedStacks.length === 1 ? stackById.get(selectedStacks[0]) ?? null : null;
+    const addToStackCandidates = useMemo(() => {
+        if (!addToStackTarget) return [];
+        const selected = [
+            ...selectedNodes.map((id) => ({ kind: 'node' as const, id })),
+            ...selectedTextBoxes.map((id) => ({ kind: 'textBox' as const, id })),
+        ];
+        if (!selected.length) return [];
+        const unique = new Map<string, { kind: 'node' | 'textBox'; id: string }>();
+        selected.forEach((item) => {
+            unique.set(stackItemKey(item.kind, item.id), item);
+        });
+        const existingKeys = new Set(
+            addToStackTarget.items.map((item) => stackItemKey(item.kind, item.id)),
+        );
+        const baseLayerId = addToStackTarget.layerId ?? DEFAULT_LAYER_ID;
+        const resolved = Array.from(unique.values())
+            .map((item) => {
+                if (item.kind === 'node') {
+                    const node = nodes.find((n) => n.id === item.id);
+                    const layerId = node?.layerId ?? DEFAULT_LAYER_ID;
+                    return node ? { ...item, layerId } : null;
+                }
+                const textBox = textBoxes.find((tb) => tb.id === item.id);
+                const layerId = textBox?.layerId ?? DEFAULT_LAYER_ID;
+                return textBox ? { ...item, layerId } : null;
+            })
+            .filter(Boolean) as Array<{ kind: 'node' | 'textBox'; id: string; layerId: string }>;
+        if (!resolved.length) return [];
+        return resolved
+            .filter((item) => item.layerId === baseLayerId)
+            .filter((item) => !existingKeys.has(stackItemKey(item.kind, item.id)))
+            .map(({ kind, id }) => ({ kind, id }));
+    }, [addToStackTarget, nodes, selectedNodes, selectedTextBoxes, textBoxes]);
     const canCreateStack = contextMenu?.kind === 'selection' && stackCandidates.length >= 2;
+    const canAddToStack = contextMenu?.kind === 'selection' && !!addToStackTarget && addToStackCandidates.length > 0;
     const canComment = contextMenu?.kind !== 'selection' && contextMenu?.kind !== 'comment' && contextMenu?.kind !== 'stack';
     const canRaven = contextMenu?.kind !== 'canvas';
     const canDelete = contextMenu?.kind !== 'canvas';
@@ -4769,6 +4837,28 @@ export const Canvas: React.FC = () => {
                                     <Bot size={18} />
                                 </button>
                             )}
+                            {canAddToStack && addToStackTarget && (
+                                <button
+                                    type="button"
+                                    className={styles.contextButton}
+                                    title="Add to stack"
+                                    data-interactive="true"
+                                    onPointerDown={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        const combinedItems = [
+                                            ...addToStackTarget.items.map((item) => ({ kind: item.kind, id: item.id })),
+                                            ...addToStackCandidates,
+                                        ];
+                                        const collapsedSize = resolveStackCardSize(combinedItems);
+                                        triggerStackAnimation(addToStackCandidates);
+                                        addToStack(addToStackTarget.id, addToStackCandidates, { collapsedSize });
+                                        setContextMenu(null);
+                                    }}
+                                >
+                                    <Plus size={18} />
+                                </button>
+                            )}
                             {canCreateStack && (
                                 <button
                                     type="button"
@@ -4780,7 +4870,11 @@ export const Canvas: React.FC = () => {
                                         e.stopPropagation();
                                         const collapsedSize = resolveStackCardSize(stackCandidates);
                                         triggerStackAnimation(stackCandidates);
-                                        createStack(stackCandidates, { collapsedSize });
+                                        createStack(stackCandidates, {
+                                            collapsedSize,
+                                            allowStacked: true,
+                                            positionOverrides: selectedStackPositionOverrides,
+                                        });
                                         setContextMenu(null);
                                     }}
                                 >
