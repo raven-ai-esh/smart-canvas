@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Moon, Sun, Snowflake, User, MessageCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { animalNames, getGuestIdentity, hashString } from '../../utils/guestIdentity';
@@ -690,6 +690,7 @@ export const Presence: React.FC = () => {
   const settingsAvatarPreview = settingsAvatarRemoved ? null : (settingsAvatarData ?? me?.avatarUrl ?? null);
   const guestAvatarSize = 36;
   const guestOverlap = Math.round(guestAvatarSize * 0.28);
+  const avatarsRef = useRef<HTMLDivElement | null>(null);
   const myGuestSeed = !me ? mySeed : '';
   const mcpStatusLabel = mcpTokenInfo ? 'Active' : 'Not generated';
   const aiStatusLabel = aiKeyInfo ? 'Active' : 'Not set';
@@ -747,6 +748,32 @@ export const Presence: React.FC = () => {
     }
     return unique;
   }, [others, myGuestSeed]);
+
+  useLayoutEffect(() => {
+    const el = avatarsRef.current;
+    if (!el) return;
+    let raf = 0;
+    const update = () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(() => {
+        const width = Math.ceil(el.getBoundingClientRect().width);
+        document.documentElement.style.setProperty('--presence-width', `${width}px`);
+      });
+    };
+    update();
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(update);
+      observer.observe(el);
+    } else {
+      window.addEventListener('resize', update);
+    }
+    return () => {
+      if (observer) observer.disconnect();
+      window.removeEventListener('resize', update);
+      if (raf) window.cancelAnimationFrame(raf);
+    };
+  }, [normalizedOthers.length, myAvatarUrl, myRegistered]);
 
   const displayPeerName = (peer: typeof peers[number]) => {
     if (peer.registered) return peer.name || 'Guest';
@@ -1777,6 +1804,7 @@ export const Presence: React.FC = () => {
   return (
     <>
       <div
+        ref={avatarsRef}
         style={{
           position: 'fixed',
           top: 'calc(12px + env(safe-area-inset-top, 0px))',
