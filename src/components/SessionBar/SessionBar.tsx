@@ -10,6 +10,14 @@ type SessionListItem = {
     updatedAt: string | null;
 };
 
+type SessionTab = {
+    id: string;
+    name: string | null;
+    shareToken: string | null;
+};
+
+const tabsStorageKey = 'smart-canvas-session-tabs';
+
 export const SessionBar: React.FC = () => {
     const sessionId = useStore((s) => s.sessionId);
     const sessionName = useStore((s) => s.sessionName);
@@ -17,6 +25,7 @@ export const SessionBar: React.FC = () => {
     const sessionOwnerId = useStore((s) => s.sessionOwnerId);
     const sessionExpiresAt = useStore((s) => s.sessionExpiresAt);
     const sessionSavers = useStore((s) => s.sessionSavers);
+    const sessionShareToken = useStore((s) => s.sessionShareToken);
     const setSessionMeta = useStore((s) => s.setSessionMeta);
     const setSessionSavers = useStore((s) => s.setSessionSavers);
     const me = useStore((s) => s.me);
@@ -36,8 +45,101 @@ export const SessionBar: React.FC = () => {
     const [sessionActionBusy, setSessionActionBusy] = useState<string | null>(null);
     const [currentNameDraft, setCurrentNameDraft] = useState('');
     const [linkPrompt, setLinkPrompt] = useState<{ title: string; url: string } | null>(null);
+    const [sessionTabs, setSessionTabs] = useState<SessionTab[]>(() => {
+        try {
+            const raw = window.sessionStorage.getItem(tabsStorageKey);
+            if (!raw) return [];
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) return [];
+            const unique = new Map<string, SessionTab>();
+            parsed.forEach((item) => {
+                const id = typeof item?.id === 'string' ? item.id : '';
+                if (!id) return;
+                const name = typeof item?.name === 'string' ? item.name : null;
+                const shareToken = typeof item?.shareToken === 'string' ? item.shareToken : null;
+                unique.set(id, { id, name, shareToken });
+            });
+            return Array.from(unique.values());
+        } catch {
+            return [];
+        }
+    });
 
     const linkPromptInputRef = useRef<HTMLInputElement | null>(null);
+
+    const emitPopState = useCallback(() => {
+        try {
+            window.dispatchEvent(new PopStateEvent('popstate'));
+        } catch {
+            window.dispatchEvent(new Event('popstate'));
+        }
+    }, []);
+
+    const switchToSession = useCallback(
+        (id: string, opts?: { reset?: boolean; shareToken?: string | null }) => {
+            if (!id) return;
+            const url = new URL(window.location.href);
+            url.searchParams.set('session', id);
+            if (opts?.reset) url.searchParams.set('reset', '1');
+            else url.searchParams.delete('reset');
+            const shareToken = typeof opts?.shareToken === 'string' && opts.shareToken.trim()
+                ? opts.shareToken.trim()
+                : null;
+            if (shareToken) {
+                url.searchParams.set('share', shareToken);
+                url.searchParams.delete('shareToken');
+            } else {
+                url.searchParams.delete('share');
+                url.searchParams.delete('shareToken');
+            }
+            window.history.pushState({}, '', url.toString());
+            emitPopState();
+        },
+        [emitPopState],
+    );
+
+    const upsertSessionTab = useCallback((id: string, name: string | null, shareToken?: string | null) => {
+        if (!id) return;
+        const nextName = typeof name === 'string' && name.trim() ? name.trim() : null;
+        const nextShare = typeof shareToken === 'string' && shareToken.trim() ? shareToken.trim() : null;
+        setSessionTabs((prev) => {
+            const idx = prev.findIndex((tab) => tab.id === id);
+            if (idx < 0) {
+                return [...prev, { id, name: nextName, shareToken: nextShare }];
+            }
+            const existing = prev[idx];
+            const mergedName = nextName ?? existing.name;
+            const mergedShare = nextShare ?? existing.shareToken;
+            if (existing.name === mergedName && existing.shareToken === mergedShare) return prev;
+            const next = prev.slice();
+            next[idx] = { ...existing, name: mergedName, shareToken: mergedShare };
+            return next;
+        });
+    }, []);
+
+    const closeSessionTab = useCallback(
+        (id: string) => {
+            setSessionTabs((prev) => {
+                if (prev.length <= 1) return prev;
+                const next = prev.filter((tab) => tab.id !== id);
+                if (next.length === prev.length) return prev;
+                if (id === sessionId) {
+                    const fallback = next[next.length - 1];
+                    if (fallback) switchToSession(fallback.id, { shareToken: fallback.shareToken });
+                }
+                return next;
+            });
+        },
+        [sessionId, switchToSession],
+    );
+
+    useEffect(() => {
+        try {
+            window.sessionStorage.setItem(tabsStorageKey, JSON.stringify(sessionTabs));
+        } catch {
+            // ignore
+        }
+    }, [sessionTabs]);
 
     useEffect(() => {
         if (!showPrompt) return;
@@ -269,6 +371,25 @@ export const SessionBar: React.FC = () => {
         return sessionSaved ? 'Untitled session' : 'Temporary session';
     }, [sessionName, sessionSaved]);
 
+    useEffect(() => {
+        if (!sessionId) return;
+        upsertSessionTab(sessionId, sessionName ?? null, sessionShareToken ?? null);
+    }, [sessionId, sessionName, sessionShareToken, upsertSessionTab]);
+
+    useEffect(() => {
+        if (!sessions.length) return;
+        setSessionTabs((prev) => {
+            let changed = false;
+            const next = prev.map((tab) => {
+                const match = sessions.find((item) => item.id === tab.id);
+                if (!match || !match.name || match.name === tab.name) return tab;
+                changed = true;
+                return { ...tab, name: match.name };
+            });
+            return changed ? next : prev;
+        });
+    }, [sessions]);
+
     const savedByMe = useMemo(() => {
         if (!me?.id) return false;
         return sessionSavers.some((saver) => saver.id === me.id);
@@ -420,14 +541,12 @@ export const SessionBar: React.FC = () => {
     const handleOpenSession = useCallback(
         (id: string) => {
             if (!id) return;
-            const url = new URL(window.location.href);
-            url.searchParams.set('session', id);
-            url.searchParams.delete('reset');
-            const w = window.open(url.toString(), '_blank');
-            if (w) w.opener = null;
+            const matched = sessions.find((item) => item.id === id);
+            upsertSessionTab(id, matched?.name ?? null, null);
+            switchToSession(id);
             closeSessionsMenu();
         },
-        [closeSessionsMenu],
+        [closeSessionsMenu, sessions, switchToSession, upsertSessionTab],
     );
 
     const handleDeleteSession = useCallback(
@@ -441,6 +560,7 @@ export const SessionBar: React.FC = () => {
                     return;
                 }
                 setSessions((prev) => prev.filter((item) => item.id !== id));
+                setSessionTabs((prev) => prev.filter((tab) => tab.id !== id));
                 setToast('Сессия удалена');
                 if (id === sessionId) {
                     const created = await fetch('/api/sessions', {
@@ -451,16 +571,14 @@ export const SessionBar: React.FC = () => {
                     const data = await created.json().catch(() => ({}));
                     const nextId = typeof data?.id === 'string' ? data.id : null;
                     if (!nextId) return;
-                    const url = new URL(window.location.href);
-                    url.searchParams.set('session', nextId);
-                    url.searchParams.delete('reset');
-                    window.location.href = url.toString();
+                    upsertSessionTab(nextId, null, null);
+                    switchToSession(nextId, { reset: true });
                 }
             } finally {
                 setSessionActionBusy(null);
             }
         },
-        [sessionActionBusy, sessionId],
+        [sessionActionBusy, sessionId, switchToSession, upsertSessionTab],
     );
 
     const currentSessionItem = useMemo(() => {
@@ -471,6 +589,15 @@ export const SessionBar: React.FC = () => {
     }, [sessionId, sessionName, sessions]);
 
     const otherSessions = useMemo(() => sessions.filter((item) => item.id !== sessionId), [sessionId, sessions]);
+    const canCloseTabs = sessionTabs.length > 1;
+    const getTabLabel = useCallback(
+        (tab: SessionTab) => {
+            if (tab.id === sessionId) return displaySessionName;
+            if (tab.name && tab.name.trim()) return tab.name;
+            return 'Untitled session';
+        },
+        [displaySessionName, sessionId],
+    );
 
     const formatUpdatedAt = useCallback((value: string | null) => {
         if (!value) return 'No activity';
@@ -479,50 +606,9 @@ export const SessionBar: React.FC = () => {
         return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
     }, []);
 
-    const openSessionInNewTab = useCallback((id: string, opts?: { reset?: boolean; windowRef?: Window | null }) => {
-        const url = new URL(window.location.href);
-        url.searchParams.set('session', id);
-        if (opts?.reset) url.searchParams.set('reset', '1');
-        else url.searchParams.delete('reset');
-        if (opts?.windowRef) {
-            opts.windowRef.location.href = url.toString();
-            return;
-        }
-        const w = window.open(url.toString(), '_blank');
-        if (w) w.opener = null;
-    }, []);
-
-    const openLoadingTab = () => {
-        const w = window.open('about:blank', '_blank');
-        if (!w) return null;
-        try {
-            w.opener = null;
-            w.document.write(
-                `<!doctype html><html><head><meta charset="utf-8"/><title>Loading…</title>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<style>
-  body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background: #0b0f18; color: #e6e6e6; }
-  .wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
-  .card { max-width: 420px; width: 100%; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 16px; padding: 18px; }
-  .bar { height: 6px; border-radius: 999px; background: rgba(255,255,255,0.14); overflow: hidden; margin-top: 12px; }
-  .bar > div { height: 100%; width: 40%; background: rgba(255,255,255,0.55); animation: l 1.1s ease-in-out infinite; border-radius: 999px; }
-  @keyframes l { 0% { transform: translateX(-120%);} 100% { transform: translateX(260%);} }
-</style></head><body><div class="wrap"><div class="card">
-  <div>Creating session…</div>
-  <div class="bar"><div></div></div>
-</div></div></body></html>`,
-            );
-            w.document.close();
-        } catch {
-            // ignore
-        }
-        return w;
-    };
-
     const handleCreateNewSession = useCallback(async () => {
         if (sessionActionBusy) return;
         setSessionActionBusy('new');
-        const w = openLoadingTab();
         try {
             const res = await fetch('/api/sessions', {
                 method: 'POST',
@@ -543,25 +629,20 @@ export const SessionBar: React.FC = () => {
             const data = await res.json();
             const id = typeof data?.id === 'string' ? data.id : null;
             if (!id) throw new Error('Invalid session id');
-            openSessionInNewTab(id, { reset: true, windowRef: w });
+            upsertSessionTab(id, null, null);
+            switchToSession(id, { reset: true });
             closeSessionsMenu();
         } catch {
             setToast('Не удалось создать сессию');
-            try {
-                w?.close();
-            } catch {
-                // ignore
-            }
         } finally {
             setSessionActionBusy(null);
         }
-    }, [closeSessionsMenu, openSessionInNewTab, sessionActionBusy]);
+    }, [closeSessionsMenu, sessionActionBusy, switchToSession, upsertSessionTab]);
 
     const handleCopySession = useCallback(
         async (id: string) => {
             if (sessionActionBusy) return;
             setSessionActionBusy(id);
-            const w = openLoadingTab();
             try {
                 let newId: string | null = null;
                 if (id === sessionId) {
@@ -589,20 +670,16 @@ export const SessionBar: React.FC = () => {
                     newId = typeof data?.id === 'string' ? data.id : null;
                 }
                 if (!newId) throw new Error('copy_failed');
-                openSessionInNewTab(newId, { reset: true, windowRef: w });
+                upsertSessionTab(newId, null, null);
+                switchToSession(newId, { reset: true });
                 closeSessionsMenu();
             } catch {
                 setToast('Не удалось скопировать сессию');
-                try {
-                    w?.close();
-                } catch {
-                    // ignore
-                }
             } finally {
                 setSessionActionBusy(null);
             }
         },
-        [closeSessionsMenu, openSessionInNewTab, sessionActionBusy, sessionId],
+        [closeSessionsMenu, sessionActionBusy, sessionId, switchToSession, upsertSessionTab],
     );
 
     const handleRenameCurrent = useCallback(async () => {
@@ -699,14 +776,52 @@ export const SessionBar: React.FC = () => {
                 {sessionId ? (
                     <button
                         type="button"
-                        className={styles.sessionName}
-                        title={displaySessionName}
+                        className={styles.sessionsButton}
+                        title="Sessions"
                         onClick={openSessionsMenu}
                         disabled={!canOpenSessions}
                     >
-                        {displaySessionName}
+                        Sessions
                     </button>
                 ) : null}
+                {sessionId && sessionTabs.length > 1 && (
+                    <div className={styles.tabsBar} role="tablist" aria-label="Session tabs">
+                        {sessionTabs.map((tab) => {
+                            const active = tab.id === sessionId;
+                            return (
+                                <div
+                                    key={tab.id}
+                                    className={`${styles.tab} ${active ? styles.tabActive : ''}`}
+                                    role="tab"
+                                    aria-selected={active}
+                                >
+                                    <button
+                                        type="button"
+                                        className={styles.tabButton}
+                                        onClick={() => switchToSession(tab.id, { shareToken: tab.shareToken })}
+                                        title={getTabLabel(tab)}
+                                    >
+                                        <span className={styles.tabLabel}>{getTabLabel(tab)}</span>
+                                    </button>
+                                    {canCloseTabs && (
+                                        <button
+                                            type="button"
+                                            className={styles.tabClose}
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                closeSessionTab(tab.id);
+                                            }}
+                                            title="Close tab"
+                                            aria-label="Close tab"
+                                        >
+                                            <X size={12} />
+                                        </button>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
                 {showPrompt && (
                     <div className={styles.prompt} onPointerDown={(e) => e.stopPropagation()}>
                         <div className={styles.promptTitle}>Session name</div>
