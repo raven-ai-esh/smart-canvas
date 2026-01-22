@@ -1641,8 +1641,41 @@ interface NodeProps {
 
 export const Node: React.FC<NodeProps> = ({ data, stackAnimating = false, stackCollapsed = false }) => {
     const { canvas } = useStore();
+    const setCanvasViewCommand = useStore((state) => state.setCanvasViewCommand);
+    const setPreviousCanvasState = useStore((state) => state.setPreviousCanvasState);
+    const setFocusedDetailNodeId = useStore((state) => state.setFocusedDetailNodeId);
     const scale = canvas.scale;
     const [isHovered, setIsHovered] = useState(false);
+
+    // Double-click handler to zoom into detailed view
+    const handleDoubleClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+        // Check if the click target or its ancestors have data-interactive="true"
+        // If so, don't trigger zoom (let the interactive element handle it)
+        const target = e.target as HTMLElement;
+        if (target.closest('[data-interactive="true"]')) {
+            return;
+        }
+
+        e.stopPropagation();
+
+        // Capture current canvas state before zooming
+        const currentCanvasState = {
+            x: canvas.x,
+            y: canvas.y,
+            scale: canvas.scale,
+        };
+        setPreviousCanvasState(currentCanvasState);
+
+        // Set the focused node ID for tracking
+        setFocusedDetailNodeId(data.id);
+
+        // Dispatch focus_node command to zoom to this node
+        setCanvasViewCommand({
+            id: `focus-${data.id}-${Date.now()}`,
+            action: 'focus_node',
+            nodeId: data.id,
+        });
+    }, [canvas.x, canvas.y, canvas.scale, data.id, setCanvasViewCommand, setPreviousCanvasState, setFocusedDetailNodeId]);
 
     // Localized Semantic Zoom Logic
     // Only "Open" (NoteView) if:
@@ -1760,6 +1793,7 @@ export const Node: React.FC<NodeProps> = ({ data, stackAnimating = false, stackC
             data-stack-collapsed={stackCollapsed ? 'true' : undefined}
             onPointerEnter={() => setIsHovered(true)}
             onPointerLeave={() => setIsHovered(false)}
+            onDoubleClick={handleDoubleClick}
         >
             {/* Graph View */}
             <div

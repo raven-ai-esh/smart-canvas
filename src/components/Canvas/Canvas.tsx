@@ -335,6 +335,8 @@ export const Canvas: React.FC = () => {
     const selectedEdge = useStore((state) => state.selectedEdge);
     const selectedEdges = useStore((state) => state.selectedEdges);
     const stacks = useStore((state) => state.stacks);
+    const focusedDetailNodeId = useStore((state) => state.focusedDetailNodeId);
+    const previousCanvasState = useStore((state) => state.previousCanvasState);
     const uploadPointRef = useRef<{ x: number; y: number } | null>(null);
     const filePickerRef = useRef<HTMLInputElement | null>(null);
     const ganttResizeRef = useRef<{
@@ -476,6 +478,8 @@ export const Canvas: React.FC = () => {
     const deleteComment = useStore((state) => state.deleteComment);
     const toggleCommentsMode = useStore((state) => state.toggleCommentsMode);
     const setCanvasViewCommand = useStore((state) => state.setCanvasViewCommand);
+    const clearFocusedDetailNodeId = useStore((state) => state.clearFocusedDetailNodeId);
+    const clearPreviousCanvasState = useStore((state) => state.clearPreviousCanvasState);
 
     const layerById = useMemo(() => new Map(layers.map((layer) => [layer.id, layer])), [layers]);
 
@@ -1755,6 +1759,7 @@ export const Canvas: React.FC = () => {
             }
         }
         e.preventDefault();
+        clearFocusedDetailNodeId();
         const base = wheelPendingRef.current ?? canvasRef.current;
         if (e.ctrlKey || e.metaKey) {
             const zoomSensitivity = 0.001;
@@ -1782,7 +1787,7 @@ export const Canvas: React.FC = () => {
                 setCanvasTransform(next.x, next.y, next.scale);
             });
         }
-    }, [clampGanttTransform, setCanvasTransform]);
+    }, [clampGanttTransform, setCanvasTransform, clearFocusedDetailNodeId]);
 
     useEffect(() => {
         const container = containerRef.current;
@@ -3822,6 +3827,23 @@ export const Canvas: React.FC = () => {
             Math.pow(e.clientY - pointerDownPos.current.y, 2)
         );
         const isClick = dist < CLICK_THRESHOLD;
+
+        // Click-outside detection: restore previous zoom when clicking on empty canvas while in focused detail mode
+        if (isClick && focusedDetailNodeId && previousCanvasState) {
+            const target = e.target as HTMLElement;
+            const clickedOnObject =
+                target.closest('[data-node-id]') ||
+                target.closest('[data-textbox-id]') ||
+                target.closest('[data-interactive="true"]') ||
+                target.closest('[data-stack-id]');
+            if (!clickedOnObject) {
+                // Restore previous canvas state
+                setCanvasTransform(previousCanvasState.x, previousCanvasState.y, previousCanvasState.scale);
+                // Clear the focused detail state
+                clearFocusedDetailNodeId();
+                clearPreviousCanvasState();
+            }
+        }
 
         if (mode === 'draggingStack') {
             const drag = stackDragRef.current;
