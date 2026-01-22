@@ -9,6 +9,11 @@ import { DEFAULT_LAYER_ID, normalizeLayers, resolveLayerId } from '../utils/laye
 import { collectLayerStackEntries, sortLayerStackEntries, type StackKind } from '../utils/stacking';
 import { applyChildProgress } from '../utils/childProgress';
 
+type GeneralSettings = {
+    zoomSensitivity: number;
+    locale: 'en' | 'ru';
+};
+
 type UndoSnapshot = {
     nodes: NodeData[];
     edges: EdgeData[];
@@ -40,6 +45,16 @@ const progressFromStatus = (status?: NodeData['status'], legacyInWork?: boolean)
 const tombstoneFor = (now: number, updatedAt?: number) => Math.max(now, ts(updatedAt) + 1);
 const STACK_CARD_WIDTH = 240;
 const STACK_CARD_HEIGHT = 160;
+const normalizeZoomSensitivity = (value: unknown) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return 1;
+    return Math.min(Math.max(num, 0.25), 3);
+};
+const normalizeLocale = (value: unknown): GeneralSettings['locale'] => (value === 'ru' ? 'ru' : 'en');
+const normalizeGeneralSettings = (settings?: Partial<GeneralSettings>): GeneralSettings => ({
+    zoomSensitivity: normalizeZoomSensitivity(settings?.zoomSensitivity),
+    locale: normalizeLocale(settings?.locale),
+});
 
 const resolveAuthor = (state: AppState) => {
     const me = state.me;
@@ -248,6 +263,9 @@ interface AppState {
 
     snowEnabled: boolean;
     toggleSnow: () => void;
+
+    generalSettings: GeneralSettings;
+    setGeneralSettings: (settings: Partial<GeneralSettings>) => void;
 }
 
 type CanvasViewAction = 'focus_node' | 'zoom_to_cards' | 'zoom_to_graph' | 'zoom_to_fit' | 'pan';
@@ -2098,6 +2116,10 @@ export const useStore = create<AppState>()(
                 return { nodes, textBoxes, stacks };
             }),
 
+            generalSettings: normalizeGeneralSettings(),
+            setGeneralSettings: (settings) => set((state) => ({
+                generalSettings: normalizeGeneralSettings({ ...state.generalSettings, ...settings }),
+            })),
             theme: 'dark',
             toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
             snowEnabled: false,

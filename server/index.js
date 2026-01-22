@@ -487,6 +487,16 @@ async function initDb() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS general_settings (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      zoom_sensitivity NUMERIC NOT NULL DEFAULT 1,
+      locale TEXT NOT NULL DEFAULT 'en',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS assistant_threads (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1624,6 +1634,40 @@ async function listAlertingSettingsByUserIds(userIds) {
     map.set(row.user_id, normalizeAlertingSettings({ channels: row.channels, events: row.events }));
   }
   return map;
+}
+
+const normalizeGeneralSettings = (raw) => {
+  const zoomRaw = Number(raw?.zoomSensitivity ?? raw?.zoom_sensitivity);
+  const zoomSensitivity = Number.isFinite(zoomRaw) ? Math.min(Math.max(zoomRaw, 0.25), 3) : 1;
+  const localeRaw = typeof raw?.locale === 'string' ? raw.locale.toLowerCase() : '';
+  const locale = localeRaw === 'ru' ? 'ru' : 'en';
+  return { zoomSensitivity, locale };
+};
+
+async function getGeneralSettings(userId) {
+  const res = await pool.query(
+    'SELECT zoom_sensitivity, locale FROM general_settings WHERE user_id = $1',
+    [userId],
+  );
+  const row = res.rows[0];
+  if (!row) return normalizeGeneralSettings({});
+  return normalizeGeneralSettings(row);
+}
+
+async function upsertGeneralSettings({ userId, settings }) {
+  const normalized = normalizeGeneralSettings(settings);
+  const res = await pool.query(
+    `INSERT INTO general_settings (user_id, zoom_sensitivity, locale)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (user_id) DO UPDATE
+       SET zoom_sensitivity = EXCLUDED.zoom_sensitivity,
+           locale = EXCLUDED.locale,
+           updated_at = NOW()
+     RETURNING zoom_sensitivity, locale`,
+    [userId, normalized.zoomSensitivity, normalized.locale],
+  );
+  const row = res.rows[0];
+  return normalizeGeneralSettings(row ?? normalized);
 }
 
 async function getTelegramAlertLink(userId) {
@@ -4839,6 +4883,21 @@ app.patch('/api/auth/me', async (req, res) => {
   });
 });
 
+app.get('/api/settings/general', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const settings = await getGeneralSettings(auth.userId);
+  res.json({ settings });
+});
+
+app.put('/api/settings/general', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const normalized = normalizeGeneralSettings(req.body ?? {});
+  const settings = await upsertGeneralSettings({ userId: auth.userId, settings: normalized });
+  res.json({ settings });
+});
+
 app.get('/api/integrations/mcp/token', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
@@ -6810,6 +6869,7 @@ const ENTITY_COUNT_QUERIES = [
   { entity: 'session_share_tokens', sql: 'SELECT COUNT(*)::int AS count FROM session_share_tokens' },
   { entity: 'oauth_accounts', sql: 'SELECT COUNT(*)::int AS count FROM oauth_accounts' },
   { entity: 'alerting_settings', sql: 'SELECT COUNT(*)::int AS count FROM alerting_settings' },
+  { entity: 'general_settings', sql: 'SELECT COUNT(*)::int AS count FROM general_settings' },
   { entity: 'telegram_alert_links', sql: 'SELECT COUNT(*)::int AS count FROM telegram_alert_links' },
   { entity: 'openai_keys', sql: 'SELECT COUNT(*)::int AS count FROM openai_keys' },
   { entity: 'mcp_tokens', sql: 'SELECT COUNT(*)::int AS count FROM mcp_tokens' },

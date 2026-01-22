@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { Moon, Sun, Snowflake, User, MessageCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { animalNames, getGuestIdentity, hashString } from '../../utils/guestIdentity';
+import { useTranslation } from '../../i18n';
 
 const palette = ['#5E81AC', '#A3BE8C', '#B48EAD', '#D08770', '#88C0D0', '#EBCB8B', '#BF616A', '#8FBCBB'];
 const colorColumns = 10;
@@ -81,6 +82,10 @@ type AlertingMeta = {
   telegramBotLink: string | null;
   telegramPending: { token: string; requestedAt: string | null; expiresAt: string | null } | null;
 };
+type GeneralSettingsShape = {
+  zoomSensitivity: number;
+  locale: 'en' | 'ru';
+};
 
 const mcpExpiryOptions = [
   { value: '30', label: '30 days' },
@@ -101,6 +106,13 @@ const defaultAlertingSettings: AlertingSettings = {
     mention_added: false,
     agent_reply: false,
   },
+};
+
+const normalizeGeneralSettingsClient = (raw: any): GeneralSettingsShape => {
+  const zoom = Number(raw?.zoomSensitivity ?? raw?.zoom_sensitivity);
+  const zoomSensitivity = Number.isFinite(zoom) ? Math.min(Math.max(zoom, 0.25), 3) : 1;
+  const locale = raw?.locale === 'ru' ? 'ru' : 'en';
+  return { zoomSensitivity, locale };
 };
 
 function useIsCompactAuthModal() {
@@ -598,11 +610,14 @@ export const Presence: React.FC = () => {
   const snowEnabled = useStore((s) => s.snowEnabled);
   const authorshipMode = useStore((s) => s.authorshipMode);
   const commentsMode = useStore((s) => s.commentsMode);
+  const generalSettings = useStore((s) => s.generalSettings);
+  const setGeneralSettings = useStore((s) => s.setGeneralSettings);
   const toggleTheme = useStore((s) => s.toggleTheme);
   const toggleSnow = useStore((s) => s.toggleSnow);
   const toggleAuthorshipMode = useStore((s) => s.toggleAuthorshipMode);
   const toggleCommentsMode = useStore((s) => s.toggleCommentsMode);
   const isCompactAuth = useIsCompactAuthModal();
+  const { t } = useTranslation();
 
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<'signup' | 'login'>('signup');
@@ -652,6 +667,7 @@ export const Presence: React.FC = () => {
   const [ravenAiSkillsQuery, setRavenAiSkillsQuery] = useState('');
   const [ravenAiSkillsActiveId, setRavenAiSkillsActiveId] = useState<string | null>(null);
   const [ravenAiSkillOverlayVisible, setRavenAiSkillOverlayVisible] = useState(false);
+  const [generalOpen, setGeneralOpen] = useState(false);
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [integrationsBusy, setIntegrationsBusy] = useState(false);
   const [integrationsMessage, setIntegrationsMessage] = useState<string | null>(null);
@@ -674,8 +690,32 @@ export const Presence: React.FC = () => {
     agent_reply: false,
   });
   const [alertingWebhookUrl, setAlertingWebhookUrl] = useState('');
+  const [generalLoaded, setGeneralLoaded] = useState(false);
+  const [generalBusy, setGeneralBusy] = useState(false);
+  const [generalMessage, setGeneralMessage] = useState<string | null>(null);
+  const [generalNoticeVisible, setGeneralNoticeVisible] = useState(false);
+  const [generalZoomSensitivity, setGeneralZoomSensitivity] = useState(generalSettings.zoomSensitivity);
+  const [generalLocale, setGeneralLocale] = useState<GeneralSettingsShape['locale']>(generalSettings.locale);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const ravenAiSkillCloseTimeout = useRef<number | null>(null);
+
+  useEffect(() => {
+    setGeneralZoomSensitivity(generalSettings.zoomSensitivity);
+    setGeneralLocale(generalSettings.locale);
+  }, [generalSettings.zoomSensitivity, generalSettings.locale]);
+
+  const localeTag = generalLocale === 'ru' ? 'ru-RU' : 'en-US';
+  const generalText = {
+    modalTitle: t('general.modalTitle'),
+    zoomLabel: t('general.zoomLabel'),
+    zoomHint: t('general.zoomHint'),
+    localeLabel: t('general.localization'),
+    localeHint: t('general.localizationHint'),
+    save: t('general.save'),
+    cancel: t('general.cancel'),
+    close: t('general.close'),
+    saved: t('general.saved'),
+  };
 
   const selfId = presence.selfId;
   const peers = presence.peers;
@@ -875,6 +915,13 @@ export const Presence: React.FC = () => {
     closeRavenAi();
   };
 
+  const closeGeneral = () => {
+    setGeneralOpen(false);
+    setGeneralBusy(false);
+    setGeneralMessage(null);
+    setGeneralNoticeVisible(false);
+  };
+
   const closeIntegrations = () => {
     setIntegrationsOpen(false);
     setIntegrationsBusy(false);
@@ -899,7 +946,67 @@ export const Presence: React.FC = () => {
     if (!value) return 'Never';
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return '—';
-    return date.toLocaleString();
+    return date.toLocaleString(localeTag, { dateStyle: 'medium', timeStyle: 'short' });
+  };
+
+  const loadGeneralSettings = async ({ skipBusy = false }: { skipBusy?: boolean } = {}) => {
+    if (!me?.id) return;
+    if (!skipBusy) setGeneralBusy(true);
+    setGeneralMessage(null);
+    try {
+      const res = await fetch('/api/settings/general');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setGeneralMessage('Failed to load general settings');
+        setGeneralLoaded(true);
+        return;
+      }
+      const settings = normalizeGeneralSettingsClient(data?.settings ?? {});
+      setGeneralSettings(settings);
+      setGeneralZoomSensitivity(settings.zoomSensitivity);
+      setGeneralLocale(settings.locale);
+      setGeneralLoaded(true);
+    } catch {
+      setGeneralMessage('Failed to load general settings');
+      setGeneralLoaded(true);
+    } finally {
+      if (!skipBusy) setGeneralBusy(false);
+    }
+  };
+
+  const saveGeneralSettings = async () => {
+    if (!me?.id) return;
+    setGeneralBusy(true);
+    setGeneralMessage(null);
+    try {
+      const res = await fetch('/api/settings/general', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          zoomSensitivity: generalZoomSensitivity,
+          locale: generalLocale,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setGeneralMessage('Failed to save general settings');
+        return;
+      }
+      const settings = normalizeGeneralSettingsClient(data?.settings ?? {
+        zoomSensitivity: generalZoomSensitivity,
+        locale: generalLocale,
+      });
+      setGeneralSettings(settings);
+      setGeneralZoomSensitivity(settings.zoomSensitivity);
+      setGeneralLocale(settings.locale);
+      setGeneralMessage(null);
+      setGeneralNoticeVisible(true);
+      window.setTimeout(() => setGeneralNoticeVisible(false), 1400);
+    } catch {
+      setGeneralMessage('Failed to save general settings');
+    } finally {
+      setGeneralBusy(false);
+    }
   };
 
   const loadMcpToken = async () => {
@@ -1340,6 +1447,20 @@ export const Presence: React.FC = () => {
   }, [settingsOpen, me]);
 
   useEffect(() => {
+    if (!me?.id) {
+      setGeneralLoaded(false);
+      setGeneralMessage(null);
+      setGeneralBusy(false);
+      const defaults = normalizeGeneralSettingsClient({});
+      setGeneralSettings(defaults);
+      setGeneralZoomSensitivity(defaults.zoomSensitivity);
+      setGeneralLocale(defaults.locale);
+      return;
+    }
+    void loadGeneralSettings({ skipBusy: true });
+  }, [me?.id, setGeneralSettings]);
+
+  useEffect(() => {
     if (settingsOpen && !me) {
       // If the session becomes unauthenticated, close the settings modal.
       closeSettings();
@@ -1347,12 +1468,12 @@ export const Presence: React.FC = () => {
   }, [settingsOpen, me]);
 
   useEffect(() => {
-    const modalOpen = settingsOpen || integrationsOpen || ravenAiOpen || ravenAiSkillsOpen || (open && !me);
+    const modalOpen = settingsOpen || integrationsOpen || ravenAiOpen || ravenAiSkillsOpen || generalOpen || (open && !me);
     document.body.classList.toggle('modal-open', modalOpen);
     return () => {
       document.body.classList.remove('modal-open');
     };
-  }, [integrationsOpen, me, open, ravenAiOpen, ravenAiSkillsOpen, settingsOpen]);
+  }, [generalOpen, integrationsOpen, me, open, ravenAiOpen, ravenAiSkillsOpen, settingsOpen]);
 
   useEffect(() => {
     if (!integrationsOpen) return;
@@ -1390,6 +1511,18 @@ export const Presence: React.FC = () => {
       closeRavenAi();
     }
   }, [ravenAiOpen, me]);
+
+  useEffect(() => {
+    if (!generalOpen) return;
+    setGeneralMessage(null);
+    setGeneralNoticeVisible(false);
+    if (!generalLoaded) {
+      void loadGeneralSettings();
+      return;
+    }
+    setGeneralZoomSensitivity(generalSettings.zoomSensitivity);
+    setGeneralLocale(generalSettings.locale);
+  }, [generalOpen, generalLoaded, generalSettings.locale, generalSettings.zoomSensitivity]);
 
   useEffect(() => {
     if (ravenAiSkillsOpen && !me) {
@@ -1885,7 +2018,26 @@ export const Presence: React.FC = () => {
                 textAlign: 'left',
               }}
             >
-              Account settings
+              {t('menu.accountSettings')}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setGeneralOpen(true);
+                setGeneralMessage(null);
+                setGeneralNoticeVisible(false);
+              }}
+              style={{
+                borderRadius: 10,
+                border: '1px solid var(--border-strong)',
+                background: 'transparent',
+                color: 'var(--text-primary)',
+                padding: '8px 10px',
+                cursor: 'pointer',
+                textAlign: 'left',
+              }}
+            >
+              {t('menu.general')}
             </button>
             <button
               type="button"
@@ -1900,7 +2052,7 @@ export const Presence: React.FC = () => {
                 textAlign: 'left',
               }}
             >
-              Integrations
+              {t('menu.integrations')}
             </button>
             <button
               type="button"
@@ -1915,7 +2067,7 @@ export const Presence: React.FC = () => {
                 textAlign: 'left',
               }}
             >
-              Raven AI
+              {t('menu.ravenAi')}
             </button>
             <div style={{ height: 1, background: 'var(--border-strong)', opacity: 0.45 }} />
             <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -2006,14 +2158,14 @@ export const Presence: React.FC = () => {
                   color: 'var(--text-primary)',
                   padding: '8px 10px',
                   cursor: busy ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Logout
-              </button>
-              <button
-                type="button"
-                onClick={close}
-                style={{
+              }}
+            >
+              {t('menu.logout')}
+            </button>
+            <button
+              type="button"
+              onClick={close}
+              style={{
                   borderRadius: 10,
                   border: '1px solid var(--border-strong)',
                   background: 'transparent',
@@ -2021,9 +2173,184 @@ export const Presence: React.FC = () => {
                   padding: '8px 10px',
                   cursor: 'pointer',
                 }}
-              >
-                Close
-              </button>
+            >
+              {t('menu.close')}
+            </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* General settings modal */}
+      {generalOpen && me && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 12000,
+            background: 'rgba(0,0,0,0.45)',
+            display: 'grid',
+            placeItems: isCompactAuth ? 'end center' : 'center',
+            padding:
+              'calc(12px + env(safe-area-inset-top, 0px)) calc(12px + env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px))',
+          }}
+          onPointerDown={closeGeneral}
+        >
+          <div style={{ position: 'relative' }}>
+            <div
+              style={{
+                position: 'absolute',
+                top: -26,
+                left: '50%',
+                transform: `translate(-50%, ${generalNoticeVisible ? '0' : '-12px'})`,
+                opacity: generalNoticeVisible ? 0.92 : 0,
+                transition: 'opacity 180ms ease, transform 180ms ease',
+                padding: '8px 12px',
+                borderRadius: 999,
+                border: '1px solid var(--border-strong)',
+                background: 'var(--bg-node)',
+                color: 'var(--text-primary)',
+                fontSize: 12,
+                boxShadow: '0 10px 24px rgba(0,0,0,0.35)',
+                pointerEvents: 'none',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {generalText.saved}
+            </div>
+            <div
+              style={{
+                width: isCompactAuth ? 'min(520px, 100%)' : 'min(460px, 92vw)',
+                borderRadius: isCompactAuth ? '16px 16px 14px 14px' : 16,
+                background: 'var(--bg-node)',
+                border: '1px solid var(--border-strong)',
+                boxShadow: '0 20px 70px rgba(0,0,0,0.55)',
+                padding: 16,
+                boxSizing: 'border-box',
+                maxHeight: isCompactAuth ? 'calc(var(--visual-height, 100vh) - env(safe-area-inset-top, 0px) - 12px)' : undefined,
+                overflowY: isCompactAuth ? 'auto' : undefined,
+                paddingBottom: isCompactAuth ? 'calc(16px + env(safe-area-inset-bottom, 0px))' : 16,
+                WebkitOverflowScrolling: isCompactAuth ? 'touch' : undefined,
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>{generalText.modalTitle}</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={closeGeneral}
+                    style={{
+                      borderRadius: 10,
+                      border: '1px solid var(--border-strong)',
+                      background: 'transparent',
+                      color: 'var(--text-primary)',
+                      padding: '6px 10px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {generalText.close}
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
+                <div style={{ display: 'grid', gap: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                    <div style={{ display: 'grid', gap: 4 }}>
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{generalText.zoomLabel}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>{generalText.zoomHint}</div>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', minWidth: 64, textAlign: 'right' }}>
+                      ×{generalZoomSensitivity.toFixed(2)}
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.25}
+                    max={3}
+                    step={0.05}
+                    value={generalZoomSensitivity}
+                    onChange={(e) => setGeneralZoomSensitivity(Number(e.target.value))}
+                    disabled={!generalLoaded || generalBusy}
+                  />
+                </div>
+
+                <div style={{ display: 'grid', gap: 8 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{generalText.localeLabel}</div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {(['en', 'ru'] as const).map((code) => {
+                      const active = generalLocale === code;
+                      const label = code === 'ru' ? 'Русский' : 'English';
+                      return (
+                        <button
+                          key={code}
+                          type="button"
+                          onClick={() => setGeneralLocale(code)}
+                          disabled={!generalLoaded || generalBusy}
+                          style={{
+                            borderRadius: 10,
+                            border: '1px solid var(--border-strong)',
+                            background: active ? 'var(--accent-glow)' : 'transparent',
+                            color: 'var(--text-primary)',
+                            padding: '8px 12px',
+                            cursor: generalLoaded && !generalBusy ? 'pointer' : 'not-allowed',
+                            opacity: generalLoaded ? 1 : 0.7,
+                          }}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                    {generalText.localeHint}
+                  </div>
+                </div>
+
+                {generalMessage && (
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{generalMessage}</div>
+                )}
+
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <button
+                    type="button"
+                    onClick={saveGeneralSettings}
+                    disabled={generalBusy || !generalLoaded}
+                    style={{
+                      flex: 1,
+                      borderRadius: 10,
+                      border: '1px solid var(--border-strong)',
+                      background: 'var(--accent-primary)',
+                      color: '#fff',
+                      padding: '10px 12px',
+                      cursor: generalBusy || !generalLoaded ? 'not-allowed' : 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 8,
+                    }}
+                  >
+                    <span>{generalText.save}</span>
+                    {generalBusy && <LoadingSpinner />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeGeneral}
+                    disabled={generalBusy}
+                    style={{
+                      borderRadius: 10,
+                      border: '1px solid var(--border-strong)',
+                      background: 'transparent',
+                      color: 'var(--text-primary)',
+                      padding: '10px 12px',
+                      cursor: generalBusy ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {generalText.cancel}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -2085,7 +2412,7 @@ export const Presence: React.FC = () => {
               onPointerDown={(e) => e.stopPropagation()}
             >
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>Account settings</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>{t('account.modalTitle')}</div>
                 <button
                   type="button"
                   onClick={closeSettings}
@@ -2098,7 +2425,7 @@ export const Presence: React.FC = () => {
                     cursor: 'pointer',
                   }}
                 >
-                  Close
+                  {t('account.close')}
                 </button>
               </div>
 
@@ -2114,7 +2441,7 @@ export const Presence: React.FC = () => {
                   size={64}
                 />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
-                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Profile photo</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('account.profilePhoto')}</div>
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <button
                       type="button"
@@ -2128,7 +2455,7 @@ export const Presence: React.FC = () => {
                         cursor: 'pointer',
                       }}
                     >
-                      {settingsAvatarPreview ? 'Change' : 'Upload'}
+                      {settingsAvatarPreview ? t('account.change') : t('account.upload')}
                     </button>
                     <button
                       type="button"
@@ -2147,7 +2474,7 @@ export const Presence: React.FC = () => {
                         opacity: settingsAvatarPreview ? 1 : 0.6,
                       }}
                     >
-                      Remove
+                      {t('account.remove')}
                     </button>
                     <input
                       ref={avatarInputRef}

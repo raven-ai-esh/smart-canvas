@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Copy, Plus, Save, Share2, Trash2, X } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import styles from './SessionBar.module.css';
+import { useTranslation } from '../../i18n';
 
 type SessionListItem = {
     id: string;
@@ -29,6 +30,9 @@ export const SessionBar: React.FC = () => {
     const setSessionMeta = useStore((s) => s.setSessionMeta);
     const setSessionSavers = useStore((s) => s.setSessionSavers);
     const me = useStore((s) => s.me);
+    const locale = useStore((s) => s.generalSettings.locale);
+    const localeTag = locale === 'ru' ? 'ru-RU' : 'en-US';
+    const { t } = useTranslation();
 
     const [showPrompt, setShowPrompt] = useState(false);
     const [nameInput, setNameInput] = useState('');
@@ -594,17 +598,17 @@ export const SessionBar: React.FC = () => {
         (tab: SessionTab) => {
             if (tab.id === sessionId) return displaySessionName;
             if (tab.name && tab.name.trim()) return tab.name;
-            return 'Untitled session';
+            return t('session.untitled', 'Untitled session');
         },
-        [displaySessionName, sessionId],
+        [displaySessionName, sessionId, t],
     );
 
     const formatUpdatedAt = useCallback((value: string | null) => {
-        if (!value) return 'No activity';
+        if (!value) return t('session.noActivity', 'No activity');
         const date = new Date(value);
-        if (!Number.isFinite(date.getTime())) return 'No activity';
-        return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-    }, []);
+        if (!Number.isFinite(date.getTime())) return t('session.noActivity', 'No activity');
+        return date.toLocaleString(localeTag, { dateStyle: 'medium', timeStyle: 'short' });
+    }, [localeTag, t]);
 
     const handleCreateNewSession = useCallback(async () => {
         if (sessionActionBusy) return;
