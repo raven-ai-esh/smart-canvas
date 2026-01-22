@@ -1759,6 +1759,7 @@ export const Canvas: React.FC = () => {
             }
         }
         e.preventDefault();
+        clearFocusedDetailNodeId();
         const base = wheelPendingRef.current ?? canvasRef.current;
         if (e.ctrlKey || e.metaKey) {
             const zoomSensitivity = 0.001;
@@ -1786,7 +1787,7 @@ export const Canvas: React.FC = () => {
                 setCanvasTransform(next.x, next.y, next.scale);
             });
         }
-    }, [clampGanttTransform, setCanvasTransform]);
+    }, [clampGanttTransform, setCanvasTransform, clearFocusedDetailNodeId]);
 
     useEffect(() => {
         const container = containerRef.current;
