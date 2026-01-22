@@ -8,21 +8,28 @@ import { useEffect } from 'react';
 import { useSessionSync } from './hooks/useSessionSync';
 import { useAuth } from './hooks/useAuth';
 import { useStore } from './store/useStore';
+import { useTranslation } from './i18n';
 
 function App() {
   useSessionSync();
   useAuth();
   const sessionName = useStore((state) => state.sessionName);
   const sessionSaved = useStore((state) => state.sessionSaved);
+  const locale = useStore((state) => state.generalSettings.locale);
+  const { t } = useTranslation();
 
   useEffect(() => {
-    const baseTitle = 'Smart Tracker';
+    const baseTitle = t('app.title', 'Smart Tracker');
     if (sessionSaved && sessionName) {
       document.title = `${sessionName} — ${baseTitle}`;
     } else {
       document.title = baseTitle;
     }
-  }, [sessionName, sessionSaved]);
+  }, [sessionName, sessionSaved, t]);
+
+  useEffect(() => {
+    document.documentElement.lang = locale === 'ru' ? 'ru' : 'en';
+  }, [locale]);
 
   return (
     <div style={{ position: 'fixed', inset: 0 }}>

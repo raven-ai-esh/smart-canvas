@@ -337,6 +337,7 @@ export const Canvas: React.FC = () => {
     const selectedEdge = useStore((state) => state.selectedEdge);
     const selectedEdges = useStore((state) => state.selectedEdges);
     const stacks = useStore((state) => state.stacks);
+    const generalSettings = useStore((state) => state.generalSettings);
     const focusedDetailNodeId = useStore((state) => state.focusedDetailNodeId);
     const previousCanvasState = useStore((state) => state.previousCanvasState);
     const uploadPointRef = useRef<{ x: number; y: number } | null>(null);
@@ -1806,7 +1807,7 @@ export const Canvas: React.FC = () => {
         clearFocusedDetailNodeId();
         const base = wheelPendingRef.current ?? canvasRef.current;
         if (e.ctrlKey || e.metaKey) {
-            const zoomSensitivity = 0.001;
+            const zoomSensitivity = 0.001 * (generalSettings.zoomSensitivity || 1);
             const delta = -e.deltaY * zoomSensitivity;
             const newScale = Math.min(Math.max(base.scale * (1 + delta), MIN_SCALE), MAX_SCALE);
 
@@ -1831,7 +1832,7 @@ export const Canvas: React.FC = () => {
                 setCanvasTransform(next.x, next.y, next.scale);
             });
         }
-    }, [clampGanttTransform, setCanvasTransform, clearFocusedDetailNodeId]);
+    }, [clampGanttTransform, setCanvasTransform, clearFocusedDetailNodeId, generalSettings.zoomSensitivity]);
 
     useEffect(() => {
         const container = containerRef.current;

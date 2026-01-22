@@ -1,0 +1,158 @@
+import { useCallback } from 'react';
+import { useStore } from './store/useStore';
+
+type Locale = 'en' | 'ru';
+
+const translations: Record<Locale, Record<string, string>> = {
+    en: {
+        'app.title': 'Smart Tracker',
+        'menu.accountSettings': 'Account settings',
+        'menu.integrations': 'Integrations',
+        'menu.general': 'General',
+        'menu.ravenAi': 'Raven AI',
+        'menu.logout': 'Logout',
+        'menu.close': 'Close',
+        'menu.theme.light': 'Switch to Light Mode',
+        'menu.theme.dark': 'Switch to Dark Mode',
+        'menu.snow.enable': 'Enable Snow',
+        'menu.snow.disable': 'Disable Snow',
+        'menu.comments.enable': 'Enable Comments',
+        'menu.comments.disable': 'Disable Comments',
+        'menu.authorship.enable': 'Enable Authorship Mode',
+        'menu.authorship.disable': 'Disable Authorship Mode',
+
+        'auth.signup': 'Sign up',
+        'auth.login': 'Log in',
+        'auth.name': 'Name',
+        'auth.email': 'Email',
+        'auth.password': 'Password',
+        'auth.or': 'or',
+        'auth.continueWith': 'Continue with',
+        'auth.submit': 'Continue',
+        'auth.haveAccount': 'Already have an account?',
+        'auth.noAccount': "Don't have an account?",
+
+        'account.modalTitle': 'Account settings',
+        'account.close': 'Close',
+        'account.profilePhoto': 'Profile photo',
+        'account.upload': 'Upload',
+        'account.change': 'Change',
+        'account.remove': 'Remove',
+        'account.avatarStyle': 'Avatar style (used when no photo)',
+        'account.animal': 'Animal',
+        'account.color': 'Color',
+        'account.name': 'Name',
+        'account.email': 'Email',
+        'account.passwordNew': 'New password',
+        'account.passwordConfirm': 'Confirm password',
+        'account.passwordHint': 'Leave the password empty if you do not want to change it.',
+        'account.save': 'Save changes',
+        'account.cancel': 'Cancel',
+
+        'general.modalTitle': 'General',
+        'general.zoomLabel': 'Zoom sensitivity',
+        'general.zoomHint': 'Adjust scroll/trackpad zoom speed.',
+        'general.localization': 'Localization',
+        'general.localizationHint': 'Used for dates, language hints, and accessibility.',
+        'general.save': 'Save',
+        'general.cancel': 'Cancel',
+        'general.close': 'Close',
+        'general.saved': 'Settings saved',
+        'general.language.en': 'English',
+        'general.language.ru': 'Русский',
+
+        'integrations.tab.mcp': 'MCP',
+        'integrations.tab.alerting': 'Alerting',
+        'integrations.title': 'Integrations',
+        'integrations.close': 'Close',
+
+        'ravenAi.title': 'Raven AI',
+        'ravenAi.close': 'Close',
+
+        'session.untitled': 'Untitled session',
+        'session.noActivity': 'No activity',
+        'session.deleteConfirm': 'Delete session',
+        'session.defaultName': 'Session',
+    },
+    ru: {
+        'app.title': 'Smart Tracker',
+        'menu.accountSettings': 'Настройки аккаунта',
+        'menu.integrations': 'Интеграции',
+        'menu.general': 'Общие',
+        'menu.ravenAi': 'Raven AI',
+        'menu.logout': 'Выйти',
+        'menu.close': 'Закрыть',
+        'menu.theme.light': 'Переключить на светлую тему',
+        'menu.theme.dark': 'Переключить на тёмную тему',
+        'menu.snow.enable': 'Включить снег',
+        'menu.snow.disable': 'Выключить снег',
+        'menu.comments.enable': 'Включить комментарии',
+        'menu.comments.disable': 'Выключить комментарии',
+        'menu.authorship.enable': 'Включить режим авторства',
+        'menu.authorship.disable': 'Выключить режим авторства',
+
+        'auth.signup': 'Регистрация',
+        'auth.login': 'Войти',
+        'auth.name': 'Имя',
+        'auth.email': 'Email',
+        'auth.password': 'Пароль',
+        'auth.or': 'или',
+        'auth.continueWith': 'Продолжить через',
+        'auth.submit': 'Продолжить',
+        'auth.haveAccount': 'Уже есть аккаунт?',
+        'auth.noAccount': 'Нет аккаунта?',
+
+        'account.modalTitle': 'Настройки аккаунта',
+        'account.close': 'Закрыть',
+        'account.profilePhoto': 'Фото профиля',
+        'account.upload': 'Загрузить',
+        'account.change': 'Изменить',
+        'account.remove': 'Удалить',
+        'account.avatarStyle': 'Стиль аватара (если нет фото)',
+        'account.animal': 'Животное',
+        'account.color': 'Цвет',
+        'account.name': 'Имя',
+        'account.email': 'Email',
+        'account.passwordNew': 'Новый пароль',
+        'account.passwordConfirm': 'Подтвердите пароль',
+        'account.passwordHint': 'Оставьте поле пустым, если не хотите менять пароль.',
+        'account.save': 'Сохранить изменения',
+        'account.cancel': 'Отмена',
+
+        'general.modalTitle': 'Общие',
+        'general.zoomLabel': 'Чувствительность зума',
+        'general.zoomHint': 'Настройте скорость зума колесом/трекпадом.',
+        'general.localization': 'Локализация',
+        'general.localizationHint': 'Используется для дат, языка и доступности.',
+        'general.save': 'Сохранить',
+        'general.cancel': 'Отмена',
+        'general.close': 'Закрыть',
+        'general.saved': 'Настройки сохранены',
+        'general.language.en': 'English',
+        'general.language.ru': 'Русский',
+
+        'integrations.tab.mcp': 'MCP',
+        'integrations.tab.alerting': 'Оповещения',
+        'integrations.title': 'Интеграции',
+        'integrations.close': 'Закрыть',
+
+        'ravenAi.title': 'Raven AI',
+        'ravenAi.close': 'Закрыть',
+
+        'session.untitled': 'Безымянная сессия',
+        'session.noActivity': 'Нет активности',
+        'session.deleteConfirm': 'Удалить сессию',
+        'session.defaultName': 'Сессия',
+    },
+};
+
+export const useTranslation = () => {
+    const locale = useStore((s) => s.generalSettings.locale) as Locale;
+
+    const t = useCallback((key: string, fallback?: string) => {
+        const table = translations[locale] ?? translations.en;
+        return table[key] ?? translations.en[key] ?? fallback ?? key;
+    }, [locale]);
+
+    return { t, locale };
+};
