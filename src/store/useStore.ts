@@ -118,6 +118,7 @@ interface AppState {
     deleteLayers: (layerIds: string[]) => void;
     canvas: CanvasState;
     effectiveEnergy: Record<string, number>;
+    nodeRectVersion: Record<string, number>;
     tombstones: Tombstones;
     sessionId: string | null;
     sessionName: string | null;
@@ -215,6 +216,7 @@ interface AppState {
     updateEdge: (id: string, data: Partial<EdgeData>) => void;
     deleteEdge: (id: string) => void;
     setCanvasTransform: (x: number, y: number, scale: number) => void;
+    bumpNodeRectVersion: (id: string) => void;
 
     physicsEnabled: boolean;
     togglePhysicsMode: () => void;
@@ -582,6 +584,7 @@ export const useStore = create<AppState>()(
             activeLayerId: initialActiveLayerId,
             canvas: { x: 0, y: 0, scale: 1 },
             effectiveEnergy: {},
+            nodeRectVersion: {},
             tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {}, stacks: {} },
             setActiveLayerId: (id) => set((state) => {
                 const resolved = resolveLayerId(state.layers, id);
@@ -731,6 +734,10 @@ export const useStore = create<AppState>()(
                 const textBoxes = state.textBoxes.filter((tb) => !removeTextBoxSet.has(tb.id));
                 const drawings = state.drawings.filter((drawing) => !removeDrawingSet.has(drawing.id));
                 const comments = state.comments.filter((comment) => !removeCommentSet.has(comment.id));
+                const nodeRectVersion = { ...state.nodeRectVersion };
+                removeNodeSet.forEach((nodeId) => {
+                    delete nodeRectVersion[nodeId];
+                });
                 const layers = remaining;
                 const pruneResult = pruneStacks(state.stacks, nodes, textBoxes);
                 const tombstones: Tombstones = {
@@ -768,6 +775,7 @@ export const useStore = create<AppState>()(
                     textBoxes,
                     comments,
                     stacks: pruneResult.stacks,
+                    nodeRectVersion,
                     layers,
                     tombstones,
                     effectiveEnergy,
@@ -1140,6 +1148,8 @@ export const useStore = create<AppState>()(
                 for (const e of removedEdges) {
                     tombstones.edges[e.id] = tombstoneFor(now, e.updatedAt);
                 }
+                const nodeRectVersion = { ...state.nodeRectVersion };
+                delete nodeRectVersion[id];
                 debugLog({ type: 'delete_call', t: performance.now(), kind: 'node', id, now, updatedAt: node?.updatedAt, tombstone: tombstoneNode });
                 const childProgressResult = applyChildProgress(nodes, edges);
                 const effectiveEnergy = effectiveForMode(childProgressResult.nodes, edges, state.monitoringMode);
@@ -1150,6 +1160,7 @@ export const useStore = create<AppState>()(
                     stacks: pruneResult.stacks,
                     tombstones,
                     effectiveEnergy,
+                    nodeRectVersion,
                 };
             }),
 
@@ -1238,6 +1249,12 @@ export const useStore = create<AppState>()(
             setCanvasTransform: (x, y, scale) => set((state) => ({
                 canvas: { ...state.canvas, x, y, scale },
             })),
+
+            bumpNodeRectVersion: (id) => set((state) => {
+                if (!id) return {};
+                const next = (state.nodeRectVersion[id] ?? 0) + 1;
+                return { nodeRectVersion: { ...state.nodeRectVersion, [id]: next } };
+            }),
 
 
 
@@ -1466,6 +1483,11 @@ export const useStore = create<AppState>()(
                     tombstones.textBoxes[tbId] = tombstoneFor(now, tb?.updatedAt);
                 }
 
+                const nodeRectVersion = { ...state.nodeRectVersion };
+                removeNodeSet.forEach((nodeId) => {
+                    delete nodeRectVersion[nodeId];
+                });
+
                 const normalizedEnergy = normalizeEnergies(nodes, edges);
                 const effectiveEnergy = effectiveForMode(normalizedEnergy.nodes, edges, state.monitoringMode, normalizedEnergy.effectiveEnergy);
 
@@ -1477,6 +1499,7 @@ export const useStore = create<AppState>()(
                     stacks: pruneResult.stacks,
                     tombstones,
                     effectiveEnergy,
+                    nodeRectVersion,
                     selectedNode: null,
                     selectedNodes: [],
                     selectedEdge: null,
