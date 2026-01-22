@@ -307,6 +307,8 @@ export const Canvas: React.FC = () => {
     // Optimize Subscriptions
     const canvas = useStore((state) => state.canvas);
     const canvasViewCommand = useStore((state) => state.canvasViewCommand);
+    const setPreviousCanvasState = useStore((state) => state.setPreviousCanvasState);
+    const setFocusedDetailNodeId = useStore((state) => state.setFocusedDetailNodeId);
     const nodes = useStore((state) => state.nodes);
     const edges = useStore((state) => state.edges);
     const layers = useStore((state) => state.layers);
@@ -1083,6 +1085,38 @@ export const Canvas: React.FC = () => {
     }, []);
 
     const clampScale = useCallback((scale: number) => Math.min(Math.max(scale, MIN_SCALE), MAX_SCALE), []);
+    const transformAnimRef = useRef<number | null>(null);
+
+    const cancelTransformAnimation = useCallback(() => {
+        if (transformAnimRef.current) {
+            cancelAnimationFrame(transformAnimRef.current);
+            transformAnimRef.current = null;
+        }
+    }, []);
+
+    const animateCanvasTransform = useCallback((targetX: number, targetY: number, targetScale: number, duration = 280) => {
+        cancelTransformAnimation();
+        const start = performance.now();
+        const from = canvasRef.current;
+
+        const step = () => {
+            const elapsed = performance.now() - start;
+            const t = Math.min(1, elapsed / duration);
+            // Ease-out cubic for a smooth settle.
+            const eased = 1 - Math.pow(1 - t, 3);
+            const nextX = from.x + (targetX - from.x) * eased;
+            const nextY = from.y + (targetY - from.y) * eased;
+            const nextScale = from.scale + (targetScale - from.scale) * eased;
+            setCanvasTransform(nextX, nextY, nextScale);
+            if (t < 1) {
+                transformAnimRef.current = requestAnimationFrame(step);
+            } else {
+                transformAnimRef.current = null;
+            }
+        };
+
+        transformAnimRef.current = requestAnimationFrame(step);
+    }, [cancelTransformAnimation, setCanvasTransform]);
 
     const centerOnWorldPoint = useCallback((worldX: number, worldY: number, targetScale: number) => {
         const { centerX, centerY } = getViewportMetrics();
@@ -1091,6 +1125,16 @@ export const Canvas: React.FC = () => {
         const nextY = centerY - worldY * nextScale;
         setCanvasTransform(nextX, nextY, nextScale);
     }, [clampScale, getViewportMetrics, setCanvasTransform]);
+
+    const animateCenterOnWorldPoint = useCallback((worldX: number, worldY: number, targetScale: number, duration = 280) => {
+        const { centerX, centerY } = getViewportMetrics();
+        const nextScale = clampScale(targetScale);
+        const nextX = centerX - worldX * nextScale;
+        const nextY = centerY - worldY * nextScale;
+        animateCanvasTransform(nextX, nextY, nextScale, duration);
+    }, [animateCanvasTransform, clampScale, getViewportMetrics]);
+
+    useEffect(() => cancelTransformAnimation, [cancelTransformAnimation]);
 
     const applyZoomPreset = useCallback((targetScale: number) => {
         const { centerX, centerY } = getViewportMetrics();
@@ -1210,11 +1254,11 @@ export const Canvas: React.FC = () => {
             if (id) {
                 const st = useStore.getState();
                 const node = st.nodes.find((candidate) => candidate.id === id);
-                if (node) centerOnWorldPoint(node.x, node.y, ZOOM_DETAIL);
+                if (node) animateCenterOnWorldPoint(node.x, node.y, ZOOM_DETAIL, 320);
             }
             setCanvasViewCommand(null);
         }
-    }, [applyZoomPreset, applyZoomToFit, canvasViewCommand, centerOnWorldPoint, setCanvasViewCommand]);
+    }, [animateCenterOnWorldPoint, applyZoomPreset, applyZoomToFit, canvasViewCommand, centerOnWorldPoint, setCanvasViewCommand]);
 
     const resolveCommentAnchor = useCallback((target: CommentDraft | Comment) => {
         if (target.targetKind === 'canvas') {
@@ -2879,6 +2923,7 @@ export const Canvas: React.FC = () => {
     };
 
     const handlePointerDown = (e: React.PointerEvent) => {
+        cancelTransformAnimation();
 	        // Palm rejection: ignore touch pointers while a pencil stroke is active.
 	        if (penStrokeActiveRef.current && e.pointerType === 'touch') {
 	            e.preventDefault();
@@ -2921,11 +2966,21 @@ export const Canvas: React.FC = () => {
             return; // Let button handle its own events
         }
 
-	        // Allow node sub-controls/editors to handle their own pointer events
-		        const isInteractive = target.closest('[data-interactive="true"]');
-		        if (isInteractive) {
-		            return;
-		        }
+        // If we are in focused detail view and the user taps/clicks outside that node, restore the previous zoom immediately.
+        if (focusedDetailNodeId && previousCanvasState) {
+            const insideFocusedNode = target.closest(`[data-node-id="${focusedDetailNodeId}"]`);
+            if (!insideFocusedNode) {
+                animateCanvasTransform(previousCanvasState.x, previousCanvasState.y, previousCanvasState.scale, 280);
+                clearFocusedDetailNodeId();
+                clearPreviousCanvasState();
+            }
+        }
+
+        // Allow node sub-controls/editors to handle their own pointer events
+        const isInteractive = target.closest('[data-interactive="true"]');
+        if (isInteractive) {
+            return;
+        }
 
 	        // Ignore secondary touch pointers here; pinch is handled via native touch events.
 	        if (e.pointerType === 'touch' && e.isPrimary === false) {
@@ -2939,10 +2994,6 @@ export const Canvas: React.FC = () => {
 	            penStrokeActiveRef.current = true;
 	        }
 
-	        // Prevent default browser behavior (text selection, etc.) unless interacting with input
-	        if (!isInput) {
-	            e.preventDefault();
-	        }
         // Ensure keyboard shortcuts (delete/undo etc.) aren't "eaten" by a previously-focused input.
         if (!isInput) {
             try {
@@ -3838,7 +3889,7 @@ export const Canvas: React.FC = () => {
                 target.closest('[data-stack-id]');
             if (!clickedOnObject) {
                 // Restore previous canvas state
-                setCanvasTransform(previousCanvasState.x, previousCanvasState.y, previousCanvasState.scale);
+                animateCanvasTransform(previousCanvasState.x, previousCanvasState.y, previousCanvasState.scale, 280);
                 // Clear the focused detail state
                 clearFocusedDetailNodeId();
                 clearPreviousCanvasState();
@@ -4007,14 +4058,35 @@ export const Canvas: React.FC = () => {
 
     const handleDoubleClick = (e: React.MouseEvent) => {
         if (penMode || textMode || ganttMode) return;
-        // Only create if clicking on empty canvas
+
         const target = e.target as HTMLElement;
-        // Prevent node creation when double-clicking on existing objects or interactive UI.
-        if (
-            target.closest('[data-node-id]')
-            || target.closest('[data-textbox-id]')
-            || target.closest('[data-interactive="true"]')
-        ) return;
+        const hit = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+        const findMatch = (el: HTMLElement | null, selector: string) => el?.closest?.(selector) ?? null;
+
+        // Respect interactive UI anywhere in the hit path.
+        const interactiveHit = findMatch(target, '[data-interactive=\"true\"],button') || findMatch(hit, '[data-interactive=\"true\"],button');
+        if (interactiveHit) return;
+
+        // If a node was double-clicked, open detail view instead of creating a new node.
+        const nodeHit = findMatch(target, '[data-node-id]') || findMatch(hit, '[data-node-id]');
+        if (nodeHit) {
+            const nodeId = nodeHit.getAttribute('data-node-id');
+            if (nodeId) {
+                const current = canvasRef.current;
+                setPreviousCanvasState({ x: current.x, y: current.y, scale: current.scale });
+                setFocusedDetailNodeId(nodeId);
+                setCanvasViewCommand({
+                    id: `focus-${nodeId}-${Date.now()}`,
+                    action: 'focus_node',
+                    nodeId,
+                });
+            }
+            return;
+        }
+
+        // Skip creation on text boxes or other objects.
+        const textBoxHit = findMatch(target, '[data-textbox-id]') || findMatch(hit, '[data-textbox-id]');
+        if (textBoxHit) return;
 
         const worldPos = screenToWorld(e.clientX, e.clientY);
         addNode({
