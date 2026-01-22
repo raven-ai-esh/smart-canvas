@@ -193,6 +193,8 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
     const pushHistory = useStore((state) => state.pushHistory);
     const monitoringMode = useStore((state) => state.monitoringMode);
     const authorshipMode = useStore((state) => state.authorshipMode);
+    const sourceRectVersion = useStore((state) => state.nodeRectVersion[sourceId] ?? 0);
+    const targetRectVersion = useStore((state) => state.nodeRectVersion[targetId] ?? 0);
     const [isHovered, setIsHovered] = React.useState(false);
     const dragStateRef = React.useRef<{
         kind: 'control' | 'source' | 'target';
@@ -428,6 +430,8 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
         curveOffset.x,
         curveOffset.y,
         controlPoints,
+        sourceRectVersion,
+        targetRectVersion,
     ]);
 
     if (!geom) return null;

@@ -272,6 +272,25 @@
     margin-top: 4px;
 }
 
+.cardPreview {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin: 2px 0 4px;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    white-space: normal;
+    opacity: 0.92;
+}
+
+.cardPreviewEmpty {
+    color: var(--text-dim);
+    font-style: italic;
+    opacity: 0.8;
+}
+
 /* --- Energy Indicators --- */
 .energyTag {
     width: 6px;
@@ -1026,45 +1045,66 @@
 .peopleRow {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 8px;
     align-items: center;
     margin: 6px 0 4px;
 }
 
-.personPill {
-    max-width: 160px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1px solid var(--border-subtle);
-    background: rgba(255, 255, 255, 0.04);
+.personChip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.02);
     color: var(--text-secondary);
     font-size: 11px;
-    white-space: nowrap;
+    line-height: 1.2;
+    max-width: 180px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.16);
+}
+
+.personChipCompact {
+    padding: 4px 6px;
+    max-width: none;
+}
+
+.personAvatar {
+    width: 22px;
+    height: 22px;
+    border-radius: 999px;
+    display: inline-grid;
+    place-items: center;
+    font-weight: 700;
+    color: #e5e7eb;
+    background: var(--bg-node);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+    letter-spacing: 0.01em;
+}
+
+.authorChip {
+    border-color: var(--border-strong);
+    background: rgba(255, 255, 255, 0.05);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
+}
+
+.personName {
     overflow: hidden;
+    white-space: nowrap;
     text-overflow: ellipsis;
 }
 
-.authorPill {
-    color: var(--text-primary);
-    border-color: var(--border-strong);
-    background: rgba(255, 255, 255, 0.08);
-}
-
-.participantPill {
-    color: var(--text-primary);
-    border-color: rgba(94, 129, 172, 0.6);
-    box-shadow: 0 0 8px rgba(94, 129, 172, 0.25);
-    animation: participantGlow 2.4s ease-in-out infinite;
-}
-
-@keyframes participantGlow {
-    0%,
-    100% {
-        box-shadow: 0 0 6px rgba(94, 129, 172, 0.2);
-    }
-    50% {
-        box-shadow: 0 0 12px rgba(94, 129, 172, 0.4);
-    }
+.personRoleIcon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-secondary);
+    flex: 0 0 auto;
 }
 
 .noteContentInput:focus {

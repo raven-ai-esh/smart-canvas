@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
-import { Bold, Italic, Strikethrough, Code, List, ListOrdered, Quote, Paperclip, Trash2 } from 'lucide-react';
+import { Bold, Italic, Strikethrough, Code, List, ListOrdered, Quote, Paperclip, Trash2, User, AtSign } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useStore } from '../../store/useStore';
 import type { Attachment, NodeData, MentionToken, SessionSaver } from '../../types';
@@ -162,6 +162,85 @@ const resolveMentionParticipants = (mentions: MentionToken[] | undefined, savers
         });
     }
     return out;
+};
+
+const personColors = ['#3B5A7C', '#78936B', '#B99A55', '#A36446', '#934B56', '#5F888C', '#8B6B92', '#5F8AA0'];
+const hashColor = (seed: string) => {
+    let hash = 0;
+    for (let i = 0; i < seed.length; i += 1) hash = (hash * 31 + seed.charCodeAt(i)) | 0;
+    const idx = Math.abs(hash) % personColors.length;
+    return personColors[idx];
+};
+
+const initialsFor = (label: string) => {
+    const parts = label.trim().split(/\s+/);
+    if (!parts.length) return '??';
+    const first = parts[0][0] ?? '';
+    const second = parts.length > 1 ? parts[1][0] ?? '' : '';
+    return (first + second).toUpperCase();
+};
+
+type PersonChip = {
+    id: string;
+    label: string;
+    role: 'author' | 'mention';
+};
+
+const PeopleRow: React.FC<{
+    authorLabel: string;
+    mentionParticipants: MentionParticipant[];
+    compact?: boolean;
+}> = ({ authorLabel, mentionParticipants, compact = false }) => {
+    if (!authorLabel && mentionParticipants.length === 0) return null;
+    const showFullNames = mentionParticipants.length <= (compact ? 2 : 3);
+    const chips: PersonChip[] = [];
+    if (authorLabel) chips.push({ id: '__author__', label: authorLabel, role: 'author' });
+    mentionParticipants.forEach((p) => chips.push({ id: p.id, label: p.label, role: 'mention' }));
+    return (
+        <div className={styles.peopleRow}>
+            {chips.map((person) => {
+                const isAuthor = person.role === 'author';
+                const displayLabel = showFullNames || isAuthor ? person.label : initialsFor(person.label);
+                const title = isAuthor ? `Author: ${person.label}` : person.label;
+                const avatarBg = hashColor(person.id || person.label);
+                return (
+                    <span
+                        key={`${person.role}-${person.id}`}
+                        className={`${styles.personChip} ${(!showFullNames && !isAuthor) ? styles.personChipCompact : ''} ${isAuthor ? styles.authorChip : ''}`}
+                        title={title}
+                    >
+                        <span
+                            className={styles.personAvatar}
+                            aria-hidden="true"
+                            style={{ background: isAuthor ? 'var(--accent-primary)' : avatarBg, opacity: 0.9 }}
+                        >
+                            {isAuthor ? <User size={14} /> : <AtSign size={13} />}
+                        </span>
+                        <span className={styles.personName}>{displayLabel}</span>
+                    </span>
+                );
+            })}
+        </div>
+    );
+};
+
+const markdownToPlainText = (value: string) => {
+    if (!value) return '';
+    let text = value;
+    text = text.replace(/```[\s\S]*?```/g, ' ');
+    text = text.replace(/`([^`]*)`/g, '$1');
+    text = text.replace(/!\[[^\]]*\]\([^)]+\)/g, ' ');
+    text = text.replace(/\[([^\]]+)]\([^)]+\)/g, '$1');
+    text = text.replace(/[*_~>#-]+/g, ' ');
+    text = text.replace(/\s+/g, ' ');
+    return text.trim();
+};
+
+const buildContentPreview = (value: string, maxLen = 180) => {
+    const text = markdownToPlainText(value);
+    if (!text) return '...';
+    if (text.length <= maxLen) return text;
+    return `${text.slice(0, maxLen - 3).trim()}...`;
 };
 
 type TextSel = { start: number; end: number };
@@ -769,6 +848,7 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
     const updateNode = useStore((state) => state.updateNode);
     const [showEnergySelector, setShowEnergySelector] = React.useState(false);
     const monitoringMode = useStore((state) => state.monitoringMode);
+    const authorshipMode = useStore((state) => state.authorshipMode);
     const sessionSavers = useStore((state) => state.sessionSavers);
     const [energyInputOpen, setEnergyInputOpen] = React.useState(false);
     const [energyInputValue, setEnergyInputValue] = React.useState('');
@@ -892,6 +972,8 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
     const cardStyle = isTask ? ({ '--card-progress': progress, '--progress-color': energyColor } as React.CSSProperties) : undefined;
     const mentionParticipants = resolveMentionParticipants(data.mentions, sessionSavers);
     const authorLabel = typeof data.authorName === 'string' ? data.authorName.trim() : '';
+    const contentPreview = useMemo(() => buildContentPreview(typeof data.content === 'string' ? data.content : '', 170), [data.content]);
+    const hasContentPreview = contentPreview !== '...';
 
     return (
         <div className={cardClassName} style={cardStyle}>
@@ -1072,24 +1154,14 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
                 </div>
             </div>
 
-            {mentionParticipants.length > 0 && (
-                <div className={styles.peopleRow}>
-                    {authorLabel && (
-                        <span className={`${styles.personPill} ${styles.authorPill}`} title="Author">
-                            {authorLabel}
-                        </span>
-                    )}
-                    {mentionParticipants.map((person) => (
-                        <span key={person.id} className={`${styles.personPill} ${styles.participantPill}`} title="Participant">
-                            {person.label}
-                        </span>
-                    ))}
-                </div>
-            )}
+            <div className={`${styles.cardPreview}${hasContentPreview ? '' : ` ${styles.cardPreviewEmpty}`}`}>
+                {contentPreview}
+            </div>
 
-            <div className={styles.cardMeta}>
-                <span className={styles.type}>{data.type}</span>
-                {isTask && (data.startDate || data.endDate) && (
+            {authorshipMode && <PeopleRow authorLabel={authorLabel} mentionParticipants={mentionParticipants} />}
+
+            {isTask && (data.startDate || data.endDate) && (
+                <div className={styles.cardMeta}>
                     <div className={styles.dateRow}>
                         {data.startDate && (
                             <div className={styles.dateTag} title="Start Date">
@@ -1102,8 +1174,8 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
                             </div>
                         )}
                     </div>
-                )}
-            </div>
+                </div>
+            )}
         </div>
     );
 });
@@ -1111,6 +1183,7 @@ const CardView = React.memo(({ data }: { data: NodeData }) => {
 export const NoteView = React.memo(({ data }: { data: NodeData }) => {
     const updateNode = useStore((state) => state.updateNode);
     const monitoringMode = useStore((state) => state.monitoringMode);
+    const authorshipMode = useStore((state) => state.authorshipMode);
     const sessionSavers = useStore((state) => state.sessionSavers);
     const edges = useStore((state) => state.edges);
     const nodes = useStore((state) => state.nodes);
@@ -1437,20 +1510,7 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
                     </div>
                 </div>
 
-                {mentionParticipants.length > 0 && (
-                    <div className={styles.peopleRow}>
-                        {authorLabel && (
-                            <span className={`${styles.personPill} ${styles.authorPill}`} title="Author">
-                                {authorLabel}
-                            </span>
-                        )}
-                        {mentionParticipants.map((person) => (
-                            <span key={person.id} className={`${styles.personPill} ${styles.participantPill}`} title="Participant">
-                                {person.label}
-                            </span>
-                        ))}
-                    </div>
-                )}
+                {authorshipMode && <PeopleRow authorLabel={authorLabel} mentionParticipants={mentionParticipants} compact />}
 
                 <div className={styles.noteStack}>
                     {isTask && (
@@ -1644,8 +1704,11 @@ export const Node: React.FC<NodeProps> = ({ data, stackAnimating = false, stackC
     const setCanvasViewCommand = useStore((state) => state.setCanvasViewCommand);
     const setPreviousCanvasState = useStore((state) => state.setPreviousCanvasState);
     const setFocusedDetailNodeId = useStore((state) => state.setFocusedDetailNodeId);
+    const bumpNodeRectVersion = useStore((state) => state.bumpNodeRectVersion);
     const scale = canvas.scale;
     const [isHovered, setIsHovered] = useState(false);
+    const cardRectRef = useRef<HTMLDivElement | null>(null);
+    const noteRectRef = useRef<HTMLDivElement | null>(null);
 
     // Double-click handler to zoom into detailed view
     const handleDoubleClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -1702,6 +1765,10 @@ export const Node: React.FC<NodeProps> = ({ data, stackAnimating = false, stackC
         activeView = 'card';
     }
 
+    React.useEffect(() => {
+        bumpNodeRectVersion(data.id);
+    }, [activeView, bumpNodeRectVersion, data.id]);
+
     // Determine visibility classes
     const isGraph = activeView === 'graph';
     // If note view is active, we treat card view as hidden, or maybe we don't render note view separately 
@@ -1736,6 +1803,32 @@ export const Node: React.FC<NodeProps> = ({ data, stackAnimating = false, stackC
         } as React.CSSProperties)
         : undefined;
     const noteFocusZ = isNote ? Math.round(520 + focusScore * 180) : undefined;
+
+    React.useEffect(() => {
+        if (typeof ResizeObserver === 'undefined') return undefined;
+        const el = cardRectRef.current;
+        if (!el) return undefined;
+        const observer = new ResizeObserver(() => {
+            if (el.getAttribute('data-node-rect') === 'true') {
+                bumpNodeRectVersion(data.id);
+            }
+        });
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, [bumpNodeRectVersion, data.id]);
+
+    React.useEffect(() => {
+        if (typeof ResizeObserver === 'undefined') return undefined;
+        const el = noteRectRef.current;
+        if (!el) return undefined;
+        const observer = new ResizeObserver(() => {
+            if (el.getAttribute('data-node-rect') === 'true') {
+                bumpNodeRectVersion(data.id);
+            }
+        });
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, [bumpNodeRectVersion, data.id]);
 
     // Valid Wrapper Class Logic
     const neighbors = useStore((state) => state.neighbors);
@@ -1813,6 +1906,7 @@ export const Node: React.FC<NodeProps> = ({ data, stackAnimating = false, stackC
             {/* Card View */}
             <div
                 className={cardClass}
+                ref={cardRectRef}
                 data-node-rect={isCard ? 'true' : undefined}
                 data-node-rect-id={data.id}
                 data-node-card-rect="true"
@@ -1826,6 +1920,7 @@ export const Node: React.FC<NodeProps> = ({ data, stackAnimating = false, stackC
             {/* Note View */}
             <div
                 className={noteClass}
+                ref={noteRectRef}
                 data-node-rect={isNote ? 'true' : undefined}
                 data-node-rect-id={data.id}
                 style={noteViewStyle}
