@@ -9,3 +9,4 @@ coverage/
 .vite/
 .DS_Store
 vcs.xml
+.auto-claude/
