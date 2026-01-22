@@ -104,11 +104,13 @@ export const LayerBridgeEdge: React.FC<LayerBridgeEdgeProps> = ({ fromId, toId, 
         const getNodeDimensions = (nodeId: string) => {
             if (isGraphMode) return { w: 32, h: 32, shape: 'circle' as const };
             const container = document.querySelector(`[data-node-id="${nodeId}"]`);
-            if (container) {
-                const isNoteMode = scale >= 1.2;
-                const targetSelector = isNoteMode ? '[class*="noteNode"]' : '[class*="cardNode"], [class*="taskNode"]';
-                const target = container.querySelector(targetSelector) as HTMLElement | null;
-                if (target) return { w: target.offsetWidth, h: target.offsetHeight, shape: 'box' as const };
+            const target = container?.querySelector<HTMLElement>('[data-node-rect="true"]');
+            if (target) {
+                const rect = target.getBoundingClientRect();
+                const rawScale = parseFloat(target.getAttribute('data-node-card-scale') ?? '1');
+                const viewScale = Number.isFinite(rawScale) && rawScale > 0 ? rawScale : 1;
+                const denom = Math.max(0.0001, scale * viewScale);
+                return { w: rect.width / denom, h: rect.height / denom, shape: 'box' as const };
             }
             return { w: 240, h: 100, shape: 'box' as const };
         };
@@ -251,23 +253,20 @@ export const Edge: React.FC<EdgeProps> = ({ sourceId, targetId, id, onRequestCon
     const geom = React.useMemo(() => {
         // Helper: Get Node Dimensions based on view mode
         const getNodeDimensions = (nodeId: string) => {
-            // In Graph Mode, we assume a fixed size circle
+            // Graph mode: fixed circle
             if (isGraphMode) {
                 return { w: 32, h: 32, shape: 'circle' as const };
             }
 
-            // In Card/Note Mode, we measure the DOM
-            // We must select the specific child based on current scale to avoid reading stale '.visible' classes from previous render
+            // Card/Note: measure active view and convert to world space
             const container = document.querySelector(`[data-node-id="${nodeId}"]`);
-            if (container) {
-                const isNoteMode = scale >= 1.2;
-                // Select the correct child based on expected mode
-                const targetSelector = isNoteMode ? '[class*="noteNode"]' : '[class*="cardNode"], [class*="taskNode"]';
-                const target = container.querySelector(targetSelector) as HTMLElement;
-
-                if (target) {
-                    return { w: target.offsetWidth, h: target.offsetHeight, shape: 'box' as const };
-                }
+            const target = container?.querySelector<HTMLElement>('[data-node-rect="true"]');
+            if (target) {
+                const rect = target.getBoundingClientRect();
+                const rawScale = parseFloat(target.getAttribute('data-node-card-scale') ?? '1');
+                const viewScale = Number.isFinite(rawScale) && rawScale > 0 ? rawScale : 1;
+                const denom = Math.max(0.0001, scale * viewScale);
+                return { w: rect.width / denom, h: rect.height / denom, shape: 'box' as const };
             }
             return { w: 240, h: 100, shape: 'box' as const };
         };
