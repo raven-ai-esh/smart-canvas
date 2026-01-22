@@ -120,6 +120,12 @@ interface AppState {
     clearAssistantSelectionContext: () => void;
     canvasViewCommand: CanvasViewCommand | null;
     setCanvasViewCommand: (command: CanvasViewCommand | null) => void;
+    previousCanvasState: PreviousCanvasState | null;
+    setPreviousCanvasState: (state: PreviousCanvasState | null) => void;
+    clearPreviousCanvasState: () => void;
+    focusedDetailNodeId: string | null;
+    setFocusedDetailNodeId: (id: string | null) => void;
+    clearFocusedDetailNodeId: () => void;
     textBoxes: TextBox[];
     comments: Comment[];
     stacks: StackGroup[];
@@ -252,6 +258,12 @@ type CanvasViewCommand = {
     x?: number | null;
     y?: number | null;
     scale?: number | null;
+};
+
+type PreviousCanvasState = {
+    x: number;
+    y: number;
+    scale: number;
 };
 
 const snapshotOf = (state: Pick<AppState, 'nodes' | 'edges' | 'drawings' | 'textBoxes' | 'stacks' | 'layers' | 'tombstones'>): UndoSnapshot => ({
@@ -774,6 +786,12 @@ export const useStore = create<AppState>()(
             clearAssistantSelectionContext: () => set({ assistantSelectionContext: null }),
             canvasViewCommand: null,
             setCanvasViewCommand: (command) => set({ canvasViewCommand: command }),
+            previousCanvasState: null,
+            setPreviousCanvasState: (state) => set({ previousCanvasState: state }),
+            clearPreviousCanvasState: () => set({ previousCanvasState: null }),
+            focusedDetailNodeId: null,
+            setFocusedDetailNodeId: (id) => set({ focusedDetailNodeId: id }),
+            clearFocusedDetailNodeId: () => set({ focusedDetailNodeId: null }),
             textBoxes: [],
             comments: [],
             stacks: [],
