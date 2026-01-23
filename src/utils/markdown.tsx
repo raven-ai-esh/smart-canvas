@@ -34,22 +34,22 @@ export const markdownPlugins = [remarkGfm, remarkSoftBreaks];
 
 export const markdownComponents: Components = {
   p: ({ node: _node, children, ...props }) => (
-    <p style={{ margin: '0 0 8px', lineHeight: 1.55 }} {...props}>
+    <p style={{ margin: '0 0 4px', lineHeight: 1.38 }} {...props}>
       {children}
     </p>
   ),
   ul: ({ node: _node, children, ...props }) => (
-    <ul style={{ margin: '0 0 8px 18px', padding: 0 }} {...props}>
+    <ul style={{ margin: '0 0 4px 14px', padding: 0 }} {...props}>
       {children}
     </ul>
   ),
   ol: ({ node: _node, children, ...props }) => (
-    <ol style={{ margin: '0 0 8px 18px', padding: 0 }} {...props}>
+    <ol style={{ margin: '0 0 4px 14px', padding: 0 }} {...props}>
       {children}
     </ol>
   ),
   li: ({ node: _node, children, ...props }) => (
-    <li style={{ margin: '0 0 4px' }} {...props}>
+    <li style={{ margin: '0 0 1px' }} {...props}>
       {children}
     </li>
   ),

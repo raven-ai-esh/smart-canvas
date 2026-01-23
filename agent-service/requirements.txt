@@ -10,3 +10,10 @@ prometheus-client==0.20.0
 python-json-logger==2.0.7
 tiktoken==0.12.0
 uvicorn[standard]==0.40.0
+numpy==1.26.4
+pypdf==4.2.0
+python-docx==1.1.2
+beautifulsoup4==4.12.3
+html2text==2024.2.26
+pymupdf==1.24.11
+pillow==10.4.0

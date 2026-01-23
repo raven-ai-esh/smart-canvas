@@ -8,6 +8,12 @@ import os
 import time
 import uuid
 import html
+import re
+import mimetypes
+import io
+import pathlib
+import base64
+import numpy as np
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -31,6 +37,11 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.util._once import Once
 
 import logging
+from bs4 import BeautifulSoup
+import html2text
+import fitz  # PyMuPDF
+from pypdf import PdfReader
+import docx
 
 LOG_LEVEL = os.getenv("AGENT_LOG_LEVEL", os.getenv("LOG_LEVEL", "INFO")).upper()
 LOG_TRUNCATE = int(os.getenv("AGENT_LOG_TRUNCATE", "2000"))
@@ -158,6 +169,7 @@ PROMPT_PATH = os.getenv("AGENT_PROMPT_PATH", "/app/data/prompt.txt")
 MODEL_CONTEXT_TOKENS = {
     "gpt-5.2": 400000,
 }
+FILE_BASE_URL = os.getenv("AGENT_FILE_BASE_URL", "http://api:8787")
 
 DEFAULT_PROMPT_LINES = [
     "You are Raven, the Smart Tracker AI assistant.",
@@ -187,6 +199,335 @@ DEFAULT_PROMPT = "\n".join(DEFAULT_PROMPT_LINES)
 
 _prompt_cache: str | None = None
 _prompt_mtime: float | None = None
+
+
+def _detect_mime_from_name(name: str | None) -> str | None:
+    if not name:
+        return None
+    mime, _ = mimetypes.guess_type(name)
+    return mime
+
+
+def _strip_html(text: str) -> str:
+    soup = BeautifulSoup(text, "html.parser")
+    for script in soup(["script", "style"]):
+        script.decompose()
+    return soup.get_text(separator=" ", strip=True)
+
+
+def _html_to_text(text: str) -> str:
+    try:
+        h = html2text.HTML2Text()
+        h.ignore_links = True
+        h.ignore_images = True
+        h.ignore_emphasis = False
+        h.body_width = 0
+        return h.handle(text)
+    except Exception:
+        return _strip_html(text)
+
+
+def _decode_bytes(data: bytes) -> str:
+    for enc in ("utf-8", "utf-16", "latin-1"):
+        try:
+            return data.decode(enc)
+        except Exception:
+            continue
+    return data.decode("utf-8", errors="ignore")
+
+
+def _extract_text(content: bytes, mime: str | None, filename: str | None) -> str:
+    mime_lower = (mime or "").lower()
+    suffix = (pathlib.Path(filename).suffix.lower() if filename else "") if filename else ""
+
+    if mime_lower.startswith("text/") or suffix in {".txt", ".md", ".csv", ".log"}:
+        return _decode_bytes(content)
+
+    if mime_lower in {"text/markdown"} or suffix == ".md":
+        return _decode_bytes(content)
+
+    if mime_lower in {"text/html", "application/xhtml+xml"} or suffix in {".html", ".htm"}:
+        return _html_to_text(_decode_bytes(content))
+
+    if mime_lower == "application/pdf" or suffix == ".pdf":
+        try:
+            reader = PdfReader(io.BytesIO(content))
+            return "\n".join(page.extract_text() or "" for page in reader.pages)
+        except Exception:
+            return ""
+
+    if mime_lower in {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    } or suffix == ".docx":
+        try:
+            document = docx.Document(io.BytesIO(content))
+            return "\n".join(p.text for p in document.paragraphs)
+        except Exception:
+            return ""
+
+    if mime_lower.startswith("text/"):
+        return _decode_bytes(content)
+
+    return ""
+
+
+def _pdf_page_texts(content: bytes) -> list[str]:
+    """Extract plain text per page using PyMuPDF; fallback to empty strings."""
+    try:
+        doc = fitz.open(stream=content, filetype="pdf")
+    except Exception:
+        return []
+    texts: list[str] = []
+    for page in doc:
+        try:
+            txt = page.get_text("text") or ""
+        except Exception:
+            txt = ""
+        texts.append(txt)
+    doc.close()
+    return texts
+
+
+def _render_pdf_page_png(content: bytes, page_index: int, target_width: int = 1400) -> bytes:
+    """Render a single PDF page to PNG bytes."""
+    doc = fitz.open(stream=content, filetype="pdf")
+    try:
+        page = doc[page_index]
+        zoom = max(1.0, min(3.0, target_width / max(1.0, page.rect.width)))
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        return pix.tobytes("png")
+    finally:
+        doc.close()
+
+
+def _is_bad_page_text(text: str) -> bool:
+    if not text or len(text.strip()) < 80:
+        return True
+    bad_chars = text.count("\ufffd")
+    non_alpha = sum(1 for ch in text if not ch.isalpha() and not ch.isspace())
+    total = len(text) or 1
+    return bad_chars > 0 or (non_alpha / total) > 0.6
+
+
+def _count_tokens(text: str, model: str | None) -> int:
+    enc_name = None
+    try:
+        if model:
+            enc = tiktoken.encoding_for_model(model)
+        else:
+            enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+
+
+def _chunk_text(text: str, model: str | None, chunk_tokens: int = 900, overlap_tokens: int = 200) -> list[str]:
+    try:
+        enc = tiktoken.encoding_for_model(model) if model else tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        enc = tiktoken.get_encoding("cl100k_base")
+    tokens = enc.encode(text)
+    chunks = []
+    i = 0
+    while i < len(tokens):
+        window = tokens[i : i + chunk_tokens]
+        chunks.append(enc.decode(window))
+        i += chunk_tokens - overlap_tokens
+    return chunks
+
+
+async def _vision_answer_page(
+    client: AsyncOpenAI,
+    model: str | None,
+    question: str,
+    page_png: bytes,
+    page_index: int,
+) -> dict[str, Any]:
+    b64 = base64.b64encode(page_png).decode("ascii")
+    content = [
+        {
+            "type": "text",
+            "text": (
+                "You will see a PDF page image. "
+                "Answer the user question using ONLY this page. "
+                "Return concise text; if nothing relevant, say 'not found'. "
+            ),
+        },
+        {
+            "type": "text",
+            "text": f"Question: {question}\nPage: {page_index + 1}",
+        },
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{b64}"},
+        },
+    ]
+    chat = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": content}],
+        temperature=0,
+    )
+    answer = chat.choices[0].message.content or ""
+    return {"page": page_index + 1, "answer": answer.strip()}
+
+
+async def _run_doc_search(args: dict[str, Any], model: str | None, client: AsyncOpenAI) -> dict[str, Any]:
+    raw_url = args.get("download_url") or args.get("url")
+    if raw_url and isinstance(raw_url, str) and raw_url.startswith("/"):
+        download_url = FILE_BASE_URL.rstrip("/") + raw_url
+    else:
+        download_url = raw_url
+    search_request = args.get("search_request") or args.get("query") or ""
+    if not download_url or not search_request:
+        raise HTTPException(status_code=400, detail="download_url and search_request are required")
+
+    async with httpx.AsyncClient(timeout=30) as http_client:
+        resp = await http_client.get(download_url)
+        resp.raise_for_status()
+        content = resp.content
+        mime = resp.headers.get("content-type", "").split(";")[0].strip() or None
+        filename = args.get("file_name") or args.get("filename")
+        if not filename:
+            filename = _mask_secret(download_url.split("/")[-1])
+        if not mime:
+            mime = _detect_mime_from_name(filename)
+
+    suffix = pathlib.Path(filename).suffix.lower() if filename else ""
+
+    vision_pages: list[dict[str, Any]] = []
+    combined_text = _extract_text(content, mime, filename)
+
+    if (mime and mime.lower() == "application/pdf") or suffix == ".pdf":
+        page_texts = _pdf_page_texts(content)
+        good_pages_text = "\n\n".join(
+            f"[page {idx + 1}]\n{txt}"
+            for idx, txt in enumerate(page_texts)
+            if txt and txt.strip()
+        )
+
+        # Pick pages with bad/empty text for vision Q&A
+        problem_pages = [idx for idx, txt in enumerate(page_texts) if _is_bad_page_text(txt)]
+        MAX_VISION_PAGES = 3
+        for idx in problem_pages[:MAX_VISION_PAGES]:
+            try:
+                png = _render_pdf_page_png(content, idx)
+                vis = await _vision_answer_page(client, model, search_request, png, idx)
+                if vis.get("answer"):
+                    vision_pages.append({"page": vis["page"], "preview": vis["answer"][:200]})
+            except Exception:
+                continue
+
+        vision_text = "\n\n".join(
+            f"[vision page {item['page']}]\n{item['preview']}" for item in vision_pages if item.get("preview")
+        )
+
+        combined_parts = [part for part in [good_pages_text, vision_text] if part]
+        combined_text = "\n\n".join(combined_parts) if combined_parts else ""
+
+    token_count = _count_tokens(combined_text, model)
+
+    if token_count == 0:
+        return {
+            "answer": "",
+            "mode": "empty",
+            "token_count": 0,
+            "file": {"name": filename, "mime": mime, "size_bytes": len(content)},
+            "used_chunks": [],
+        }
+
+    DIRECT_THRESHOLD = 100_000
+    if token_count <= DIRECT_THRESHOLD:
+        prompt = [
+            {
+                "role": "system",
+                "content": "You are Raven. Answer the user's request using ONLY the provided document text.",
+            },
+            {
+                "role": "user",
+                "content": f"Request: {search_request}\n\nDocument:\n{combined_text}",
+            },
+        ]
+        chat = await client.chat.completions.create(
+            model=model,
+            messages=prompt,
+            temperature=0,
+        )
+        answer = chat.choices[0].message.content or ""
+        return {
+            "answer": answer,
+            "mode": "direct",
+            "token_count": token_count,
+            "file": {"name": filename, "mime": mime, "size_bytes": len(content)},
+            "used_chunks": vision_pages,
+        }
+
+    # RAG path
+    chunks = _chunk_text(combined_text, model, chunk_tokens=900, overlap_tokens=200)
+    embeddings = await client.embeddings.create(
+        model="text-embedding-3-large",
+        input=chunks,
+    )
+    query_emb = await client.embeddings.create(
+        model="text-embedding-3-large",
+        input=search_request,
+    )
+    q = np.array(embeddings.data[-1].embedding if False else query_emb.data[0].embedding)
+    scores = []
+    for idx, item in enumerate(embeddings.data):
+        v = np.array(item.embedding)
+        score = float(np.dot(q, v) / (np.linalg.norm(q) * np.linalg.norm(v) + 1e-8))
+        scores.append((score, idx))
+    scores.sort(reverse=True)
+    top_k = 6
+    chosen = scores[:top_k]
+    top_chunks = []
+    used = []
+    for rank, (score, idx) in enumerate(chosen, 1):
+        chunk_text = chunks[idx]
+        top_chunks.append(chunk_text)
+        used.append(
+            {
+                "rank": rank,
+                "score": round(score, 4),
+                "preview": chunk_text[:240],
+            }
+        )
+
+    rag_prompt = [
+        {
+            "role": "system",
+            "content": "You are Raven. Answer the user's request using ONLY the provided document excerpts. If not enough info, say so.",
+        },
+        {
+            "role": "user",
+            "content": f"Request: {search_request}\n\nRelevant excerpts:\n" + "\n\n---\n\n".join(top_chunks),
+        },
+    ]
+    chat = await client.chat.completions.create(
+        model=model,
+        messages=rag_prompt,
+        temperature=0,
+    )
+    answer = chat.choices[0].message.content or ""
+    return {
+        "answer": answer,
+        "mode": "rag",
+        "token_count": token_count,
+        "file": {"name": filename, "mime": mime, "size_bytes": len(content)},
+        "used_chunks": used + vision_pages,
+    }
+
+
+async def _safe_doc_search(args: dict[str, Any], model: str | None, client: AsyncOpenAI) -> dict[str, Any]:
+    try:
+        result = await _run_doc_search(args, model, client)
+        return {"ok": True, "result": result}
+    except Exception as exc:
+        logger.exception("doc_search_error", extra={"error": str(exc)})
+        return {"ok": False, "error": str(exc)}
 
 
 class MCPConfig(BaseModel):
@@ -838,6 +1179,11 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
         ])
     instructions = "\n\n".join([
         instructions,
+        "Use the doc_search tool when the user asks to read or search an uploaded document by URL. "
+        "Provide the document URL in download_url and the question in search_request.",
+    ])
+    instructions = "\n\n".join([
+        instructions,
         "Include an optional `reasoning` field with a short, high-level summary of your approach.",
         "Do not reveal chain-of-thought or internal reasoning steps.",
     ])
@@ -868,8 +1214,25 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
                     len(function_tools),
                 )
 
+            doc_search_tool = {
+                "type": "function",
+                "name": "doc_search",
+                "description": "Analyze a user-provided document by URL and answer a query. Uses direct reading for <=100k tokens, otherwise a quick RAG.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "download_url": {"type": "string", "description": "Direct URL to the file (supports txt, md, html, pdf, docx)."},
+                        "search_request": {"type": "string", "description": "The user question about the document."},
+                        "file_name": {"type": "string", "description": "Optional file name for better mime detection.", "nullable": True},
+                    },
+                    "required": ["download_url", "search_request", "file_name"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+
             web_search_tools = [{"type": "web_search"}] if req.webSearchEnabled else []
-            tools_payload = function_tools + web_search_tools
+            tools_payload = [doc_search_tool] + function_tools + web_search_tools
             tools_enabled = bool(tools_payload)
             parse_kwargs: dict[str, Any] = {
                 "model": req.model,
@@ -904,7 +1267,19 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
                     if not call_id or not name:
                         continue
                     args = _parse_tool_args(args_raw)
-                    result = await mcp_session.call_tool(name, args)
+                    if name == "doc_search":
+                        ds = await _safe_doc_search(args, req.model, client)
+                        payload_content = ds.get("result") if ds.get("ok") else {"error": ds.get("error")}
+                        result = type(
+                            "Result",
+                            (),
+                            {
+                                "content": [{"type": "text", "text": json.dumps(payload_content, ensure_ascii=False)}],
+                                "isError": not ds.get("ok"),
+                            },
+                        )
+                    else:
+                        result = await mcp_session.call_tool(name, args)
                     payload = {
                         "isError": bool(getattr(result, "isError", False)),
                         "content": json.loads(_serialize_tool_result(result) or "null"),
