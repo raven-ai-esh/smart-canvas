@@ -602,10 +602,78 @@ const isImageTextBox = (textBox) => {
 
 const sanitizeTextBox = (textBox) => {
   if (!textBox || typeof textBox !== 'object') return textBox;
-  const hasSrc = typeof textBox.src === 'string' && textBox.src.trim();
+  const inferFileNameFromUrl = (url) => {
+    if (typeof url !== 'string' || !url) return null;
+    try {
+      const u = new URL(url, 'http://local');
+      const path = u.pathname || '';
+      const last = path.split('/').filter(Boolean).pop();
+      if (!last) return null;
+      return decodeURIComponent(last);
+    } catch {
+      const parts = url.split(/[?#]/)[0]?.split('/') ?? [];
+      const last = parts.filter(Boolean).pop();
+      return last || null;
+    }
+  };
+  const inferMimeFromName = (name) => {
+    const lower = (name || '').toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.svg') || lower.endsWith('.svgz')) return 'image/svg+xml';
+    if (lower.endsWith('.bmp')) return 'image/bmp';
+    if (lower.endsWith('.tif') || lower.endsWith('.tiff')) return 'image/tiff';
+    if (lower.endsWith('.pdf')) return 'application/pdf';
+    if (lower.endsWith('.txt')) return 'text/plain';
+    return null;
+  };
+  const dataUrlSize = (() => {
+    const raw = typeof textBox.dataUrl === 'string' ? textBox.dataUrl : '';
+    const match = raw.match(/^data:([^;]+);base64,([A-Za-z0-9+/=]+)$/);
+    if (!match) return null;
+    const b64 = match[2];
+    const padding = (b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0);
+    const bytes = Math.floor((b64.length * 3) / 4) - padding;
+    return Number.isFinite(bytes) && bytes > 0 ? bytes : null;
+  })();
+  const primarySrc = typeof textBox.src === 'string' && textBox.src.trim()
+    ? textBox.src.trim()
+    : (typeof textBox.dataUrl === 'string' && textBox.dataUrl.trim()
+        ? textBox.dataUrl.trim()
+        : (typeof textBox.url === 'string' && textBox.url.trim() ? textBox.url.trim() : null));
+  const hasSrc = !!primarySrc;
   const isMediaKind = textBox.kind === 'image' || textBox.kind === 'file';
-  if (!hasSrc || !isMediaKind) return textBox;
-  return { ...textBox, src: null };
+  const size = Number.isFinite(textBox.fileSize)
+    ? textBox.fileSize
+    : (Number.isFinite(textBox.size) ? textBox.size : dataUrlSize);
+  const explicitMime = typeof textBox.fileMime === 'string' && textBox.fileMime.trim()
+    ? textBox.fileMime.trim()
+    : null;
+  const mimeFromDataUrl = (() => {
+      const raw = typeof textBox.dataUrl === 'string' ? textBox.dataUrl : '';
+      const match = raw.match(/^data:([^;]+);base64,/);
+      return match ? match[1] : null;
+    })();
+  const downloadUrl = hasSrc ? primarySrc : null;
+  const fileName = typeof textBox.fileName === 'string' && textBox.fileName.trim()
+    ? textBox.fileName.trim()
+    : (downloadUrl ? inferFileNameFromUrl(downloadUrl) : null);
+  const mime = explicitMime || mimeFromDataUrl || inferMimeFromName(fileName);
+  if (!hasSrc || !isMediaKind) {
+    const base = size !== null || mime || fileName ? { ...textBox } : textBox;
+    if (base !== textBox && size !== null) base.size = size;
+    if (base !== textBox && mime) base.fileMime = mime;
+    if (base !== textBox && fileName) base.fileName = fileName;
+    return base;
+  }
+  const base = { ...textBox, src: null, downloadUrl, size };
+  if (mime) base.fileMime = mime;
+  if (fileName) base.fileName = fileName;
+  if ('dataUrl' in base) delete base.dataUrl;
+  if ('url' in base) delete base.url;
+  return base;
 };
 
 const sanitizeFileBox = (textBox) => {
@@ -870,6 +938,50 @@ const summarizeEdge = (edge) => ({
   label: edge.label ?? null,
 });
 
+const summarizeImageBox = (img, layerById) => {
+  if (!img || typeof img !== 'object') return null;
+  const layerId = typeof img.layerId === 'string' ? img.layerId : null;
+  const layerName = layerId ? (layerById?.get(layerId)?.name ?? null) : null;
+  return {
+    id: img.id,
+    kind: img.kind ?? 'image',
+    fileName: typeof img.fileName === 'string' ? img.fileName : null,
+    mime: typeof img.fileMime === 'string' ? img.fileMime : null,
+    size: Number.isFinite(img.size) ? img.size : (Number.isFinite(img.fileSize) ? img.fileSize : null),
+    downloadUrl: typeof img.downloadUrl === 'string' ? img.downloadUrl : null,
+    width: Number.isFinite(img.width) ? img.width : null,
+    height: Number.isFinite(img.height) ? img.height : null,
+    x: Number.isFinite(img.x) ? img.x : null,
+    y: Number.isFinite(img.y) ? img.y : null,
+    layerId,
+    layerName,
+    authorId: typeof img.authorId === 'string' ? img.authorId : null,
+    authorName: typeof img.authorName === 'string' ? img.authorName : null,
+    createdAt: img.createdAt ?? null,
+    updatedAt: img.updatedAt ?? null,
+  };
+};
+
+const summarizeFileBox = (file, layerById) => {
+  if (!file || typeof file !== 'object') return null;
+  const layerId = typeof file.layerId === 'string' ? file.layerId : null;
+  const layerName = layerId ? (layerById?.get(layerId)?.name ?? null) : null;
+  return {
+    id: file.id,
+    kind: file.kind ?? 'file',
+    fileName: typeof file.fileName === 'string' ? file.fileName : null,
+    mime: typeof file.fileMime === 'string' ? file.fileMime : null,
+    size: Number.isFinite(file.size) ? file.size : (Number.isFinite(file.fileSize) ? file.fileSize : null),
+    downloadUrl: typeof file.downloadUrl === 'string' ? file.downloadUrl : null,
+    layerId,
+    layerName,
+    authorId: typeof file.authorId === 'string' ? file.authorId : null,
+    authorName: typeof file.authorName === 'string' ? file.authorName : null,
+    createdAt: file.createdAt ?? null,
+    updatedAt: file.updatedAt ?? null,
+  };
+};
+
 const summarizeStack = (stack, layerById) => {
   if (!stack || typeof stack !== 'object') return null;
   const layerId = typeof stack.layerId === 'string' ? stack.layerId : null;
@@ -915,12 +1027,16 @@ const summarizeState = (state, limit) => {
   const limitedEdges = limitList(edges, limit);
   const limitedStacks = limitList(stacks, limit);
   const limitedLayers = limitList(orderedLayers, limit);
+  const limitedFiles = limitList(split.files, limit);
+  const limitedImages = limitList(split.images, limit);
   return {
     theme: state?.theme ?? 'dark',
     layers: limitedLayers.items.map(summarizeLayer),
     nodes: limitedNodes.items.map((node) => summarizeNode(node, layerById)),
     edges: limitedEdges.items.map(summarizeEdge),
     stacks: limitedStacks.items.map((stack) => summarizeStack(stack, layerById)).filter(Boolean),
+    files: limitedFiles.items.map((file) => summarizeFileBox(file, layerById)).filter(Boolean),
+    images: limitedImages.items.map((img) => summarizeImageBox(img, layerById)).filter(Boolean),
     counts: {
       nodes: nodes.length,
       edges: edges.length,
@@ -937,6 +1053,8 @@ const summarizeState = (state, limit) => {
       edges: limitedEdges.truncated,
       layers: limitedLayers.truncated,
       stacks: limitedStacks.truncated,
+      files: limitedFiles.truncated,
+      images: limitedImages.truncated,
     },
     limit: limitedNodes.limit,
   };

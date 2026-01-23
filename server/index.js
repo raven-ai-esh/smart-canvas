@@ -1986,7 +1986,14 @@ const normalizeMessageContent = (value) => {
 const stripAssistantCitations = (value) => {
   if (typeof value !== 'string') return '';
   const stripped = value.replace(/[\uE000-\uF8FF]cite[\uE000-\uF8FF][^\s]*/g, '');
-  return stripped.replace(/\s{2,}/g, ' ').trim();
+
+  // Keep newlines for markdown layout; collapse only repeated spaces/tabs.
+  const compactSpaces = stripped.replace(/[ \t]{2,}/g, ' ');
+
+  // Collapse consecutive blank lines to a single newline to avoid tall gaps in chat.
+  const normalizedBreaks = compactSpaces.replace(/\n{2,}/g, '\n');
+
+  return normalizedBreaks.trim();
 };
 
 const normalizeAssistantOutput = (value) => {

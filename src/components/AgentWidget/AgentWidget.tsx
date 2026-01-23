@@ -5,6 +5,14 @@ import { useStore } from '../../store/useStore';
 import type { AssistantSelectionContext } from '../../types/assistant';
 import { markdownComponents, markdownPlugins } from '../../utils/markdown';
 
+const normalizeAssistantMarkdown = (text: string) => (
+  text
+    // unify newlines
+    .replace(/\r\n?/g, '\n')
+    // allow headings even if строка пришла с 4+ пробелами (часто превращается в код-блок)
+    .replace(/^[ \t]{4,}(#+\s)/gm, '$1')
+);
+
 type AssistantTrace = {
   reasoning?: string | null;
   skill?: {
@@ -812,7 +820,7 @@ export const AgentWidget: React.FC = () => {
         bottom: 'calc(16px + env(safe-area-inset-bottom, 0px))',
         zIndex: 1900,
         display: 'grid',
-        gap: 10,
+        gap: 8,
         justifyItems: 'end',
       }}
     >
@@ -823,7 +831,7 @@ export const AgentWidget: React.FC = () => {
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: 10,
+              gap: 8,
               padding: '12px 14px',
               borderBottom: '1px solid var(--border-strong)',
               background: 'rgba(20, 24, 34, 0.95)',
@@ -869,7 +877,7 @@ export const AgentWidget: React.FC = () => {
               padding: '14px 12px 8px',
               display: 'flex',
               flexDirection: 'column',
-              gap: 10,
+              gap: 8,
               minHeight: 0,
               boxSizing: 'border-box',
               userSelect: 'text',
@@ -1037,25 +1045,27 @@ export const AgentWidget: React.FC = () => {
                   )}
                   <div
                     style={{
-                      background: isUser ? 'rgba(94,129,172,0.22)' : 'rgba(255,255,255,0.04)',
+                      background: isUser ? 'rgba(82, 138, 223, 0.18)' : 'rgba(255,255,255,0.06)',
                       color: 'var(--text-primary)',
-                      border: isExternal ? '1px dashed var(--border-strong)' : '1px solid var(--border-strong)',
-                      borderRadius: 14,
-                      padding: '8px 10px',
-                      fontSize: 13,
+                      border: isExternal ? '1px dashed var(--border-strong)' : '1px solid rgba(255,255,255,0.07)',
+                      borderRadius: 12,
+                      padding: '9px 12px',
+                      fontSize: 14,
                       whiteSpace: 'pre-wrap',
                       overflowWrap: 'anywhere',
                       wordBreak: 'break-word',
-                      lineHeight: 1.45,
+                      lineHeight: 1.34,
                       userSelect: 'text',
                       WebkitUserSelect: 'text',
+                      maxWidth: '92%',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.25)',
                     }}
                   >
                     {isUser ? (
                       msg.content
                     ) : (
                       <ReactMarkdown remarkPlugins={markdownPlugins} components={markdownComponents}>
-                        {msg.content}
+                        {normalizeAssistantMarkdown(msg.content)}
                       </ReactMarkdown>
                     )}
                   </div>
