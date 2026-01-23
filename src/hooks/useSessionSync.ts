@@ -142,6 +142,7 @@ export function useSessionSync() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const applyingRemoteRef = useRef(false);
+  const sessionPrimedRef = useRef(false);
   const desiredStateRef = useRef<ReturnType<typeof pickSessionState> | null>(null);
   const desiredStateJsonRef = useRef<string | null>(null);
   const lastAppliedJsonRef = useRef<string | null>(null);
@@ -292,9 +293,10 @@ export function useSessionSync() {
         drawings: [] as any,
         textBoxes: [] as any,
         comments: [] as any,
+        stacks: [] as any,
         layers: normalizeLayers([]),
         activeLayerId: resolveLayerId(normalizeLayers([]), null),
-	        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {} },
+	        tombstones: { nodes: {}, edges: {}, drawings: {}, textBoxes: {}, comments: {}, layers: {}, stacks: {} },
 	        selectedNode: null,
 	        selectedNodes: [],
 	        selectedEdge: null,
@@ -315,6 +317,7 @@ export function useSessionSync() {
     desiredStateRef.current = null;
     desiredStateJsonRef.current = null;
     lastAppliedJsonRef.current = null;
+    sessionPrimedRef.current = false;
 
     const clearTimers = () => {
       if (sendTimer.current) window.clearTimeout(sendTimer.current);
@@ -635,6 +638,7 @@ export function useSessionSync() {
           },
         });
         applySessionState(next);
+        sessionPrimedRef.current = true;
         lastAppliedJsonRef.current = stableSerialize(pickSessionState(useStore.getState()));
       } finally {
         applyingRemoteRef.current = false;
@@ -675,6 +679,7 @@ export function useSessionSync() {
     const flush = () => {
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!sessionPrimedRef.current) return;
       if (!desiredStateRef.current || !desiredStateJsonRef.current) return;
       if (desiredStateJsonRef.current === lastAppliedJsonRef.current) return; // already in sync
 
