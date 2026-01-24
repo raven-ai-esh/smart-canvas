@@ -13,7 +13,10 @@ import mimetypes
 import io
 import pathlib
 import base64
+import hashlib
 import numpy as np
+import pandas as pd
+import contextlib
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -40,8 +43,14 @@ import logging
 from bs4 import BeautifulSoup
 import html2text
 import fitz  # PyMuPDF
+import openpyxl
 from pypdf import PdfReader
 import docx
+from PIL import Image
+try:
+    from striprtf.striprtf import rtf_to_text
+except Exception:  # pragma: no cover - optional dependency
+    rtf_to_text = None
 
 LOG_LEVEL = os.getenv("AGENT_LOG_LEVEL", os.getenv("LOG_LEVEL", "INFO")).upper()
 LOG_TRUNCATE = int(os.getenv("AGENT_LOG_TRUNCATE", "2000"))
@@ -228,7 +237,7 @@ def _html_to_text(text: str) -> str:
 
 
 def _decode_bytes(data: bytes) -> str:
-    for enc in ("utf-8", "utf-16", "latin-1"):
+    for enc in ("utf-8", "utf-16", "cp1251", "latin-1"):
         try:
             return data.decode(enc)
         except Exception:
@@ -239,6 +248,15 @@ def _decode_bytes(data: bytes) -> str:
 def _extract_text(content: bytes, mime: str | None, filename: str | None) -> str:
     mime_lower = (mime or "").lower()
     suffix = (pathlib.Path(filename).suffix.lower() if filename else "") if filename else ""
+
+    if mime_lower in {"application/rtf", "text/rtf"} or suffix == ".rtf":
+        text = _decode_bytes(content)
+        if rtf_to_text:
+            try:
+                return rtf_to_text(text)
+            except Exception:
+                return text
+        return text
 
     if mime_lower.startswith("text/") or suffix in {".txt", ".md", ".csv", ".log"}:
         return _decode_bytes(content)
@@ -259,7 +277,7 @@ def _extract_text(content: bytes, mime: str | None, filename: str | None) -> str
     if mime_lower in {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/msword",
-    } or suffix == ".docx":
+    } or suffix in {".docx", ".doc"}:
         try:
             document = docx.Document(io.BytesIO(content))
             return "\n".join(p.text for p in document.paragraphs)
@@ -270,6 +288,349 @@ def _extract_text(content: bytes, mime: str | None, filename: str | None) -> str
         return _decode_bytes(content)
 
     return ""
+
+
+def _extract_docx_text_and_tables(content: bytes) -> str:
+    try:
+        document = docx.Document(io.BytesIO(content))
+    except Exception:
+        return ""
+
+    parts: list[str] = []
+    paragraphs = [p.text for p in document.paragraphs if p.text]
+    if paragraphs:
+        parts.append("\n".join(paragraphs))
+
+    table_blocks: list[str] = []
+    for idx, table in enumerate(document.tables, 1):
+        rows = []
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            if any(cells):
+                rows.append(" | ".join(cells))
+        if rows:
+            table_blocks.append(f"[table {idx}]\n" + "\n".join(rows))
+    if table_blocks:
+        parts.append("\n\n".join(table_blocks))
+
+    return "\n\n".join(parts)
+
+
+def _extract_docx_images(content: bytes) -> list[bytes]:
+    try:
+        document = docx.Document(io.BytesIO(content))
+    except Exception:
+        return []
+
+    images: list[bytes] = []
+    seen: set[str] = set()
+    for rel in document.part.rels.values():
+        try:
+            if "image" not in rel.reltype:
+                continue
+            blob = rel.target_part.blob
+            digest = hashlib.sha1(blob).hexdigest()
+            if digest in seen:
+                continue
+            seen.add(digest)
+            images.append(blob)
+        except Exception:
+            continue
+    return images
+
+
+def _image_bytes_to_png_b64(data: bytes) -> str | None:
+    try:
+        img = Image.open(io.BytesIO(data))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception:
+        return None
+
+
+def _should_use_vision_for_docx(text: str, question: str) -> bool:
+    if not text or len(text.strip()) < 200:
+        return True
+    q = (question or "").lower()
+    keywords = [
+        "image", "figure", "diagram", "chart", "graph", "picture", "photo",
+        "\u0440\u0438\u0441\u0443\u043d\u043e\u043a", "\u0434\u0438\u0430\u0433\u0440\u0430\u043c", "\u0433\u0440\u0430\u0444\u0438\u043a", "\u0441\u0445\u0435\u043c",
+    ]
+    return any(k in q for k in keywords)
+
+
+async def _vision_answer_image(
+    client: AsyncOpenAI,
+    model: str | None,
+    question: str,
+    image_bytes: bytes,
+    image_index: int,
+) -> dict[str, Any]:
+    b64 = _image_bytes_to_png_b64(image_bytes)
+    if not b64:
+        return {"image": image_index + 1, "answer": ""}
+    content = [
+        {
+            "type": "text",
+            "text": (
+                "Answer the question using only the provided image. "
+                "Return concise text; if nothing relevant, say 'not found'. "
+            ),
+        },
+        {
+            "type": "text",
+            "text": f"Question: {question}\nImage: {image_index + 1}",
+        },
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{b64}"},
+        },
+    ]
+    chat = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": content}],
+        temperature=0,
+    )
+    answer = chat.choices[0].message.content or ""
+    return {"image": image_index + 1, "answer": answer.strip()}
+
+
+def _load_tables(content: bytes, mime: str | None, filename: str | None) -> dict[str, pd.DataFrame]:
+    """Load tabular file into dict of DataFrames keyed by sheet name."""
+    mime_lower = (mime or "").lower()
+    suffix = (pathlib.Path(filename).suffix.lower() if filename else "")
+    dfs: dict[str, pd.DataFrame] = {}
+    buf = io.BytesIO(content)
+    logger.info(
+        "table_load_start",
+        extra={
+            "mime": mime_lower,
+            "suffix": suffix,
+            "size_bytes": len(content),
+        },
+    )
+
+    try:
+        if suffix in {".csv", ".tsv"} or mime_lower in {"text/csv", "text/tab-separated-values"}:
+            sep = "\t" if suffix == ".tsv" or "tab" in mime_lower else None
+            csv_encodings = [None, "utf-8", "utf-8-sig", "cp1251", "latin-1"]
+            last_error: Exception | None = None
+            for enc in csv_encodings:
+                try:
+                    buf.seek(0)
+                    df = pd.read_csv(
+                        buf,
+                        sep=sep,
+                        engine="python",
+                        encoding=enc if enc else None,
+                    )
+                    logger.info(
+                        "table_load_csv_ok",
+                        extra={
+                            "rows": df.shape[0],
+                            "cols": df.shape[1],
+                            "encoding": enc or "default",
+                        },
+                    )
+                    dfs["Sheet1"] = df
+                    return dfs
+                except Exception as exc:
+                    last_error = exc
+                    continue
+            # last-resort: let pandas sniff sep/encoding with errors replaced
+            try:
+                buf.seek(0)
+                df = pd.read_csv(buf, sep=None, engine="python", encoding_errors="replace")
+                logger.info(
+                    "table_load_csv_ok_fallback",
+                    extra={
+                        "rows": df.shape[0],
+                        "cols": df.shape[1],
+                        "error": str(last_error) if last_error else "",
+                    },
+                )
+                dfs["Sheet1"] = df
+                return dfs
+            except Exception as exc2:
+                logger.error(
+                    "table_load_csv_failed",
+                    extra={"error": str(exc2), "mime": mime_lower, "suffix": suffix},
+                )
+                return {}
+
+        if suffix in {".xlsx", ".xls", ".ods"} or mime_lower in {
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel",
+            "application/vnd.oasis.opendocument.spreadsheet",
+            }:
+            try:
+                dfs_raw = pd.read_excel(buf, sheet_name=None, dtype_backend="pyarrow")
+                logger.info(
+                    "table_load_excel_ok",
+                    extra={"sheets": list(dfs_raw.keys())},
+                )
+            except Exception as exc:
+                buf.seek(0)
+                try:
+                    dfs_raw = pd.read_excel(buf, sheet_name=None, engine="openpyxl")
+                    logger.info(
+                        "table_load_excel_ok_openpyxl",
+                        extra={"sheets": list(dfs_raw.keys()), "error": str(exc)},
+                    )
+                except Exception:
+                    dfs_raw = {}
+            return {str(k): v for k, v in dfs_raw.items()}
+
+        if suffix in {".parquet"} or mime_lower == "application/octet-stream":
+            buf.seek(0)
+            try:
+                df = pd.read_parquet(buf)
+                logger.info(
+                    "table_load_parquet_ok",
+                    extra={"rows": df.shape[0], "cols": df.shape[1]},
+                )
+                dfs["Sheet1"] = df
+                return dfs
+            except Exception as exc:
+                logger.error(
+                    "table_load_parquet_failed",
+                    extra={"error": str(exc), "mime": mime_lower, "suffix": suffix},
+                )
+                return {}
+    except Exception as exc:
+        logger.warning("table_load_failed", extra={"error": str(exc), "mime": mime, "suffix": suffix})
+        # last-resort: openpyxl manual read
+        try:
+            buf.seek(0)
+            wb = openpyxl.load_workbook(buf, data_only=True, read_only=True)
+            for sheet in wb.sheetnames:
+                ws = wb[sheet]
+                rows = list(ws.iter_rows(values_only=True))
+                if not rows:
+                    continue
+                header = rows[0]
+                data = rows[1:] if len(rows) > 1 else []
+                df = pd.DataFrame(data, columns=header)
+                dfs[str(sheet)] = df
+            wb.close()
+            if dfs:
+                logger.info(
+                    "table_load_openpyxl_manual_ok",
+                    extra={"sheets": list(dfs.keys())},
+                )
+            return dfs
+        except Exception as exc2:
+            logger.error("table_load_failed_final", extra={"error": str(exc2), "mime": mime, "suffix": suffix})
+            return {}
+    return {}
+
+
+def _df_sample(df: pd.DataFrame, rows: int = 5) -> str:
+    try:
+        return df.head(rows).to_markdown(index=False)
+    except Exception:
+        return df.head(rows).to_string(index=False)
+
+def _format_table_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, pd.DataFrame):
+        try:
+            return value.head(20).to_markdown(index=False)
+        except Exception:
+            return value.head(20).to_string(index=False)
+    if isinstance(value, pd.Series):
+        try:
+            return value.head(20).to_string(index=False)
+        except Exception:
+            return str(value.head(20))
+    if isinstance(value, (list, dict, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+    try:
+        # numpy scalars
+        if hasattr(value, "item"):
+            return str(value.item())
+    except Exception:
+        pass
+    return str(value)
+
+def _extract_json_payload(text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+    match = re.search(r"```json\\s*(\\{.*?\\})```", text, re.S | re.I)
+    if not match:
+        match = re.search(r"```\\s*(\\{.*?\\})```", text, re.S)
+    payload = None
+    if match:
+        payload = match.group(1).strip()
+    else:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            payload = text[start:end + 1]
+    if not payload:
+        return None
+    try:
+        return json.loads(payload)
+    except Exception:
+        return None
+
+
+def _safe_table_exec(code: str, dfs: dict[str, pd.DataFrame]) -> dict[str, Any]:
+    allowed_builtins = {
+        "__builtins__": {
+            "print": print,
+            "len": len,
+            "range": range,
+            "int": int,
+            "float": float,
+            "str": str,
+            "bool": bool,
+            "list": list,
+            "dict": dict,
+            "set": set,
+            "tuple": tuple,
+            "min": min,
+            "max": max,
+            "sum": sum,
+            "abs": abs,
+            "sorted": sorted,
+            "enumerate": enumerate,
+            "any": any,
+            "all": all,
+            "zip": zip,
+            "round": round,
+            "isinstance": isinstance,
+        }
+    }
+    env = {"dfs": dfs, "pd": pd, "np": np}
+    stdout_buf = io.StringIO()
+    try:
+        compiled = compile(code, "<table_exec>", "exec")
+        with contextlib.redirect_stdout(stdout_buf):
+            exec(compiled, allowed_builtins, env)
+        return {"ok": True, "stdout": stdout_buf.getvalue().strip(), "result": env.get("result")}
+    except Exception as exc:
+        error_text = str(exc)
+        error_type = "execution_failed"
+        missing_name = None
+        if isinstance(exc, NameError):
+            match = re.search(r"name '([^']+)' is not defined", error_text)
+            if match:
+                missing_name = match.group(1)
+                error_type = "restricted_builtin"
+        return {
+            "ok": False,
+            "error": error_text,
+            "error_type": error_type,
+            "missing_name": missing_name,
+            "stdout": stdout_buf.getvalue().strip(),
+            "result": None,
+        }
 
 
 def _pdf_page_texts(content: bytes) -> list[str]:
@@ -374,6 +735,186 @@ async def _vision_answer_page(
     return {"page": page_index + 1, "answer": answer.strip()}
 
 
+async def _run_table_agent(
+    dfs: dict[str, pd.DataFrame],
+    question: str,
+    model: str | None,
+    client: AsyncOpenAI,
+    max_attempts: int = 4,
+) -> dict[str, Any]:
+    sheet_summaries = []
+    for name, df in dfs.items():
+        rows, cols = df.shape
+        summary = {
+            "sheet": name,
+            "rows": rows,
+            "cols": cols,
+            "columns": list(df.columns[:20]),
+            "preview": _df_sample(df),
+        }
+        sheet_summaries.append(summary)
+
+    allowed_builtin_list = [
+        "print", "len", "range", "int", "float", "str", "bool", "list", "dict", "set", "tuple",
+        "min", "max", "sum", "abs", "sorted", "enumerate", "any", "all", "zip", "round", "isinstance",
+    ]
+    sys_prompt = (
+        "You are a data analyst. You can run Python pandas code to answer the user's question.\n"
+        "- Available DataFrames are in dict `dfs`, keyed by sheet name.\n"
+        "- Choose the right sheet by name (e.g., dfs['Sheet1']).\n"
+        "- Use only pandas/numpy; no file/network/unsafe operations.\n"
+        "- Return ONLY JSON (no markdown) with fields: action, code, answer.\n"
+        "- action: \"run_code\" to execute code, or \"answer\" if you can answer now.\n"
+        "- When action is \"run_code\", code MUST assign `result = ...` (JSON-serializable).\n"
+        f"- Allowed builtins: {', '.join(allowed_builtin_list)}.\n"
+        "- Keep code short and efficient.\n"
+    )
+
+    sheets_text = "\n\n".join(
+        f"Sheet: {s['sheet']} (rows={s['rows']}, cols={s['cols']})\n"
+        f"Columns: {s['columns']}\nSample:\n{s['preview']}"
+        for s in sheet_summaries
+    )
+
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {
+            "role": "user",
+            "content": (
+                f"Question: {question}\n\n"
+                "Tables available:\n"
+                f"{sheets_text}\n\n"
+                "Reply ONLY with JSON as specified in the system instructions."
+            ),
+        },
+    ]
+
+    last_error = None
+    used_sheets: list[str] = []
+    for attempt in range(1, max_attempts + 1):
+        logger.info("table_agent_attempt", extra={"attempt": attempt})
+        chat = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0,
+        )
+        reply = chat.choices[0].message.content or ""
+        payload = _extract_json_payload(reply)
+        if not payload:
+            last_error = "invalid_json"
+            messages.append({"role": "assistant", "content": reply})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Your response was not valid JSON. Please respond with JSON only.",
+                }
+            )
+            continue
+
+        action = str(payload.get("action") or "").strip().lower()
+        code = str(payload.get("code") or "").strip()
+        answer = str(payload.get("answer") or "").strip()
+        if action == "answer" and answer:
+            return {
+                "answer": answer,
+                "mode": "table_agent",
+                "used_chunks": [{"sheet": s} for s in used_sheets],
+            }
+        if action != "run_code" or not code:
+            last_error = "missing_code"
+            messages.append({"role": "assistant", "content": reply})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "You must respond with action=run_code and provide Python code that assigns `result`.",
+                }
+            )
+            continue
+
+        # crude sheet detection
+        for name in dfs.keys():
+            if f"dfs['{name}'" in code or f'dfs["{name}"' in code:
+                used_sheets.append(name)
+
+        exec_result = _safe_table_exec(code, dfs)
+        logger.info(
+            "table_agent_exec",
+            extra={
+                "attempt": attempt,
+                "used_sheets": used_sheets,
+                "ok": exec_result.get("ok"),
+                "error": exec_result.get("error"),
+                "error_type": exec_result.get("error_type"),
+                "missing_name": exec_result.get("missing_name"),
+                "stdout_preview": (exec_result.get("stdout") or "")[:200],
+                "result_preview": _format_table_value(exec_result.get("result"))[:200],
+                "code_preview": code[:200],
+            },
+        )
+        if exec_result.get("ok"):
+            stdout = exec_result.get("stdout", "")
+            result_text = _format_table_value(exec_result.get("result"))
+            combined = result_text or stdout
+            if combined:
+                messages.append({"role": "assistant", "content": reply})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Execution result:\n"
+                            f"{combined}\n\n"
+                            "If you can answer now, respond with action=answer and a concise answer. "
+                            "Otherwise, run more code."
+                        ),
+                    }
+                )
+                continue
+            last_error = "empty_output"
+            messages.append({"role": "assistant", "content": reply})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Your code produced no output. Please assign result = ... (JSON-serializable).",
+                }
+            )
+            continue
+
+        last_error = exec_result.get("error", "execution_failed")
+        error_type = exec_result.get("error_type")
+        missing_name = exec_result.get("missing_name")
+        messages.append(
+            {
+                "role": "assistant",
+                "content": reply,
+            }
+        )
+        if error_type == "restricted_builtin" and missing_name:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Your code used a name that is not available in the sandbox: '{missing_name}'. "
+                        f"Allowed builtins: {', '.join(allowed_builtin_list)}. "
+                        "Use only dfs/pd/np and allowed builtins, then respond with JSON only."
+                    ),
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Your code failed with error: {last_error}. Please fix and respond with JSON only.",
+                }
+            )
+
+    return {
+        "answer": "",
+        "mode": "table_error",
+        "error": "table_exec_failed",
+        "used_chunks": [{"sheet": s} for s in used_sheets],
+    }
+
+
 async def _run_doc_search(args: dict[str, Any], model: str | None, client: AsyncOpenAI) -> dict[str, Any]:
     raw_url = args.get("download_url") or args.get("url")
     if raw_url and isinstance(raw_url, str) and raw_url.startswith("/"):
@@ -389,16 +930,108 @@ async def _run_doc_search(args: dict[str, Any], model: str | None, client: Async
         resp.raise_for_status()
         content = resp.content
         mime = resp.headers.get("content-type", "").split(";")[0].strip() or None
-        filename = args.get("file_name") or args.get("filename")
+        filename = (
+            args.get("file_name")
+            or args.get("filename")
+            or args.get("fileName")
+        )
         if not filename:
-            filename = _mask_secret(download_url.split("/")[-1])
+            # fallback to URL path segment
+            filename = download_url.split("?")[0].split("/")[-1] if download_url else None
+        if not filename:
+            filename = _mask_secret(download_url.split("/")[-1]) if download_url else ""
         if not mime:
             mime = _detect_mime_from_name(filename)
 
     suffix = pathlib.Path(filename).suffix.lower() if filename else ""
 
+    logger.info(
+        "doc_search_file",
+        extra={
+            "file": filename,
+            "mime": mime,
+            "suffix": suffix,
+            "size_bytes": len(content),
+            "download_url": _mask_secret(download_url),
+        },
+    )
+
+    # Table docs branch
+    table_suffixes = {".csv", ".tsv", ".xlsx", ".xls", ".ods", ".parquet"}
+    table_mimes = {
+        "text/csv",
+        "text/tab-separated-values",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "application/vnd.oasis.opendocument.spreadsheet",
+    }
+    if suffix in table_suffixes or (mime and mime.lower() in table_mimes):
+        dfs = _load_tables(content, mime, filename)
+        if not dfs:
+            return {
+                "answer": "table_load_failed",
+                "mode": "table_error",
+                "error": "failed_to_load_table",
+                "token_count": 0,
+                "file": {"name": filename, "mime": mime, "size_bytes": len(content)},
+                "used_chunks": [],
+            }
+        logger.info(
+            "table_loaded",
+            extra={
+                "file": filename,
+                "mime": mime,
+                "size": len(content),
+                "sheets": {k: list(v.shape) for k, v in dfs.items()},
+            },
+        )
+        table_result = await _run_table_agent(dfs, search_request, model, client)
+        return {
+            "answer": table_result.get("answer", ""),
+            "mode": table_result.get("mode", "table_agent"),
+            "token_count": 0,
+            "file": {"name": filename, "mime": mime, "size_bytes": len(content)},
+            "used_chunks": table_result.get("used_chunks", []),
+            "error": table_result.get("error"),
+        }
+
+    logger.info(
+        "doc_search_mode",
+        extra={
+            "mode": "text",
+            "mime": mime,
+            "suffix": suffix,
+        },
+    )
+
     vision_pages: list[dict[str, Any]] = []
-    combined_text = _extract_text(content, mime, filename)
+    combined_text = ""
+
+    if (mime and mime.lower() in {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    }) or (suffix in {".docx", ".doc"}):
+        combined_text = _extract_docx_text_and_tables(content)
+        images = _extract_docx_images(content) if suffix == ".docx" or (mime and "wordprocessingml" in mime.lower()) else []
+        if images and _should_use_vision_for_docx(combined_text, search_request):
+            MAX_VISION_IMAGES = 3
+            for idx, image_bytes in enumerate(images[:MAX_VISION_IMAGES]):
+                try:
+                    vis = await _vision_answer_image(client, model, search_request, image_bytes, idx)
+                    if vis.get("answer"):
+                        vision_pages.append({"image": vis["image"], "preview": vis["answer"][:200]})
+                except Exception:
+                    continue
+            if vision_pages:
+                vision_text = "\n\n".join(
+                    f"[vision image {item['image']}]\n{item['preview']}" for item in vision_pages if item.get("preview")
+                )
+                combined_parts = [part for part in [combined_text, vision_text] if part]
+                combined_text = "\n\n".join(combined_parts) if combined_parts else combined_text
+    elif suffix == ".rtf" or (mime and mime.lower() in {"application/rtf", "text/rtf"}):
+        combined_text = _extract_text(content, mime, filename)
+    else:
+        combined_text = _extract_text(content, mime, filename)
 
     if (mime and mime.lower() == "application/pdf") or suffix == ".pdf":
         page_texts = _pdf_page_texts(content)
