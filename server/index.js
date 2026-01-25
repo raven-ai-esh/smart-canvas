@@ -821,10 +821,32 @@ const safeUnlink = async (filePath) => {
   }
 };
 
+const countCyrillic = (value) => (
+  typeof value === 'string' ? (value.match(/\p{Script=Cyrillic}/gu) || []).length : 0
+);
+
+const countReplacementChars = (value) => (
+  typeof value === 'string' ? (value.match(/\uFFFD/g) || []).length : 0
+);
+
+const fixMojibakeFilename = (value) => {
+  if (typeof value !== 'string') return '';
+  const decoded = Buffer.from(value, 'latin1').toString('utf8');
+  if (!decoded || decoded === value) return value;
+  const score = (text) => (countCyrillic(text) * 2) - countReplacementChars(text);
+  if (score(decoded) > score(value)) return decoded;
+  if (countReplacementChars(value) > 0 && countReplacementChars(decoded) === 0) return decoded;
+  return value;
+};
+
 const sanitizeFilename = (name) => {
   const trimmed = typeof name === 'string' ? name.trim() : '';
   const base = trimmed ? path.basename(trimmed) : 'attachment';
-  const normalized = base.replace(/[^\w.\- ]+/g, '_').slice(0, 180);
+  const fixed = fixMojibakeFilename(base);
+  let normalized = fixed.normalize('NFC');
+  normalized = normalized.replace(/[^\p{L}\p{N}.\- _]+/gu, '_');
+  normalized = normalized.replace(/\s+/g, ' ').trim();
+  normalized = normalized.slice(0, 180);
   return normalized || 'attachment';
 };
 
@@ -849,6 +871,17 @@ async function getAttachmentById(id) {
     [id],
   );
   return res.rows[0] ?? null;
+}
+
+async function getAttachmentsByIds(ids = []) {
+  if (!Array.isArray(ids) || ids.length === 0) return [];
+  const unique = Array.from(new Set(ids.filter((id) => typeof id === 'string' && id.trim())));
+  if (unique.length === 0) return [];
+  const res = await pool.query(
+    'SELECT id, session_id, user_id, name, mime, size, storage_path FROM attachments WHERE id = ANY($1::text[])',
+    [unique],
+  );
+  return res.rows ?? [];
 }
 
 async function listSessionSavers(sessionId) {
@@ -2271,23 +2304,71 @@ const normalizeAssistantTrace = (value) => {
   };
 };
 
+const normalizeAssistantAttachments = (value) => {
+  if (!Array.isArray(value)) return null;
+  const cleaned = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue;
+    const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+    if (!id) continue;
+    const name = clampText(raw.name ?? '', 180) || 'Attachment';
+    const mime = clampText(raw.mime ?? '', 120) || 'application/octet-stream';
+    const size = Number.isFinite(raw.size) ? Math.max(0, Math.floor(raw.size)) : 0;
+    const url = typeof raw.url === 'string' ? raw.url.trim() : '';
+    const kind = mime.toLowerCase().startsWith('image/') ? 'image' : 'file';
+    cleaned.push({
+      id,
+      name,
+      mime,
+      size,
+      url: url || `/api/attachments/${id}`,
+      kind,
+    });
+    if (cleaned.length >= 30) break;
+  }
+  return cleaned.length ? cleaned : null;
+};
+
 const normalizeAssistantMessageMeta = (value) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const selectionContext = normalizeSelectionContext(value.selectionContext ?? value.selection ?? value);
   const trace = normalizeAssistantTrace(value.trace);
+  const attachments = normalizeAssistantAttachments(value.attachments);
   const externalReply = value.externalReply === true;
   const externalSender = typeof value.externalSender === 'string' ? value.externalSender.trim() : '';
   const externalChannel = typeof value.externalChannel === 'string' ? value.externalChannel.trim() : '';
-  if (!selectionContext && !trace && !externalReply) return null;
+  if (!selectionContext && !trace && !attachments && !externalReply) return null;
   const meta = {};
   if (selectionContext) meta.selectionContext = selectionContext;
   if (trace) meta.trace = trace;
+  if (attachments) meta.attachments = attachments;
   if (externalReply) {
     meta.externalReply = true;
     if (externalSender) meta.externalSender = externalSender;
     if (externalChannel) meta.externalChannel = externalChannel;
   }
   return meta;
+};
+
+const formatAttachmentsForAgent = (attachments) => {
+  if (!Array.isArray(attachments) || attachments.length === 0) return '';
+  const lines = attachments.slice(0, 10).map((att) => {
+    if (!att || typeof att !== 'object') return null;
+    const name = typeof att.name === 'string' && att.name.trim() ? att.name.trim() : 'Attachment';
+    const mime = typeof att.mime === 'string' && att.mime.trim() ? att.mime.trim() : 'application/octet-stream';
+    const size = Number.isFinite(att.size) ? Math.max(0, Math.floor(att.size)) : 0;
+    const url = typeof att.url === 'string' && att.url.trim()
+      ? att.url.trim()
+      : (att.id ? `/api/attachments/${att.id}` : '');
+    if (!url) return null;
+    return `- ${name} (mime: ${mime}, size_bytes: ${size}, download_url: ${url})`;
+  }).filter(Boolean);
+  if (!lines.length) return '';
+  return [
+    'Attached files:',
+    ...lines,
+    'Use doc_search with download_url and the user question to read these files.',
+  ].join('\n');
 };
 
 const isExternalReplyMessage = (message) => {
@@ -3087,7 +3168,14 @@ const buildAssistantContext = async ({
     }
     const selectionContext = message?.meta?.selectionContext ?? null;
     const selectionBlock = formatSelectionContextForAgent(selectionContext);
-    const content = selectionBlock ? `${message.content}\n\n${selectionBlock}` : message.content;
+    const attachmentsBlock = formatAttachmentsForAgent(message?.meta?.attachments ?? null);
+    let content = message.content;
+    if (selectionBlock) {
+      content = `${content}\n\n${selectionBlock}`;
+    }
+    if (attachmentsBlock) {
+      content = `${content}\n\n${attachmentsBlock}`;
+    }
     items.push({ role: message.role, content });
   }
   return { items };
@@ -5608,19 +5696,46 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
     thread.sessionId = incomingSessionId;
   }
 
+  const rawAttachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
+  const attachmentIds = rawAttachments
+    .map((item) => (typeof item === 'string' ? item : item?.id))
+    .filter((id) => typeof id === 'string' && id.trim())
+    .map((id) => id.trim());
+  const attachmentRows = attachmentIds.length ? await getAttachmentsByIds(attachmentIds) : [];
+  const attachments = attachmentRows
+    .filter((row) => row.session_id === incomingSessionId)
+    .map((row) => {
+      const mime = typeof row.mime === 'string' && row.mime.trim() ? row.mime.trim() : 'application/octet-stream';
+      return {
+        id: row.id,
+        name: row.name ?? 'Attachment',
+        mime,
+        size: Number.isFinite(row.size) ? Number(row.size) : 0,
+        url: `/api/attachments/${row.id}`,
+        kind: mime.toLowerCase().startsWith('image/') ? 'image' : 'file',
+      };
+    });
+  if (attachmentIds.length && attachments.length === 0) {
+    return res.status(400).json({ error: 'attachments_not_found' });
+  }
+
   const userText = normalizeMessageContent(req.body?.content);
-  if (!userText) return res.status(400).json({ error: 'content_required' });
+  const resolvedContent = userText || (attachments.length ? 'Attached files.' : '');
+  if (!resolvedContent) return res.status(400).json({ error: 'content_required' });
   const selectionContext = normalizeSelectionContext(req.body?.selectionContext);
 
   const keyRow = await getOpenAiKeyForUser(auth.userId);
   const apiKey = keyRow?.api_key ?? OPENAI_API_KEY;
   if (!apiKey) return res.status(400).json({ error: 'openai_key_required' });
   try {
+    const meta = {};
+    if (selectionContext) meta.selectionContext = selectionContext;
+    if (attachments.length) meta.attachments = attachments;
     const userMessage = await insertAssistantMessage({
       threadId,
       role: 'user',
-      content: userText,
-      meta: selectionContext ? { selectionContext } : null,
+      content: resolvedContent,
+      meta: Object.keys(meta).length ? meta : null,
     });
     const queuedAt = Date.now();
     const alreadyQueued = assistantWorkQueue.has(threadId);
@@ -5647,7 +5762,7 @@ app.post('/api/assistant/threads/:id/messages', async (req, res) => {
       sessionId: thread.sessionId ?? null,
       userId: auth.userId,
       threadId: thread.id,
-      userText,
+      userText: resolvedContent,
       queuedAt,
       userMessageId: userMessage?.id ?? null,
       hasUserKey: !!keyRow,

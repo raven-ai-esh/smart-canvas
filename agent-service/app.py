@@ -1015,6 +1015,25 @@ async def _run_doc_search(args: dict[str, Any], model: str | None, client: Async
             "error": table_result.get("error"),
         }
 
+    image_suffixes = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
+    if (mime and mime.lower().startswith("image/")) or (suffix in image_suffixes):
+        logger.info(
+            "doc_search_mode",
+            extra={
+                "mode": "image",
+                "mime": mime,
+                "suffix": suffix,
+            },
+        )
+        vision = await _vision_answer_image(client, model, search_request, content, 0)
+        return {
+            "answer": vision.get("answer", ""),
+            "mode": "vision_image",
+            "token_count": 0,
+            "file": {"name": filename, "mime": mime, "size_bytes": len(content)},
+            "used_chunks": [{"image": vision.get("image")}],
+        }
+
     logger.info(
         "doc_search_mode",
         extra={
