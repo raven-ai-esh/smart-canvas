@@ -581,32 +581,36 @@ def _extract_json_payload(text: str) -> dict[str, Any] | None:
 
 
 def _safe_table_exec(code: str, dfs: dict[str, pd.DataFrame]) -> dict[str, Any]:
-    allowed_builtins = {
-        "__builtins__": {
-            "print": print,
-            "len": len,
-            "range": range,
-            "int": int,
-            "float": float,
-            "str": str,
-            "bool": bool,
-            "list": list,
-            "dict": dict,
-            "set": set,
-            "tuple": tuple,
-            "min": min,
-            "max": max,
-            "sum": sum,
-            "abs": abs,
-            "sorted": sorted,
-            "enumerate": enumerate,
-            "any": any,
-            "all": all,
-            "zip": zip,
-            "round": round,
-            "isinstance": isinstance,
-        }
+    allowed_builtin_names = {
+        "__import__",
+        "print",
+        "len",
+        "range",
+        "int",
+        "float",
+        "str",
+        "bool",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "min",
+        "max",
+        "sum",
+        "abs",
+        "sorted",
+        "enumerate",
+        "any",
+        "all",
+        "zip",
+        "round",
+        "isinstance",
     }
+    if isinstance(__builtins__, dict):
+        builtins_map = {name: __builtins__[name] for name in allowed_builtin_names if name in __builtins__}
+    else:
+        builtins_map = {name: getattr(__builtins__, name) for name in allowed_builtin_names}
+    allowed_builtins = {"__builtins__": builtins_map}
     env = {"dfs": dfs, "pd": pd, "np": np}
     stdout_buf = io.StringIO()
     try:
@@ -622,7 +626,13 @@ def _safe_table_exec(code: str, dfs: dict[str, pd.DataFrame]) -> dict[str, Any]:
             match = re.search(r"name '([^']+)' is not defined", error_text)
             if match:
                 missing_name = match.group(1)
-                error_type = "restricted_builtin"
+                # Only flag as restricted when it's a real builtin that's blocked.
+                try:
+                    builtin_names = set(dir(__builtins__))
+                except Exception:
+                    builtin_names = set()
+                if missing_name in builtin_names and missing_name not in allowed_builtin_names:
+                    error_type = "restricted_builtin"
         return {
             "ok": False,
             "error": error_text,
@@ -896,6 +906,16 @@ async def _run_table_agent(
                         f"Your code used a name that is not available in the sandbox: '{missing_name}'. "
                         f"Allowed builtins: {', '.join(allowed_builtin_list)}. "
                         "Use only dfs/pd/np and allowed builtins, then respond with JSON only."
+                    ),
+                }
+            )
+        elif missing_name:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Your code failed because '{missing_name}' was used before it was defined. "
+                        "Define variables before use (e.g., `rows = []`) and respond with JSON only."
                     ),
                 }
             )
