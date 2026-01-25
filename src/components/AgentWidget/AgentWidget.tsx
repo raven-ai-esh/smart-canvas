@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, ChevronDown, ChevronUp, Link2, MessageCircle, ThumbsDown, ThumbsUp, Trash2, X } from 'lucide-react';
+import { Bot, ChevronDown, ChevronUp, Link2, MessageCircle, Paperclip, ThumbsDown, ThumbsUp, Trash2, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useStore } from '../../store/useStore';
 import type { AssistantSelectionContext } from '../../types/assistant';
+import type { Attachment } from '../../types';
+import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES, resolveAttachmentUrl } from '../../utils/attachments';
 import { markdownComponents, markdownPlugins } from '../../utils/markdown';
 
 const normalizeAssistantMarkdown = (text: string) => (
@@ -37,6 +39,7 @@ type ChatMessage = {
   content: string;
   createdAt?: string | null;
   selectionContext?: AssistantSelectionContext | null;
+  attachments?: Attachment[];
   trace?: AssistantTrace | null;
   externalReply?: boolean;
   externalSender?: string | null;
@@ -93,6 +96,9 @@ const mapErrorMessage = (code?: string) => {
   if (code === 'session_required') {
     return 'Session is not ready yet. Please wait a moment and try again.';
   }
+  if (code === 'attachments_not_found') {
+    return 'Attached files are missing or unavailable. Please reattach the files and try again.';
+  }
   if (code === 'thread_session_mismatch') {
     return 'Chat session does not match the current canvas. Reopening the assistant should fix it.';
   }
@@ -118,6 +124,9 @@ export const AgentWidget: React.FC = () => {
   const [hasUnread, setHasUnread] = useState(false);
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
+  const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [uploadingAttachments, setUploadingAttachments] = useState(false);
   const [assistantStatus, setAssistantStatus] = useState<'idle' | 'thinking' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [contextInfo, setContextInfo] = useState<{ remainingRatio?: number | null } | null>(null);
@@ -127,6 +136,7 @@ export const AgentWidget: React.FC = () => {
   const [resetting, setResetting] = useState(false);
   const [panelSize, setPanelSize] = useState({ width: PANEL_DEFAULT_WIDTH, height: PANEL_DEFAULT_HEIGHT });
   const [isNarrow, setIsNarrow] = useState(() => window.matchMedia?.('(max-width: 520px)').matches ?? false);
+  const [isDragActive, setIsDragActive] = useState(false);
 
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -136,6 +146,7 @@ export const AgentWidget: React.FC = () => {
   const threadIdRef = useRef<string | null>(null);
   const forceNewThreadRef = useRef(false);
   const resetTokenRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const resizeStartRef = useRef<{
     x: number;
     y: number;
@@ -143,6 +154,7 @@ export const AgentWidget: React.FC = () => {
     height: number;
   } | null>(null);
   const panelSizeRef = useRef(panelSize);
+  const dragDepthRef = useRef(0);
   const threadKey = useMemo(() => {
     if (!me?.id || !sessionId) return null;
     return `assistantThread:${me.id}:${sessionId}`;
@@ -169,6 +181,11 @@ export const AgentWidget: React.FC = () => {
     return !document.hidden && document.hasFocus();
   }, []);
 
+  const clearPendingAttachments = useCallback(() => {
+    setPendingAttachments([]);
+    setAttachmentError(null);
+  }, []);
+
   const toggleDetails = useCallback((key: string) => {
     setExpandedDetails((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
@@ -188,8 +205,14 @@ export const AgentWidget: React.FC = () => {
   }, [open]);
 
   useEffect(() => {
+    clearPendingAttachments();
+  }, [clearPendingAttachments, sessionId]);
+
+  useEffect(() => {
     if (!open) {
       setShowResetConfirm(false);
+      setIsDragActive(false);
+      dragDepthRef.current = 0;
     }
   }, [open]);
 
@@ -423,6 +446,7 @@ export const AgentWidget: React.FC = () => {
       content: msg.content,
       createdAt: msg.createdAt ?? null,
       selectionContext: (msg?.meta?.selectionContext ?? null) as AssistantSelectionContext | null,
+      attachments: Array.isArray(msg?.meta?.attachments) ? msg.meta.attachments : [],
       trace: msg?.meta?.trace ?? null,
       externalReply: !!msg?.meta?.externalReply,
       externalSender: typeof msg?.meta?.externalSender === 'string' ? msg.meta.externalSender : null,
@@ -474,6 +498,79 @@ export const AgentWidget: React.FC = () => {
       setFeedbackBusy((prev) => ({ ...prev, [messageKey]: false }));
     }
   }, [me?.id]);
+
+  const handleAttachmentPick = useCallback(async (fileList: FileList | null) => {
+    const files = fileList ? Array.from(fileList) : [];
+    if (!files.length) return;
+    if (!sessionId) {
+      setAttachmentError('Session is not ready yet.');
+      return;
+    }
+    setAttachmentError(null);
+    setUploadingAttachments(true);
+    try {
+      const { attachments, rejected, failed } = await filesToAttachments(files, sessionId);
+      if (attachments.length) {
+        setPendingAttachments((prev) => [...prev, ...attachments]);
+      }
+      const errors = [];
+      if (rejected.length) {
+        errors.push(`${rejected.length} file(s) exceed ${formatBytes(MAX_ATTACHMENT_BYTES)}`);
+      }
+      if (failed.length) {
+        errors.push(`${failed.length} file(s) failed to upload`);
+      }
+      if (errors.length) {
+        setAttachmentError(errors.join('. '));
+      }
+    } finally {
+      setUploadingAttachments(false);
+    }
+  }, [sessionId]);
+
+  const handleDragEnter = useCallback((evt: React.DragEvent) => {
+    if (!openRef.current) return;
+    evt.preventDefault();
+    evt.stopPropagation();
+    dragDepthRef.current += 1;
+    if (!isDragActive) {
+      setIsDragActive(true);
+    }
+  }, [isDragActive]);
+
+  const handleDragOver = useCallback((evt: React.DragEvent) => {
+    if (!openRef.current) return;
+    evt.preventDefault();
+    evt.stopPropagation();
+    if (evt.dataTransfer) {
+      evt.dataTransfer.dropEffect = 'copy';
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((evt: React.DragEvent) => {
+    if (!openRef.current) return;
+    evt.preventDefault();
+    evt.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragActive(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback((evt: React.DragEvent) => {
+    if (!openRef.current) return;
+    evt.preventDefault();
+    evt.stopPropagation();
+    dragDepthRef.current = 0;
+    setIsDragActive(false);
+    if (evt.dataTransfer?.files?.length) {
+      void handleAttachmentPick(evt.dataTransfer.files);
+    }
+  }, [handleAttachmentPick]);
+
+  const removePendingAttachment = useCallback((id: string) => {
+    setPendingAttachments((prev) => prev.filter((item) => item.id !== id));
+  }, []);
 
   const ensureThread = useCallback(async () => {
     if (!sessionReady) {
@@ -528,6 +625,7 @@ export const AgentWidget: React.FC = () => {
     clearThread();
     setMessages([]);
     setInput('');
+    clearPendingAttachments();
     setError(null);
     setPending(false);
     setAssistantStatus(null);
@@ -546,7 +644,7 @@ export const AgentWidget: React.FC = () => {
     if (resetTokenRef.current === resetToken) {
       setResetting(false);
     }
-  }, [clearThread, ensureThread, sessionId, sessionReady, stopRequest]);
+  }, [clearPendingAttachments, clearThread, ensureThread, sessionId, sessionReady, stopRequest]);
 
   useEffect(() => {
     if (!open || !me || !threadKey || resetting) return;
@@ -619,6 +717,7 @@ export const AgentWidget: React.FC = () => {
           content: incoming.content ?? '',
           createdAt: incoming.createdAt ?? null,
           selectionContext: (incoming?.meta?.selectionContext ?? null) as AssistantSelectionContext | null,
+          attachments: Array.isArray(incoming?.meta?.attachments) ? incoming.meta.attachments : [],
           trace: incoming?.meta?.trace ?? null,
         };
         return trimMessages([...prev, next]);
@@ -638,18 +737,20 @@ export const AgentWidget: React.FC = () => {
 
   const sendMessage = async () => {
     const text = input.trim();
-    if (!text || pending || loadingThread || resetting || !me || !sessionReady) return;
+    if ((!text && pendingAttachments.length === 0) || pending || loadingThread || resetting || !me || !sessionReady) return;
     const requestToken = resetTokenRef.current;
     const isStale = () => resetTokenRef.current !== requestToken;
     const controller = new AbortController();
     requestAbortRef.current = controller;
     const selectionSnapshot = selectionContext ? { ...selectionContext } : null;
+    const attachmentsSnapshot = pendingAttachments.slice();
     const nextMessages = trimMessages([
       ...messages,
-      { role: 'user', content: text, selectionContext: selectionSnapshot },
+      { role: 'user', content: text || 'Attached files.', selectionContext: selectionSnapshot, attachments: attachmentsSnapshot },
     ]);
     setMessages(nextMessages);
     setInput('');
+    clearPendingAttachments();
     setPending(true);
     setError(null);
     if (selectionSnapshot) {
@@ -665,9 +766,10 @@ export const AgentWidget: React.FC = () => {
           headers: { 'content-type': 'application/json', 'x-assistant-client': 'widget-v2' },
           signal: controller.signal,
           body: JSON.stringify({
-            content: text,
+            content: text || '',
             sessionId,
             selectionContext: selectionSnapshot,
+            attachments: attachmentsSnapshot,
           }),
         });
         const raw = await res.text();
@@ -796,7 +898,13 @@ export const AgentWidget: React.FC = () => {
     return 'Connected to your canvas';
   }, [assistantStatus, me, pending]);
 
-  const sendDisabled = !input.trim() || pending || loadingThread || resetting || !me || !sessionReady;
+  const sendDisabled = (!input.trim() && pendingAttachments.length === 0)
+    || pending
+    || uploadingAttachments
+    || loadingThread
+    || resetting
+    || !me
+    || !sessionReady;
 
   const styleTag = (
     <style>{`
@@ -826,7 +934,37 @@ export const AgentWidget: React.FC = () => {
     >
       {styleTag}
       {open && (
-        <div style={panelStyle} aria-hidden={!open}>
+        <div
+          style={panelStyle}
+          aria-hidden={!open}
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
+          {isDragActive && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 12,
+                borderRadius: 16,
+                border: '1px dashed rgba(129, 161, 193, 0.7)',
+                background: 'rgba(15, 20, 28, 0.82)',
+                display: 'grid',
+                placeItems: 'center',
+                color: 'var(--text-primary)',
+                fontSize: 13,
+                zIndex: 5,
+                pointerEvents: 'none',
+                boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.05)',
+              }}
+            >
+              <div style={{ display: 'grid', justifyItems: 'center', gap: 6 }}>
+                <Paperclip size={18} />
+                <div>Drop files to attach</div>
+              </div>
+            </div>
+          )}
           <div
             style={{
               display: 'flex',
@@ -913,6 +1051,8 @@ export const AgentWidget: React.FC = () => {
                 + (msg.selectionContext.comments?.length ?? 0)
               ) > 0;
               const trace = msg.trace ?? null;
+              const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+              const hasAttachments = attachments.length > 0;
               const hasTrace = isAssistant && !!trace && (
                 !!(trace.reasoning && trace.reasoning.trim())
                 || ((trace.tools?.length ?? 0) > 0)
@@ -1069,6 +1209,48 @@ export const AgentWidget: React.FC = () => {
                       </ReactMarkdown>
                     )}
                   </div>
+                  {hasAttachments && (
+                    <div
+                      style={{
+                        display: 'grid',
+                        gap: 6,
+                        alignSelf: isUser ? 'flex-end' : 'flex-start',
+                      }}
+                    >
+                      {attachments.map((attachment) => {
+                        const href = resolveAttachmentUrl(attachment.url);
+                        return (
+                          <a
+                            key={attachment.id}
+                            href={href}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 8,
+                              padding: '6px 10px',
+                              borderRadius: 10,
+                              border: '1px solid rgba(255,255,255,0.12)',
+                              background: 'rgba(15, 18, 26, 0.55)',
+                              color: 'var(--text-primary)',
+                              fontSize: 12,
+                              textDecoration: 'none',
+                              maxWidth: 260,
+                            }}
+                          >
+                            <Paperclip size={12} />
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {attachment.name}
+                            </span>
+                            <span style={{ color: 'var(--text-secondary)', fontSize: 11 }}>
+                              {formatBytes(attachment.size)}
+                            </span>
+                          </a>
+                        );
+                      })}
+                    </div>
+                  )}
                   {showFeedback && (
                     <div
                       style={{
@@ -1195,6 +1377,53 @@ export const AgentWidget: React.FC = () => {
                 <span>{`${selectionCount} selected object${selectionCount === 1 ? '' : 's'} attached`}</span>
               </div>
             )}
+            {pendingAttachments.length > 0 && (
+              <div style={{ display: 'grid', gap: 6 }}>
+                {pendingAttachments.map((attachment) => (
+                  <div
+                    key={attachment.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '6px 10px',
+                      borderRadius: 10,
+                      border: '1px solid rgba(255,255,255,0.12)',
+                      background: 'rgba(15, 18, 26, 0.55)',
+                      color: 'var(--text-primary)',
+                      fontSize: 12,
+                    }}
+                  >
+                    <Paperclip size={12} />
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {attachment.name}
+                    </span>
+                    <span style={{ color: 'var(--text-secondary)', fontSize: 11 }}>
+                      {formatBytes(attachment.size)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removePendingAttachment(attachment.id)}
+                      aria-label="Remove attachment"
+                      style={{
+                        border: 'none',
+                        background: 'transparent',
+                        color: 'var(--text-secondary)',
+                        cursor: 'pointer',
+                        padding: 2,
+                      }}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {attachmentError && (
+              <div style={{ fontSize: 11, color: '#EBCB8B' }}>
+                {attachmentError}
+              </div>
+            )}
             <textarea
               ref={inputRef}
               value={input}
@@ -1241,6 +1470,40 @@ export const AgentWidget: React.FC = () => {
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  onChange={(e) => {
+                    void handleAttachmentPick(e.currentTarget.files);
+                    e.currentTarget.value = '';
+                  }}
+                  style={{ display: 'none' }}
+                  disabled={!sessionReady || pending || uploadingAttachments}
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={!sessionReady || pending || uploadingAttachments}
+                  aria-label="Attach files"
+                  title="Attach files"
+                  style={{
+                    borderRadius: 10,
+                    border: '1px solid rgba(255,255,255,0.18)',
+                    background: 'rgba(255,255,255,0.06)',
+                    color: 'var(--text-primary)',
+                    padding: '6px 8px',
+                    fontSize: 12,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    cursor: (!sessionReady || pending || uploadingAttachments) ? 'not-allowed' : 'pointer',
+                    opacity: (!sessionReady || pending || uploadingAttachments) ? 0.5 : 1,
+                  }}
+                >
+                  <Paperclip size={14} />
+                  {uploadingAttachments ? 'Uploading...' : 'Attach'}
+                </button>
                 <button
                   type="button"
                   onClick={() => setShowResetConfirm(true)}
