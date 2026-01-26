@@ -1,18 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Activity, Calendar, Hand, PenTool, Eraser, Highlighter, Type, X, SlidersHorizontal, Grid3x3, Eye, CircleDot, StickyNote, Network } from 'lucide-react';
+import { Activity, Calendar, Hand, PenTool, Eraser, Highlighter, Type, X, SlidersHorizontal, Grid3x3, Eye } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import type { PenToolType } from '../../types';
 
 const BUTTON_SIZE = 48;
 const BUTTON_GAP = 12;
 const BUTTON_STEP = BUTTON_SIZE + BUTTON_GAP;
-const MIN_ZOOM = 0.1;
-const MAX_ZOOM = 5;
-const DEFAULT_ZOOM_GRAPH_THRESHOLD = 0.6;
-const DEFAULT_ZOOM_DETAIL_THRESHOLD = 1.1;
-const ZOOM_EPS = 0.02;
-const ZOOM_NORMAL = 1;
-
 type ControlButtonProps = {
     title: string;
     onClick?: () => void;
@@ -105,22 +98,13 @@ const ControlButton: React.FC<ControlButtonProps> = ({ title, onClick, active, d
 };
 
 export const Controls: React.FC = () => {
-    const { moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, monitoringMode, toggleMonitoringMode, ganttMode, toggleGanttMode, theme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, canvas, setCanvasTransform, generalSettings } = useStore();
+    const { moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, monitoringMode, toggleMonitoringMode, ganttMode, toggleGanttMode, theme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode } = useStore();
 
     const controlsRootRef = useRef<HTMLDivElement | null>(null);
 
     // Tool menu visibility
     const [showToolMenu, setShowToolMenu] = useState(false);
     const [showModeMenu, setShowModeMenu] = useState(false);
-    const [showZoomMenu, setShowZoomMenu] = useState(false);
-    const [toastText, setToastText] = useState<string | null>(null);
-    const [toastVisible, setToastVisible] = useState(false);
-
-    const zoomGraphThreshold = generalSettings.zoomGraphThreshold ?? DEFAULT_ZOOM_GRAPH_THRESHOLD;
-    const zoomDetailThreshold = generalSettings.zoomDetailThreshold ?? DEFAULT_ZOOM_DETAIL_THRESHOLD;
-    const zoomGraphPreset = zoomGraphThreshold - ZOOM_EPS;
-    const zoomDetailPreset = zoomDetailThreshold + ZOOM_EPS;
-
     // Orientation detection (more reliable on iPad than innerWidth/innerHeight during rotation)
     const [isLandscape, setIsLandscape] = useState(
         window.matchMedia('(orientation: landscape)').matches
@@ -167,17 +151,6 @@ export const Controls: React.FC = () => {
     }, [theme]);
 
     useEffect(() => {
-        if (!toastText) return;
-        setToastVisible(true);
-        const hide = window.setTimeout(() => setToastVisible(false), 1200);
-        const clear = window.setTimeout(() => setToastText(null), 1700);
-        return () => {
-            window.clearTimeout(hide);
-            window.clearTimeout(clear);
-        };
-    }, [toastText]);
-
-    useEffect(() => {
         const handlePointerDown = (e: PointerEvent) => {
             // Keep menus open while actively drawing with pen mode, but allow pen taps to close otherwise.
             if (e.pointerType === 'pen' && penMode) return;
@@ -186,7 +159,6 @@ export const Controls: React.FC = () => {
             if (root.contains(e.target as Node)) return;
             setShowToolMenu(false);
             setShowModeMenu(false);
-            setShowZoomMenu(false);
         };
         document.addEventListener('pointerdown', handlePointerDown);
         return () => document.removeEventListener('pointerdown', handlePointerDown);
@@ -196,26 +168,22 @@ export const Controls: React.FC = () => {
         if (!focusMode) return;
         setShowToolMenu(false);
         setShowModeMenu(false);
-        setShowZoomMenu(false);
     }, [focusMode]);
 
     useEffect(() => {
         if (!ganttMode) return;
         setShowToolMenu(false);
         setShowModeMenu(false);
-        setShowZoomMenu(false);
     }, [ganttMode]);
 
     const handlePenClick = () => {
         setShowModeMenu(false);
-        setShowZoomMenu(false);
         setShowToolMenu(!showToolMenu);
     };
 
     const handleTextClick = () => {
         setShowToolMenu(false);
         setShowModeMenu(false);
-        setShowZoomMenu(false);
         toggleTextMode();
     };
 
@@ -232,67 +200,27 @@ export const Controls: React.FC = () => {
 
     const handleModeClick = () => {
         setShowToolMenu(false);
-        setShowZoomMenu(false);
         setShowModeMenu((v) => !v);
     };
 
     const handleFocusClick = () => {
         setShowToolMenu(false);
         setShowModeMenu(false);
-        setShowZoomMenu(false);
         toggleFocusMode();
     };
-
-    const handleZoomClick = () => {
-        setShowToolMenu(false);
-        setShowModeMenu(false);
-        setShowZoomMenu((v) => !v);
-    };
-
-    const applyZoomPreset = (targetScale: number, label: string) => {
-        const viewport = window.visualViewport;
-        const width = viewport?.width ?? window.innerWidth;
-        const height = viewport?.height ?? window.innerHeight;
-        const centerX = width / 2;
-        const centerY = height / 2;
-        const worldX = (centerX - canvas.x) / canvas.scale;
-        const worldY = (centerY - canvas.y) / canvas.scale;
-        const nextScale = Math.min(Math.max(targetScale, MIN_ZOOM), MAX_ZOOM);
-        const nextX = centerX - worldX * nextScale;
-        const nextY = centerY - worldY * nextScale;
-        setCanvasTransform(nextX, nextY, nextScale);
-        setShowZoomMenu(false);
-        setToastText(label);
-    };
-
-    const zoomPresetKey = (() => {
-        const scale = canvas.scale;
-        const closeTo = (target: number) => Math.abs(scale - target) <= 0.08;
-        if (closeTo(zoomDetailPreset)) return 'detail';
-        if (closeTo(zoomGraphPreset)) return 'graph';
-        if (closeTo(ZOOM_NORMAL)) return 'normal';
-        return null;
-    })();
 
     // Mobile-friendly positioning:
     // - small screens: keep controls closer to the bottom
     // - account for visualViewport offsets to avoid jumping when keyboard/autofill UI appears
     const baseBottom = isSmallScreen ? (isLandscape ? 12 : 18) : (isLandscape ? 44 : 60);
     const bottomPadding = `calc(${baseBottom}px + env(safe-area-inset-bottom, 0px))`;
-    const toastBottom = `calc(${baseBottom}px + env(safe-area-inset-bottom, 0px) + 70px)`;
 
     const penMenuBorderColor = theme === 'light' ? undefined : 'var(--accent-primary)';
     const penMenuInactiveFill = theme === 'light' ? 'var(--accent-glow)' : undefined;
 
-    const baseRowButtonCount = 5;
+    const baseRowButtonCount = 4;
     const modeAnchorOffset = (1 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP;
-    const zoomAnchorOffset = (2 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP;
-    const penAnchorOffset = (3 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP; // Move, Modes, Zoom, Pen, Text
-    const zoomIcon = zoomPresetKey === 'detail'
-        ? <StickyNote size={18} />
-        : zoomPresetKey === 'graph'
-            ? <Network size={18} />
-            : <CircleDot size={18} />;
+    const penAnchorOffset = (2 - (baseRowButtonCount - 1) / 2) * BUTTON_STEP; // Move, Modes, Pen, Text
 
     // Sub-menus should “grow” vertically from their base button.
     // Place the submenu so its bottom-most button sits just above the base row.
@@ -307,51 +235,26 @@ export const Controls: React.FC = () => {
                     0% { transform: scale(0.05); opacity: 0.65; }
                     100% { transform: scale(1); opacity: 0; }
                   }
-	            `}</style>
-
-	            {toastText && (
-	                <div
-	                    style={{
-	                        position: 'fixed',
-	                        left: '50%',
-	                        bottom: toastBottom,
-	                        transform: `translateX(-50%) translateY(${toastVisible ? 0 : 8}px)`,
-	                        opacity: toastVisible ? 1 : 0,
-	                        transition: 'opacity 220ms ease, transform 220ms ease',
-	                        pointerEvents: 'none',
-                        zIndex: 2000,
-                        background: 'var(--bg-node)',
-                        border: '1px solid var(--border-strong)',
-                        borderRadius: 12,
-                        padding: '8px 10px',
-                        boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
-                        color: 'var(--text-primary)',
-                        fontSize: 13,
-                    }}
-                >
-                    {toastText}
-                </div>
-	            )}
-
-	                {/* Secondary stack for Pen menu (vertical from base button) */}
-	                {!focusMode && !ganttMode && (
-	                    <div
-	                        style={{
-	                            position: 'fixed',
-	                            left: `calc(50% + ${penAnchorOffset}px)`,
-	                            bottom: subStackBottom,
-	                            transform: `translateX(-50%) translateY(${showToolMenu ? 0 : 10}px) scale(${showToolMenu ? 1 : 0.96})`,
-	                            zIndex: 1600,
-	                            display: 'flex',
-	                            flexDirection: 'column-reverse',
-	                            gap: BUTTON_GAP,
-	                            transformOrigin: '50% 100%',
-	                            pointerEvents: showToolMenu ? 'auto' : 'none',
-	                            opacity: showToolMenu ? 1 : 0,
-	                            filter: showToolMenu ? 'blur(0)' : 'blur(0.8px)',
-	                            transition: 'opacity 180ms ease, transform 180ms ease, filter 180ms ease',
-	                        }}
-	                    >
+            `}</style>
+                {/* Secondary stack for Pen menu (vertical from base button) */}
+                {!focusMode && !ganttMode && (
+                    <div
+                        style={{
+                            position: 'fixed',
+                            left: `calc(50% + ${penAnchorOffset}px)`,
+                            bottom: subStackBottom,
+                            transform: `translateX(-50%) translateY(${showToolMenu ? 0 : 10}px) scale(${showToolMenu ? 1 : 0.96})`,
+                            zIndex: 1600,
+                            display: 'flex',
+                            flexDirection: 'column-reverse',
+                            gap: BUTTON_GAP,
+                            transformOrigin: '50% 100%',
+                            pointerEvents: showToolMenu ? 'auto' : 'none',
+                            opacity: showToolMenu ? 1 : 0,
+                            filter: showToolMenu ? 'blur(0)' : 'blur(0.8px)',
+                            transition: 'opacity 180ms ease, transform 180ms ease, filter 180ms ease',
+                        }}
+                    >
                         {[
                             {
                                 key: 'pen',
@@ -475,69 +378,6 @@ export const Controls: React.FC = () => {
                     </div>
                 )}
 
-                {/* Secondary stack for Zoom menu (detail/normal/graph) */}
-                {!focusMode && !ganttMode && (
-                    <div
-                        style={{
-                            position: 'fixed',
-                            left: `calc(50% + ${zoomAnchorOffset}px)`,
-                            bottom: subStackBottom,
-                            transform: `translateX(-50%) translateY(${showZoomMenu ? 0 : 10}px) scale(${showZoomMenu ? 1 : 0.96})`,
-                            zIndex: 1600,
-                            display: 'flex',
-                            flexDirection: 'column-reverse',
-                            gap: BUTTON_GAP,
-                            transformOrigin: '50% 100%',
-                            pointerEvents: showZoomMenu ? 'auto' : 'none',
-                            opacity: showZoomMenu ? 1 : 0,
-                            filter: showZoomMenu ? 'blur(0)' : 'blur(0.8px)',
-                            transition: 'opacity 180ms ease, transform 180ms ease, filter 180ms ease',
-                        }}
-                    >
-                        {[
-                            {
-                                key: 'detail',
-                                title: 'Detail Zoom',
-                                onClick: () => applyZoomPreset(zoomDetailPreset, 'Zoom: Detail'),
-                                active: zoomPresetKey === 'detail',
-                                child: <StickyNote size={18} />,
-                            },
-                            {
-                                key: 'normal',
-                                title: 'Normal Zoom',
-                                onClick: () => applyZoomPreset(ZOOM_NORMAL, 'Zoom: Normal'),
-                                active: zoomPresetKey === 'normal',
-                                child: <CircleDot size={18} />,
-                            },
-                            {
-                                key: 'graph',
-                                title: 'Graph View Zoom',
-                                onClick: () => applyZoomPreset(zoomGraphPreset, 'Zoom: Graph'),
-                                active: zoomPresetKey === 'graph',
-                                child: <Network size={18} />,
-                            },
-                        ].map((b, idx) => (
-                            <div
-                                key={b.key}
-                                style={{
-                                    opacity: showZoomMenu ? 1 : 0,
-                                    transform: `translateY(${showZoomMenu ? 0 : 10}px) scale(${showZoomMenu ? 1 : 0.92})`,
-                                    transition: 'opacity 180ms ease, transform 180ms ease',
-                                    transitionDelay: showZoomMenu ? `${idx * 35}ms` : '0ms',
-                                }}
-                            >
-                                <ControlButton
-                                    onClick={b.onClick}
-                                    title={b.title}
-                                    active={b.active}
-                                >
-                                    {b.child}
-                                </ControlButton>
-                            </div>
-                        ))}
-                    </div>
-                )}
-
                 {/* Base row */}
 	            <div style={{
 	                position: 'fixed',
@@ -583,14 +423,6 @@ export const Controls: React.FC = () => {
                         >
                                 <SlidersHorizontal size={18} />
                             </ControlButton>
-
-                        <ControlButton
-                            onClick={handleZoomClick}
-                            title="Zoom"
-                            active={showZoomMenu || !!zoomPresetKey}
-                        >
-                            {zoomIcon}
-                        </ControlButton>
 
 		                    <ControlButton
 		                        onClick={handlePenClick}

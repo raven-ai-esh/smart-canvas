@@ -216,9 +216,10 @@ export const SessionBar: React.FC = () => {
         }
         setBusy(true);
         try {
+            const shareHeaders = sessionShareToken ? { 'x-session-share': sessionShareToken } : undefined;
             const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/save`, {
                 method: 'POST',
-                headers: { 'content-type': 'application/json' },
+                headers: { 'content-type': 'application/json', ...(shareHeaders ?? {}) },
                 body: JSON.stringify({ name }),
             });
             const data = await res.json().catch(() => ({}));
@@ -275,7 +276,7 @@ export const SessionBar: React.FC = () => {
         } finally {
             setBusy(false);
         }
-    }, [me, nameInput, requestAuth, sessionId, setSessionMeta, setSessionSavers]);
+    }, [me, nameInput, requestAuth, sessionId, sessionShareToken, setSessionMeta, setSessionSavers]);
 
     const saveForMe = useCallback(async () => {
         if (!sessionId) return;
@@ -286,9 +287,10 @@ export const SessionBar: React.FC = () => {
         setBusy(true);
         const name = (sessionName ?? '').trim() || 'Untitled session';
         try {
+            const shareHeaders = sessionShareToken ? { 'x-session-share': sessionShareToken } : undefined;
             const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/save`, {
                 method: 'POST',
-                headers: { 'content-type': 'application/json' },
+                headers: { 'content-type': 'application/json', ...(shareHeaders ?? {}) },
                 body: JSON.stringify({ name }),
             });
             const data = await res.json().catch(() => ({}));
@@ -349,7 +351,7 @@ export const SessionBar: React.FC = () => {
         } finally {
             setBusy(false);
         }
-    }, [me, requestAuth, sessionId, sessionName, setSessionMeta, setSessionSavers, sessionOwnerId]);
+    }, [me, requestAuth, sessionId, sessionName, sessionShareToken, setSessionMeta, setSessionSavers, sessionOwnerId]);
 
     const onPromptKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
         if (e.key === 'Enter') {
