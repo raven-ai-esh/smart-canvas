@@ -11,6 +11,8 @@ import { applyChildProgress } from '../utils/childProgress';
 
 type GeneralSettings = {
     zoomSensitivity: number;
+    zoomGraphThreshold: number;
+    zoomDetailThreshold: number;
     locale: 'en' | 'ru';
 };
 
@@ -50,11 +52,49 @@ const normalizeZoomSensitivity = (value: unknown) => {
     if (!Number.isFinite(num)) return 1;
     return Math.min(Math.max(num, 0.25), 3);
 };
+const DEFAULT_ZOOM_GRAPH_THRESHOLD = 0.6;
+const DEFAULT_ZOOM_DETAIL_THRESHOLD = 1.1;
+const ZOOM_GRAPH_MIN = 0.2;
+const ZOOM_GRAPH_MAX = 1.2;
+const ZOOM_DETAIL_MIN = 0.8;
+const ZOOM_DETAIL_MAX = 2.5;
+const ZOOM_THRESHOLD_GAP = 0.1;
+const normalizeZoomThreshold = (value: unknown, fallback: number, min: number, max: number) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return fallback;
+    return Math.min(Math.max(num, min), max);
+};
+const normalizeZoomThresholds = (settings?: Partial<GeneralSettings>) => {
+    let zoomGraphThreshold = normalizeZoomThreshold(
+        settings?.zoomGraphThreshold,
+        DEFAULT_ZOOM_GRAPH_THRESHOLD,
+        ZOOM_GRAPH_MIN,
+        ZOOM_GRAPH_MAX,
+    );
+    let zoomDetailThreshold = normalizeZoomThreshold(
+        settings?.zoomDetailThreshold,
+        DEFAULT_ZOOM_DETAIL_THRESHOLD,
+        ZOOM_DETAIL_MIN,
+        ZOOM_DETAIL_MAX,
+    );
+    if (zoomDetailThreshold - zoomGraphThreshold < ZOOM_THRESHOLD_GAP) {
+        zoomDetailThreshold = Math.min(ZOOM_DETAIL_MAX, zoomGraphThreshold + ZOOM_THRESHOLD_GAP);
+        if (zoomDetailThreshold - zoomGraphThreshold < ZOOM_THRESHOLD_GAP) {
+            zoomGraphThreshold = Math.max(ZOOM_GRAPH_MIN, zoomDetailThreshold - ZOOM_THRESHOLD_GAP);
+        }
+    }
+    return { zoomGraphThreshold, zoomDetailThreshold };
+};
 const normalizeLocale = (value: unknown): GeneralSettings['locale'] => (value === 'ru' ? 'ru' : 'en');
-const normalizeGeneralSettings = (settings?: Partial<GeneralSettings>): GeneralSettings => ({
-    zoomSensitivity: normalizeZoomSensitivity(settings?.zoomSensitivity),
-    locale: normalizeLocale(settings?.locale),
-});
+const normalizeGeneralSettings = (settings?: Partial<GeneralSettings>): GeneralSettings => {
+    const thresholds = normalizeZoomThresholds(settings);
+    return {
+        zoomSensitivity: normalizeZoomSensitivity(settings?.zoomSensitivity),
+        zoomGraphThreshold: thresholds.zoomGraphThreshold,
+        zoomDetailThreshold: thresholds.zoomDetailThreshold,
+        locale: normalizeLocale(settings?.locale),
+    };
+};
 
 const resolveAuthor = (state: AppState) => {
     const me = state.me;

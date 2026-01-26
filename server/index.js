@@ -490,11 +490,23 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS general_settings (
       user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       zoom_sensitivity NUMERIC NOT NULL DEFAULT 1,
+      zoom_graph_threshold NUMERIC NOT NULL DEFAULT 0.6,
+      zoom_detail_threshold NUMERIC NOT NULL DEFAULT 1.1,
       locale TEXT NOT NULL DEFAULT 'en',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  try {
+    await pool.query('ALTER TABLE general_settings ADD COLUMN IF NOT EXISTS zoom_graph_threshold NUMERIC NOT NULL DEFAULT 0.6');
+  } catch {
+    // ignore
+  }
+  try {
+    await pool.query('ALTER TABLE general_settings ADD COLUMN IF NOT EXISTS zoom_detail_threshold NUMERIC NOT NULL DEFAULT 1.1');
+  } catch {
+    // ignore
+  }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS assistant_threads (
@@ -1669,17 +1681,51 @@ async function listAlertingSettingsByUserIds(userIds) {
   return map;
 }
 
+const DEFAULT_ZOOM_GRAPH_THRESHOLD = 0.6;
+const DEFAULT_ZOOM_DETAIL_THRESHOLD = 1.1;
+const ZOOM_GRAPH_MIN = 0.2;
+const ZOOM_GRAPH_MAX = 1.2;
+const ZOOM_DETAIL_MIN = 0.8;
+const ZOOM_DETAIL_MAX = 2.5;
+const ZOOM_THRESHOLD_GAP = 0.1;
+const normalizeZoomThreshold = (value, fallback, min, max) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(Math.max(num, min), max);
+};
+const normalizeZoomThresholds = (raw) => {
+  let zoomGraphThreshold = normalizeZoomThreshold(
+    raw?.zoomGraphThreshold ?? raw?.zoom_graph_threshold,
+    DEFAULT_ZOOM_GRAPH_THRESHOLD,
+    ZOOM_GRAPH_MIN,
+    ZOOM_GRAPH_MAX,
+  );
+  let zoomDetailThreshold = normalizeZoomThreshold(
+    raw?.zoomDetailThreshold ?? raw?.zoom_detail_threshold,
+    DEFAULT_ZOOM_DETAIL_THRESHOLD,
+    ZOOM_DETAIL_MIN,
+    ZOOM_DETAIL_MAX,
+  );
+  if (zoomDetailThreshold - zoomGraphThreshold < ZOOM_THRESHOLD_GAP) {
+    zoomDetailThreshold = Math.min(ZOOM_DETAIL_MAX, zoomGraphThreshold + ZOOM_THRESHOLD_GAP);
+    if (zoomDetailThreshold - zoomGraphThreshold < ZOOM_THRESHOLD_GAP) {
+      zoomGraphThreshold = Math.max(ZOOM_GRAPH_MIN, zoomDetailThreshold - ZOOM_THRESHOLD_GAP);
+    }
+  }
+  return { zoomGraphThreshold, zoomDetailThreshold };
+};
 const normalizeGeneralSettings = (raw) => {
   const zoomRaw = Number(raw?.zoomSensitivity ?? raw?.zoom_sensitivity);
   const zoomSensitivity = Number.isFinite(zoomRaw) ? Math.min(Math.max(zoomRaw, 0.25), 3) : 1;
+  const thresholds = normalizeZoomThresholds(raw);
   const localeRaw = typeof raw?.locale === 'string' ? raw.locale.toLowerCase() : '';
   const locale = localeRaw === 'ru' ? 'ru' : 'en';
-  return { zoomSensitivity, locale };
+  return { zoomSensitivity, zoomGraphThreshold: thresholds.zoomGraphThreshold, zoomDetailThreshold: thresholds.zoomDetailThreshold, locale };
 };
 
 async function getGeneralSettings(userId) {
   const res = await pool.query(
-    'SELECT zoom_sensitivity, locale FROM general_settings WHERE user_id = $1',
+    'SELECT zoom_sensitivity, zoom_graph_threshold, zoom_detail_threshold, locale FROM general_settings WHERE user_id = $1',
     [userId],
   );
   const row = res.rows[0];
@@ -1690,14 +1736,16 @@ async function getGeneralSettings(userId) {
 async function upsertGeneralSettings({ userId, settings }) {
   const normalized = normalizeGeneralSettings(settings);
   const res = await pool.query(
-    `INSERT INTO general_settings (user_id, zoom_sensitivity, locale)
-     VALUES ($1, $2, $3)
+    `INSERT INTO general_settings (user_id, zoom_sensitivity, zoom_graph_threshold, zoom_detail_threshold, locale)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (user_id) DO UPDATE
        SET zoom_sensitivity = EXCLUDED.zoom_sensitivity,
+           zoom_graph_threshold = EXCLUDED.zoom_graph_threshold,
+           zoom_detail_threshold = EXCLUDED.zoom_detail_threshold,
            locale = EXCLUDED.locale,
            updated_at = NOW()
-     RETURNING zoom_sensitivity, locale`,
-    [userId, normalized.zoomSensitivity, normalized.locale],
+     RETURNING zoom_sensitivity, zoom_graph_threshold, zoom_detail_threshold, locale`,
+    [userId, normalized.zoomSensitivity, normalized.zoomGraphThreshold, normalized.zoomDetailThreshold, normalized.locale],
   );
   const row = res.rows[0];
   return normalizeGeneralSettings(row ?? normalized);
