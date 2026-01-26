@@ -572,6 +572,18 @@ export const AgentWidget: React.FC = () => {
     setPendingAttachments((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
+  const handleInputTouchStart = useCallback((e: React.TouchEvent<HTMLTextAreaElement>) => {
+    // iOS Safari sometimes ignores taps on textareas inside fixed panels unless focus is explicit.
+    e.stopPropagation();
+    inputRef.current?.focus();
+  }, []);
+
+  const handleInputPointerDown = useCallback((e: React.PointerEvent<HTMLTextAreaElement>) => {
+    if (e.pointerType !== 'touch') return;
+    e.stopPropagation();
+    inputRef.current?.focus();
+  }, []);
+
   const ensureThread = useCallback(async () => {
     if (!sessionReady) {
       throw new Error('Session is not ready yet. Please wait a moment and try again.');
@@ -873,6 +885,7 @@ export const AgentWidget: React.FC = () => {
       opacity: open ? 1 : 0,
       transition: 'opacity 180ms ease, transform 180ms ease',
       pointerEvents: open ? 'auto' : 'none',
+      touchAction: 'auto',
     } as React.CSSProperties;
   }, [isNarrow, open, panelSize]);
 
@@ -926,10 +939,12 @@ export const AgentWidget: React.FC = () => {
         position: 'fixed',
         right: 'calc(16px + env(safe-area-inset-right, 0px))',
         bottom: 'calc(16px + env(safe-area-inset-bottom, 0px))',
-        zIndex: 1900,
+        zIndex: 3100,
         display: 'grid',
         gap: 8,
         justifyItems: 'end',
+        pointerEvents: 'auto',
+        touchAction: 'auto',
       }}
     >
       {styleTag}
@@ -1429,7 +1444,9 @@ export const AgentWidget: React.FC = () => {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Ask Raven..."
-              disabled={pending || !me || !sessionReady}
+              disabled={pending || uploadingAttachments}
+              onTouchStart={handleInputTouchStart}
+              onPointerDown={handleInputPointerDown}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
@@ -1449,6 +1466,9 @@ export const AgentWidget: React.FC = () => {
                 resize: 'none',
                 fontFamily: 'inherit',
                 boxSizing: 'border-box',
+                WebkitUserSelect: 'text',
+                userSelect: 'text',
+                touchAction: 'auto',
               }}
             />
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>

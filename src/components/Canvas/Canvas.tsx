@@ -4,7 +4,7 @@ import { Node, NoteView } from '../Node/Node';
 import { Edge, ConnectionLine, LayerBridgeEdge } from '../Edge/Edge';
 import styles from './Canvas.module.css';
 import { v4 as uuidv4 } from 'uuid';
-import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpToLine, Bot, Layers, Link2, MessageCircle, Paperclip, Pencil, Plus, Ungroup, X, Zap, ZapOff } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpDown, ArrowUpToLine, Bot, Layers, Link2, MessageCircle, Paperclip, Pencil, Plus, Ungroup, X, Zap, ZapOff } from 'lucide-react';
 import { beautifyStroke } from '../../utils/strokeBeautify';
 import type { Attachment, Comment, EdgeData, NodeData, SessionSaver, StackGroup, StrokePoint, TextBox as TextBoxType } from '../../types';
 import type { AssistantSelectionContext } from '../../types/assistant';
@@ -720,6 +720,7 @@ export const Canvas: React.FC = () => {
     const [connectionStart, setConnectionStart] = useState({ x: 0, y: 0 });
 	    const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 }); // World coordinates
 	    const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+        const [showArrangeMenu, setShowArrangeMenu] = useState(false);
 	    const [marqueeRect, setMarqueeRect] = useState<null | { left: number; top: number; width: number; height: number }>(null);
 	    const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuide[]>([]);
 	    const [openCommentId, setOpenCommentId] = useState<string | null>(null);
@@ -4810,6 +4811,10 @@ export const Canvas: React.FC = () => {
         return null;
     };
 
+    useEffect(() => {
+        setShowArrangeMenu(false);
+    }, [contextMenu?.kind, contextMenu?.id]);
+
     return (
         <div
             ref={containerRef}
@@ -5021,72 +5026,105 @@ export const Canvas: React.FC = () => {
 	                            </button>
 	                        )}
                             {stackableContext && (
-                                <>
+                                <div
+                                    className={styles.contextGroup}
+                                    data-interactive="true"
+                                    onPointerDown={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        setShowArrangeMenu((prev) => !prev);
+                                    }}
+                                >
                                     <button
                                         type="button"
                                         className={styles.contextButton}
-                                        title="Bring to front"
+                                        title="Layer order"
                                         data-interactive="true"
                                         onPointerDown={(e) => {
                                             e.preventDefault();
                                             e.stopPropagation();
-                                            if (contextMenu.id) {
-                                                useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'top');
-                                            }
-                                            setContextMenu(null);
+                                            setShowArrangeMenu((prev) => !prev);
                                         }}
                                     >
-                                        <ArrowUpToLine size={18} />
+                                        <ArrowUpDown size={18} />
                                     </button>
-                                    <button
-                                        type="button"
-                                        className={styles.contextButton}
-                                        title="Move forward"
-                                        data-interactive="true"
-                                        onPointerDown={(e) => {
-                                            e.preventDefault();
-                                            e.stopPropagation();
-                                            if (contextMenu.id) {
-                                                useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'up');
-                                            }
-                                            setContextMenu(null);
-                                        }}
-                                    >
-                                        <ArrowUp size={18} />
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className={styles.contextButton}
-                                        title="Move backward"
-                                        data-interactive="true"
-                                        onPointerDown={(e) => {
-                                            e.preventDefault();
-                                            e.stopPropagation();
-                                            if (contextMenu.id) {
-                                                useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'down');
-                                            }
-                                            setContextMenu(null);
-                                        }}
-                                    >
-                                        <ArrowDown size={18} />
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className={styles.contextButton}
-                                        title="Send to back"
-                                        data-interactive="true"
-                                        onPointerDown={(e) => {
-                                            e.preventDefault();
-                                            e.stopPropagation();
-                                            if (contextMenu.id) {
-                                                useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'bottom');
-                                            }
-                                            setContextMenu(null);
-                                        }}
-                                    >
-                                        <ArrowDownToLine size={18} />
-                                    </button>
-                                </>
+                                    {showArrangeMenu && (
+                                        <div
+                                            className={styles.contextGroupPanel}
+                                            data-interactive="true"
+                                            onPointerDown={(e) => {
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                            }}
+                                            onClick={(e) => e.stopPropagation()}
+                                        >
+                                            <button
+                                                type="button"
+                                                className={styles.contextButton}
+                                                title="Bring to front"
+                                                data-interactive="true"
+                                                onPointerDown={(e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    if (contextMenu.id) {
+                                                        useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'top');
+                                                    }
+                                                    setContextMenu(null);
+                                                }}
+                                            >
+                                                <ArrowUpToLine size={18} />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className={styles.contextButton}
+                                                title="Move forward"
+                                                data-interactive="true"
+                                                onPointerDown={(e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    if (contextMenu.id) {
+                                                        useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'up');
+                                                    }
+                                                    setContextMenu(null);
+                                                }}
+                                            >
+                                                <ArrowUp size={18} />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className={styles.contextButton}
+                                                title="Move backward"
+                                                data-interactive="true"
+                                                onPointerDown={(e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    if (contextMenu.id) {
+                                                        useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'down');
+                                                    }
+                                                    setContextMenu(null);
+                                                }}
+                                            >
+                                                <ArrowDown size={18} />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className={styles.contextButton}
+                                                title="Send to back"
+                                                data-interactive="true"
+                                                onPointerDown={(e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    if (contextMenu.id) {
+                                                        useStore.getState().moveStackItem(contextMenu.kind as 'node' | 'textBox' | 'comment', contextMenu.id, 'bottom');
+                                                    }
+                                                    setContextMenu(null);
+                                                }}
+                                            >
+                                                <ArrowDownToLine size={18} />
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
                             )}
                             {contextStack && (
                                 <button
