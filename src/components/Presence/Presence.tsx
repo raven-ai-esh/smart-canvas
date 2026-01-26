@@ -84,7 +84,43 @@ type AlertingMeta = {
 };
 type GeneralSettingsShape = {
   zoomSensitivity: number;
+  zoomGraphThreshold: number;
+  zoomDetailThreshold: number;
   locale: 'en' | 'ru';
+};
+
+const DEFAULT_ZOOM_GRAPH_THRESHOLD = 0.6;
+const DEFAULT_ZOOM_DETAIL_THRESHOLD = 1.1;
+const ZOOM_GRAPH_MIN = 0.2;
+const ZOOM_GRAPH_MAX = 1.2;
+const ZOOM_DETAIL_MIN = 0.8;
+const ZOOM_DETAIL_MAX = 2.5;
+const ZOOM_THRESHOLD_GAP = 0.1;
+const normalizeZoomThreshold = (value: unknown, fallback: number, min: number, max: number) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(Math.max(num, min), max);
+};
+const normalizeZoomThresholds = (raw: any) => {
+  let zoomGraphThreshold = normalizeZoomThreshold(
+    raw?.zoomGraphThreshold ?? raw?.zoom_graph_threshold,
+    DEFAULT_ZOOM_GRAPH_THRESHOLD,
+    ZOOM_GRAPH_MIN,
+    ZOOM_GRAPH_MAX,
+  );
+  let zoomDetailThreshold = normalizeZoomThreshold(
+    raw?.zoomDetailThreshold ?? raw?.zoom_detail_threshold,
+    DEFAULT_ZOOM_DETAIL_THRESHOLD,
+    ZOOM_DETAIL_MIN,
+    ZOOM_DETAIL_MAX,
+  );
+  if (zoomDetailThreshold - zoomGraphThreshold < ZOOM_THRESHOLD_GAP) {
+    zoomDetailThreshold = Math.min(ZOOM_DETAIL_MAX, zoomGraphThreshold + ZOOM_THRESHOLD_GAP);
+    if (zoomDetailThreshold - zoomGraphThreshold < ZOOM_THRESHOLD_GAP) {
+      zoomGraphThreshold = Math.max(ZOOM_GRAPH_MIN, zoomDetailThreshold - ZOOM_THRESHOLD_GAP);
+    }
+  }
+  return { zoomGraphThreshold, zoomDetailThreshold };
 };
 
 const mcpExpiryOptions = [
@@ -111,8 +147,9 @@ const defaultAlertingSettings: AlertingSettings = {
 const normalizeGeneralSettingsClient = (raw: any): GeneralSettingsShape => {
   const zoom = Number(raw?.zoomSensitivity ?? raw?.zoom_sensitivity);
   const zoomSensitivity = Number.isFinite(zoom) ? Math.min(Math.max(zoom, 0.25), 3) : 1;
+  const thresholds = normalizeZoomThresholds(raw);
   const locale = raw?.locale === 'ru' ? 'ru' : 'en';
-  return { zoomSensitivity, locale };
+  return { zoomSensitivity, zoomGraphThreshold: thresholds.zoomGraphThreshold, zoomDetailThreshold: thresholds.zoomDetailThreshold, locale };
 };
 
 function useIsCompactAuthModal() {
@@ -695,26 +732,58 @@ export const Presence: React.FC = () => {
   const [generalMessage, setGeneralMessage] = useState<string | null>(null);
   const [generalNoticeVisible, setGeneralNoticeVisible] = useState(false);
   const [generalZoomSensitivity, setGeneralZoomSensitivity] = useState(generalSettings.zoomSensitivity);
+  const [generalZoomGraphThreshold, setGeneralZoomGraphThreshold] = useState(generalSettings.zoomGraphThreshold);
+  const [generalZoomDetailThreshold, setGeneralZoomDetailThreshold] = useState(generalSettings.zoomDetailThreshold);
   const [generalLocale, setGeneralLocale] = useState<GeneralSettingsShape['locale']>(generalSettings.locale);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const ravenAiSkillCloseTimeout = useRef<number | null>(null);
 
   useEffect(() => {
     setGeneralZoomSensitivity(generalSettings.zoomSensitivity);
+    setGeneralZoomGraphThreshold(generalSettings.zoomGraphThreshold);
+    setGeneralZoomDetailThreshold(generalSettings.zoomDetailThreshold);
     setGeneralLocale(generalSettings.locale);
-  }, [generalSettings.zoomSensitivity, generalSettings.locale]);
+  }, [generalSettings.zoomSensitivity, generalSettings.zoomGraphThreshold, generalSettings.zoomDetailThreshold, generalSettings.locale]);
 
   const localeTag = generalLocale === 'ru' ? 'ru-RU' : 'en-US';
   const generalText = {
     modalTitle: t('general.modalTitle'),
     zoomLabel: t('general.zoomLabel'),
     zoomHint: t('general.zoomHint'),
+    zoomGraphLabel: t('general.zoomGraphLabel'),
+    zoomGraphHint: t('general.zoomGraphHint'),
+    zoomDetailLabel: t('general.zoomDetailLabel'),
+    zoomDetailHint: t('general.zoomDetailHint'),
     localeLabel: t('general.localization'),
     localeHint: t('general.localizationHint'),
     save: t('general.save'),
     cancel: t('general.cancel'),
     close: t('general.close'),
     saved: t('general.saved'),
+  };
+
+  const handleZoomGraphThresholdChange = (value: number) => {
+    const nextGraph = value;
+    let nextDetail = generalZoomDetailThreshold;
+    if (nextDetail - nextGraph < ZOOM_THRESHOLD_GAP) {
+      nextDetail = Math.min(ZOOM_DETAIL_MAX, nextGraph + ZOOM_THRESHOLD_GAP);
+    }
+    setGeneralZoomGraphThreshold(nextGraph);
+    if (nextDetail !== generalZoomDetailThreshold) {
+      setGeneralZoomDetailThreshold(nextDetail);
+    }
+  };
+
+  const handleZoomDetailThresholdChange = (value: number) => {
+    const nextDetail = value;
+    let nextGraph = generalZoomGraphThreshold;
+    if (nextDetail - nextGraph < ZOOM_THRESHOLD_GAP) {
+      nextGraph = Math.max(ZOOM_GRAPH_MIN, nextDetail - ZOOM_THRESHOLD_GAP);
+    }
+    setGeneralZoomDetailThreshold(nextDetail);
+    if (nextGraph !== generalZoomGraphThreshold) {
+      setGeneralZoomGraphThreshold(nextGraph);
+    }
   };
 
   const selfId = presence.selfId;
@@ -964,6 +1033,8 @@ export const Presence: React.FC = () => {
       const settings = normalizeGeneralSettingsClient(data?.settings ?? {});
       setGeneralSettings(settings);
       setGeneralZoomSensitivity(settings.zoomSensitivity);
+      setGeneralZoomGraphThreshold(settings.zoomGraphThreshold);
+      setGeneralZoomDetailThreshold(settings.zoomDetailThreshold);
       setGeneralLocale(settings.locale);
       setGeneralLoaded(true);
     } catch {
@@ -984,6 +1055,8 @@ export const Presence: React.FC = () => {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           zoomSensitivity: generalZoomSensitivity,
+          zoomGraphThreshold: generalZoomGraphThreshold,
+          zoomDetailThreshold: generalZoomDetailThreshold,
           locale: generalLocale,
         }),
       });
@@ -994,10 +1067,14 @@ export const Presence: React.FC = () => {
       }
       const settings = normalizeGeneralSettingsClient(data?.settings ?? {
         zoomSensitivity: generalZoomSensitivity,
+        zoomGraphThreshold: generalZoomGraphThreshold,
+        zoomDetailThreshold: generalZoomDetailThreshold,
         locale: generalLocale,
       });
       setGeneralSettings(settings);
       setGeneralZoomSensitivity(settings.zoomSensitivity);
+      setGeneralZoomGraphThreshold(settings.zoomGraphThreshold);
+      setGeneralZoomDetailThreshold(settings.zoomDetailThreshold);
       setGeneralLocale(settings.locale);
       setGeneralMessage(null);
       setGeneralNoticeVisible(true);
@@ -1454,6 +1531,8 @@ export const Presence: React.FC = () => {
       const defaults = normalizeGeneralSettingsClient({});
       setGeneralSettings(defaults);
       setGeneralZoomSensitivity(defaults.zoomSensitivity);
+      setGeneralZoomGraphThreshold(defaults.zoomGraphThreshold);
+      setGeneralZoomDetailThreshold(defaults.zoomDetailThreshold);
       setGeneralLocale(defaults.locale);
       return;
     }
@@ -1521,8 +1600,10 @@ export const Presence: React.FC = () => {
       return;
     }
     setGeneralZoomSensitivity(generalSettings.zoomSensitivity);
+    setGeneralZoomGraphThreshold(generalSettings.zoomGraphThreshold);
+    setGeneralZoomDetailThreshold(generalSettings.zoomDetailThreshold);
     setGeneralLocale(generalSettings.locale);
-  }, [generalOpen, generalLoaded, generalSettings.locale, generalSettings.zoomSensitivity]);
+  }, [generalOpen, generalLoaded, generalSettings.locale, generalSettings.zoomSensitivity, generalSettings.zoomGraphThreshold, generalSettings.zoomDetailThreshold]);
 
   useEffect(() => {
     if (ravenAiSkillsOpen && !me) {
@@ -2272,6 +2353,48 @@ export const Presence: React.FC = () => {
                     step={0.05}
                     value={generalZoomSensitivity}
                     onChange={(e) => setGeneralZoomSensitivity(Number(e.target.value))}
+                    disabled={!generalLoaded || generalBusy}
+                  />
+                </div>
+
+                <div style={{ display: 'grid', gap: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                    <div style={{ display: 'grid', gap: 4 }}>
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{generalText.zoomGraphLabel}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>{generalText.zoomGraphHint}</div>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', minWidth: 64, textAlign: 'right' }}>
+                      ×{generalZoomGraphThreshold.toFixed(2)}
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min={ZOOM_GRAPH_MIN}
+                    max={ZOOM_GRAPH_MAX}
+                    step={0.05}
+                    value={generalZoomGraphThreshold}
+                    onChange={(e) => handleZoomGraphThresholdChange(Number(e.target.value))}
+                    disabled={!generalLoaded || generalBusy}
+                  />
+                </div>
+
+                <div style={{ display: 'grid', gap: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                    <div style={{ display: 'grid', gap: 4 }}>
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{generalText.zoomDetailLabel}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>{generalText.zoomDetailHint}</div>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', minWidth: 64, textAlign: 'right' }}>
+                      ×{generalZoomDetailThreshold.toFixed(2)}
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min={ZOOM_DETAIL_MIN}
+                    max={ZOOM_DETAIL_MAX}
+                    step={0.05}
+                    value={generalZoomDetailThreshold}
+                    onChange={(e) => handleZoomDetailThresholdChange(Number(e.target.value))}
                     disabled={!generalLoaded || generalBusy}
                   />
                 </div>

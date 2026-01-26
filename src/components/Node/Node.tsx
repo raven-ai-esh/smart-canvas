@@ -1700,12 +1700,14 @@ interface NodeProps {
 }
 
 export const Node: React.FC<NodeProps> = ({ data, stackAnimating = false, stackCollapsed = false }) => {
-    const { canvas } = useStore();
+    const { canvas, generalSettings } = useStore();
     const setCanvasViewCommand = useStore((state) => state.setCanvasViewCommand);
     const setPreviousCanvasState = useStore((state) => state.setPreviousCanvasState);
     const setFocusedDetailNodeId = useStore((state) => state.setFocusedDetailNodeId);
     const bumpNodeRectVersion = useStore((state) => state.bumpNodeRectVersion);
     const scale = canvas.scale;
+    const zoomGraphThreshold = generalSettings.zoomGraphThreshold ?? 0.6;
+    const zoomDetailThreshold = generalSettings.zoomDetailThreshold ?? 1.1;
     const [isHovered, setIsHovered] = useState(false);
     const cardRectRef = useRef<HTMLDivElement | null>(null);
     const noteRectRef = useRef<HTMLDivElement | null>(null);
@@ -1756,10 +1758,9 @@ export const Node: React.FC<NodeProps> = ({ data, stackAnimating = false, stackC
     // Determine Active View
     let activeView: 'graph' | 'card' | 'note' = 'card';
 
-    // Increased threshold to 0.6 for earlier graph view
-    if (scale < 0.6) {
+    if (scale < zoomGraphThreshold) {
         activeView = 'graph';
-    } else if (scale > 1.1 && isFocusedInViewport) {
+    } else if (scale > zoomDetailThreshold && isFocusedInViewport) {
         activeView = 'note';
     } else {
         activeView = 'card';

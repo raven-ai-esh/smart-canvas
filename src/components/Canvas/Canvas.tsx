@@ -19,11 +19,9 @@ import { energyToColor } from '../../utils/energy';
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
-const ZOOM_DETAIL_THRESHOLD = 1.1;
-const ZOOM_GRAPH_THRESHOLD = 0.6;
+const DEFAULT_ZOOM_GRAPH_THRESHOLD = 0.6;
+const DEFAULT_ZOOM_DETAIL_THRESHOLD = 1.1;
 const ZOOM_EPS = 0.02;
-const ZOOM_DETAIL = ZOOM_DETAIL_THRESHOLD + ZOOM_EPS;
-const ZOOM_GRAPH = ZOOM_GRAPH_THRESHOLD - ZOOM_EPS;
 const CLICK_THRESHOLD = 5;
 const LONG_PRESS_MS = 500;
 const TOUCH_DRAG_THRESHOLD = 8;
@@ -340,6 +338,10 @@ export const Canvas: React.FC = () => {
     const generalSettings = useStore((state) => state.generalSettings);
     const focusedDetailNodeId = useStore((state) => state.focusedDetailNodeId);
     const previousCanvasState = useStore((state) => state.previousCanvasState);
+    const zoomGraphThreshold = generalSettings.zoomGraphThreshold ?? DEFAULT_ZOOM_GRAPH_THRESHOLD;
+    const zoomDetailThreshold = generalSettings.zoomDetailThreshold ?? DEFAULT_ZOOM_DETAIL_THRESHOLD;
+    const zoomGraphPreset = zoomGraphThreshold - ZOOM_EPS;
+    const zoomDetailPreset = zoomDetailThreshold + ZOOM_EPS;
     const uploadPointRef = useRef<{ x: number; y: number } | null>(null);
     const filePickerRef = useRef<HTMLInputElement | null>(null);
     const ganttResizeRef = useRef<{
@@ -1225,12 +1227,12 @@ export const Canvas: React.FC = () => {
 
         const action = canvasViewCommand.action;
         if (action === 'zoom_to_cards') {
-            applyZoomPreset(ZOOM_DETAIL);
+            applyZoomPreset(zoomDetailPreset);
             setCanvasViewCommand(null);
             return;
         }
         if (action === 'zoom_to_graph') {
-            applyZoomPreset(ZOOM_GRAPH);
+            applyZoomPreset(zoomGraphPreset);
             setCanvasViewCommand(null);
             return;
         }
@@ -1256,11 +1258,11 @@ export const Canvas: React.FC = () => {
             if (id) {
                 const st = useStore.getState();
                 const node = st.nodes.find((candidate) => candidate.id === id);
-                if (node) animateCenterOnWorldPoint(node.x, node.y, ZOOM_DETAIL, 320);
+                if (node) animateCenterOnWorldPoint(node.x, node.y, zoomDetailPreset, 320);
             }
             setCanvasViewCommand(null);
         }
-    }, [animateCenterOnWorldPoint, applyZoomPreset, applyZoomToFit, canvasViewCommand, centerOnWorldPoint, setCanvasViewCommand]);
+    }, [animateCenterOnWorldPoint, applyZoomPreset, applyZoomToFit, canvasViewCommand, centerOnWorldPoint, setCanvasViewCommand, zoomDetailPreset, zoomGraphPreset]);
 
     const resolveCommentAnchor = useCallback((target: CommentDraft | Comment) => {
         if (target.targetKind === 'canvas') {

@@ -333,8 +333,12 @@ export function useSessionSync() {
       if (typeof window === 'undefined' || typeof document === 'undefined') return false;
       const MIN_SCALE = 0.1;
       const MAX_SCALE = 5;
-      const ZOOM_DETAIL = 1.12;
-      const ZOOM_GRAPH = 0.58;
+      const ZOOM_EPS = 0.02;
+      const generalSettings = useStore.getState().generalSettings;
+      const zoomGraphThreshold = generalSettings.zoomGraphThreshold ?? 0.6;
+      const zoomDetailThreshold = generalSettings.zoomDetailThreshold ?? 1.1;
+      const ZOOM_DETAIL = zoomDetailThreshold + ZOOM_EPS;
+      const ZOOM_GRAPH = zoomGraphThreshold - ZOOM_EPS;
       const clampScale = (scale: number) => Math.min(Math.max(scale, MIN_SCALE), MAX_SCALE);
       const getViewportMetrics = () => {
         const viewport = window.visualViewport;

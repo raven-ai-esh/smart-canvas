@@ -8,12 +8,10 @@ const BUTTON_GAP = 12;
 const BUTTON_STEP = BUTTON_SIZE + BUTTON_GAP;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
-const ZOOM_DETAIL_THRESHOLD = 1.1;
-const ZOOM_GRAPH_THRESHOLD = 0.6;
+const DEFAULT_ZOOM_GRAPH_THRESHOLD = 0.6;
+const DEFAULT_ZOOM_DETAIL_THRESHOLD = 1.1;
 const ZOOM_EPS = 0.02;
-const ZOOM_DETAIL = ZOOM_DETAIL_THRESHOLD + ZOOM_EPS;
 const ZOOM_NORMAL = 1;
-const ZOOM_GRAPH = ZOOM_GRAPH_THRESHOLD - ZOOM_EPS;
 
 type ControlButtonProps = {
     title: string;
@@ -107,7 +105,7 @@ const ControlButton: React.FC<ControlButtonProps> = ({ title, onClick, active, d
 };
 
 export const Controls: React.FC = () => {
-    const { moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, monitoringMode, toggleMonitoringMode, ganttMode, toggleGanttMode, theme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, canvas, setCanvasTransform } = useStore();
+    const { moveMode, toggleMoveMode, snapMode, toggleSnapMode, focusMode, toggleFocusMode, monitoringMode, toggleMonitoringMode, ganttMode, toggleGanttMode, theme, penMode, togglePenMode, penTool, setPenTool, textMode, toggleTextMode, canvas, setCanvasTransform, generalSettings } = useStore();
 
     const controlsRootRef = useRef<HTMLDivElement | null>(null);
 
@@ -117,6 +115,11 @@ export const Controls: React.FC = () => {
     const [showZoomMenu, setShowZoomMenu] = useState(false);
     const [toastText, setToastText] = useState<string | null>(null);
     const [toastVisible, setToastVisible] = useState(false);
+
+    const zoomGraphThreshold = generalSettings.zoomGraphThreshold ?? DEFAULT_ZOOM_GRAPH_THRESHOLD;
+    const zoomDetailThreshold = generalSettings.zoomDetailThreshold ?? DEFAULT_ZOOM_DETAIL_THRESHOLD;
+    const zoomGraphPreset = zoomGraphThreshold - ZOOM_EPS;
+    const zoomDetailPreset = zoomDetailThreshold + ZOOM_EPS;
 
     // Orientation detection (more reliable on iPad than innerWidth/innerHeight during rotation)
     const [isLandscape, setIsLandscape] = useState(
@@ -265,8 +268,8 @@ export const Controls: React.FC = () => {
     const zoomPresetKey = (() => {
         const scale = canvas.scale;
         const closeTo = (target: number) => Math.abs(scale - target) <= 0.08;
-        if (closeTo(ZOOM_DETAIL)) return 'detail';
-        if (closeTo(ZOOM_GRAPH)) return 'graph';
+        if (closeTo(zoomDetailPreset)) return 'detail';
+        if (closeTo(zoomGraphPreset)) return 'graph';
         if (closeTo(ZOOM_NORMAL)) return 'normal';
         return null;
     })();
@@ -495,7 +498,7 @@ export const Controls: React.FC = () => {
                             {
                                 key: 'detail',
                                 title: 'Detail Zoom',
-                                onClick: () => applyZoomPreset(ZOOM_DETAIL, 'Zoom: Detail'),
+                                onClick: () => applyZoomPreset(zoomDetailPreset, 'Zoom: Detail'),
                                 active: zoomPresetKey === 'detail',
                                 child: <StickyNote size={18} />,
                             },
@@ -509,7 +512,7 @@ export const Controls: React.FC = () => {
                             {
                                 key: 'graph',
                                 title: 'Graph View Zoom',
-                                onClick: () => applyZoomPreset(ZOOM_GRAPH, 'Zoom: Graph'),
+                                onClick: () => applyZoomPreset(zoomGraphPreset, 'Zoom: Graph'),
                                 active: zoomPresetKey === 'graph',
                                 child: <Network size={18} />,
                             },
