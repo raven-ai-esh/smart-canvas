@@ -6945,7 +6945,7 @@ app.delete('/api/sessions/:id', async (req, res) => {
 app.post('/api/sessions/:id/save', async (req, res) => {
   const auth = authUserFromRequest(req);
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
-  const access = await resolveSessionAccess({ sessionId: req.params.id, auth });
+  const access = await resolveSessionAccessFromRequest({ sessionId: req.params.id, req });
   if (access.error === 'forbidden') return res.status(403).json({ error: 'forbidden' });
   if (access.error === 'not_found') return res.status(404).json({ error: 'not_found' });
   const rawName = String(req.body?.name ?? '').trim();
