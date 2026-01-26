@@ -469,6 +469,27 @@
     border-color: var(--border-strong);
 }
 
+.contextGroup {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.contextGroupPanel {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%);
+    display: grid;
+    gap: 8px;
+    padding: 8px;
+    border-radius: 16px;
+    background: var(--bg-node);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(10px);
+}
+
 .selectionRect {
     position: fixed;
     z-index: 1900;
