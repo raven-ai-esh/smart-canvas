@@ -399,12 +399,13 @@ const stackableLayerId = (item: { layerId?: string | null }) => (
     typeof item.layerId === 'string' && item.layerId ? item.layerId : DEFAULT_LAYER_ID
 );
 
-const maxLayerZIndex = (state: Pick<AppState, 'nodes' | 'textBoxes' | 'comments'>, layerId: string) => {
+const maxLayerZIndex = (state: Pick<AppState, 'nodes' | 'textBoxes' | 'comments' | 'stacks'>, layerId: string) => {
     const rootComments = state.comments.filter((comment) => !comment.parentId);
     const entries = collectLayerStackEntries({
         nodes: state.nodes,
         textBoxes: state.textBoxes,
         comments: rootComments,
+        stacks: state.stacks,
         layerId,
     });
     let max = -Infinity;
@@ -416,9 +417,10 @@ const maxLayerZIndex = (state: Pick<AppState, 'nodes' | 'textBoxes' | 'comments'
     return max === -Infinity ? null : max;
 };
 
-const resolveStackItem = (state: Pick<AppState, 'nodes' | 'textBoxes' | 'comments'>, kind: StackKind, id: string) => {
+const resolveStackItem = (state: Pick<AppState, 'nodes' | 'textBoxes' | 'comments' | 'stacks'>, kind: StackKind, id: string) => {
     if (kind === 'node') return state.nodes.find((node) => node.id === id) ?? null;
     if (kind === 'textBox') return state.textBoxes.find((tb) => tb.id === id) ?? null;
+    if (kind === 'stack') return state.stacks.find((stack) => stack.id === id) ?? null;
     return state.comments.find((comment) => comment.id === id) ?? null;
 };
 
@@ -1812,6 +1814,7 @@ export const useStore = create<AppState>()(
                     nodes: state.nodes,
                     textBoxes: state.textBoxes,
                     comments: rootComments,
+                    stacks: state.stacks,
                     layerId,
                 }));
                 if (entries.length < 2) return {};
@@ -1831,14 +1834,16 @@ export const useStore = create<AppState>()(
                 const nodeUpdates = new Map<string, number>();
                 const textBoxUpdates = new Map<string, number>();
                 const commentUpdates = new Map<string, number>();
+                const stackUpdates = new Map<string, number>();
                 nextEntries.forEach((entry, idx) => {
                     if (entry.item.zIndex === idx) return;
                     if (entry.kind === 'node') nodeUpdates.set(entry.id, idx);
                     else if (entry.kind === 'textBox') textBoxUpdates.set(entry.id, idx);
-                    else commentUpdates.set(entry.id, idx);
+                    else if (entry.kind === 'comment') commentUpdates.set(entry.id, idx);
+                    else stackUpdates.set(entry.id, idx);
                 });
 
-                if (!nodeUpdates.size && !textBoxUpdates.size && !commentUpdates.size) return {};
+                if (!nodeUpdates.size && !textBoxUpdates.size && !commentUpdates.size && !stackUpdates.size) return {};
                 const now = Date.now();
                 const nodes = nodeUpdates.size
                     ? state.nodes.map((node) => (
@@ -1855,7 +1860,12 @@ export const useStore = create<AppState>()(
                         commentUpdates.has(comment.id) ? { ...comment, zIndex: commentUpdates.get(comment.id), updatedAt: now } : comment
                     ))
                     : state.comments;
-                return { ...pushHistoryReducer(state), nodes, textBoxes, comments };
+                const stacks = stackUpdates.size
+                    ? state.stacks.map((stack) => (
+                        stackUpdates.has(stack.id) ? { ...stack, zIndex: stackUpdates.get(stack.id), updatedAt: now } : stack
+                    ))
+                    : state.stacks;
+                return { ...pushHistoryReducer(state), nodes, textBoxes, comments, stacks };
             }),
 
             createStack: (items, options) => set((state) => {

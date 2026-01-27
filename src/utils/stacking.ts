@@ -1,7 +1,7 @@
-import type { Comment, NodeData, TextBox } from '../types';
+import type { Comment, NodeData, StackGroup, TextBox } from '../types';
 import { DEFAULT_LAYER_ID } from './layers';
 
-export type StackKind = 'node' | 'textBox' | 'comment';
+export type StackKind = 'node' | 'textBox' | 'comment' | 'stack';
 
 export type StackEntry = {
   kind: StackKind;
@@ -9,7 +9,7 @@ export type StackEntry = {
   layerId: string;
   zIndex: number | null;
   fallback: number;
-  item: NodeData | TextBox | Comment;
+  item: NodeData | TextBox | Comment | StackGroup;
 };
 
 const isFiniteNumber = (value: unknown): value is number => (
@@ -24,12 +24,13 @@ export const collectLayerStackEntries = (opts: {
   nodes: NodeData[];
   textBoxes: TextBox[];
   comments: Comment[];
+  stacks?: StackGroup[];
   layerId: string;
 }): StackEntry[] => {
-  const { nodes, textBoxes, comments, layerId } = opts;
+  const { nodes, textBoxes, comments, stacks, layerId } = opts;
   const entries: StackEntry[] = [];
   let fallback = 0;
-  const push = (kind: StackKind, item: NodeData | TextBox | Comment) => {
+  const push = (kind: StackKind, item: NodeData | TextBox | Comment | StackGroup) => {
     entries.push({
       kind,
       id: item.id,
@@ -51,6 +52,11 @@ export const collectLayerStackEntries = (opts: {
   comments.forEach((comment) => {
     if (resolveItemLayerId(comment) !== layerId) return;
     push('comment', comment);
+  });
+  (stacks ?? []).forEach((stack) => {
+    if (!stack.collapsed) return;
+    if (resolveItemLayerId(stack) !== layerId) return;
+    push('stack', stack);
   });
   return entries;
 };
