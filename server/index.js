@@ -51,6 +51,7 @@ const TEST_USER_ENABLED = process.env.TEST_USER_ENABLED ?? (process.env.NODE_ENV
 const TEST_USER_EMAIL = process.env.TEST_USER_EMAIL ?? '';
 const TEST_USER_PASSWORD = process.env.TEST_USER_PASSWORD ?? '';
 const TEST_USER_NAME = process.env.TEST_USER_NAME ?? 'Test User';
+const PASSWORD_RESET_TTL_HOURS = Number(process.env.PASSWORD_RESET_TTL_HOURS ?? 2);
 const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
 const SESSION_ACCESS_MODE = String(process.env.SESSION_ACCESS_MODE ?? 'auto').trim().toLowerCase();
 const RATE_LIMIT_ENABLED = process.env.RATE_LIMIT_ENABLED !== 'false';
@@ -430,6 +431,20 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS password_reset_tokens_user_idx ON password_reset_tokens (user_id)');
+  } catch {
+    // ignore
+  }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS mcp_tokens (
@@ -1256,6 +1271,18 @@ async function insertEmailChangeToken({ tokenHash, userId, newEmail, expiresAt }
   );
 }
 
+async function insertPasswordResetToken({ tokenHash, userId, expiresAt }) {
+  await pool.query(
+    `INSERT INTO password_reset_tokens (token_hash, user_id, expires_at)
+     VALUES ($1, $2, $3)`,
+    [tokenHash, userId, expiresAt],
+  );
+}
+
+async function clearPasswordResetTokensForUser(userId) {
+  await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [userId]);
+}
+
 async function consumeEmailVerificationToken(tokenHash) {
   const client = await pool.connect();
   try {
@@ -1304,6 +1331,37 @@ async function consumeEmailChangeToken(tokenHash) {
       return null;
     }
     await client.query('DELETE FROM email_change_tokens WHERE token_hash = $1', [tokenHash]);
+    await client.query('COMMIT');
+    return row;
+  } catch (e) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore
+    }
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+async function consumePasswordResetToken(tokenHash) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const res = await client.query(
+      `SELECT token_hash, user_id, expires_at
+         FROM password_reset_tokens
+        WHERE token_hash = $1
+        FOR UPDATE`,
+      [tokenHash],
+    );
+    const row = res.rows[0];
+    if (!row) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    await client.query('DELETE FROM password_reset_tokens WHERE token_hash = $1', [tokenHash]);
     await client.query('COMMIT');
     return row;
   } catch (e) {
@@ -1562,6 +1620,13 @@ const resolveTelegramReplyExpiry = () => {
   const hours = Number.isFinite(TELEGRAM_ALERT_REPLY_TTL_HOURS) && TELEGRAM_ALERT_REPLY_TTL_HOURS > 0
     ? TELEGRAM_ALERT_REPLY_TTL_HOURS
     : 24;
+  return new Date(Date.now() + hours * 60 * 60 * 1000);
+};
+
+const resolvePasswordResetExpiry = () => {
+  const hours = Number.isFinite(PASSWORD_RESET_TTL_HOURS) && PASSWORD_RESET_TTL_HOURS > 0
+    ? PASSWORD_RESET_TTL_HOURS
+    : 2;
   return new Date(Date.now() + hours * 60 * 60 * 1000);
 };
 
@@ -6224,6 +6289,90 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
   }
 
   res.json({ ok: true, sent: false, devVerifyUrl: verifyUrl });
+});
+
+app.post('/api/auth/password/reset/start', authRateLimiter, async (req, res) => {
+  const email = String(req.body?.email ?? '').trim().toLowerCase();
+  if (!email || !email.includes('@')) return res.status(400).json({ error: 'bad_email' });
+
+  const user = await getUserByEmail(email);
+  const sentResponse = { ok: true, sent: !!SMTP_URL };
+  if (!user) {
+    res.json(sentResponse);
+    return;
+  }
+
+  const rawToken = randomBytes(32).toString('hex');
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const expiresAt = resolvePasswordResetExpiry();
+  await clearPasswordResetTokensForUser(user.id);
+  await insertPasswordResetToken({ tokenHash, userId: user.id, expiresAt });
+
+  const resetUrl = `${getBaseUrl(req)}/?resetPassword=${encodeURIComponent(rawToken)}`;
+
+  if (SMTP_URL) {
+    const transport = nodemailer.createTransport(SMTP_URL);
+    await transport.sendMail({
+      from: MAIL_FROM,
+      to: email,
+      subject: 'Reset your password',
+      text: `Reset your password: ${resetUrl}`,
+      html: `<p>Reset your password:</p><p><a href="${resetUrl}">${resetUrl}</a></p>`,
+    });
+    res.json({ ok: true, sent: true });
+    return;
+  }
+
+  const devResetUrl = resetUrl;
+  res.json({ ok: true, sent: false, devResetUrl });
+});
+
+app.post('/api/auth/password/reset', authRateLimiter, async (req, res) => {
+  const token = String(req.body?.token ?? '').trim();
+  const password = String(req.body?.password ?? '');
+  if (!token) return res.status(400).json({ error: 'bad_token' });
+  if (!password || password.length < 8) return res.status(400).json({ error: 'bad_password' });
+
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  const row = await consumePasswordResetToken(tokenHash);
+  if (!row) return res.status(404).json({ error: 'invalid_token' });
+  const expiresAt = new Date(row.expires_at);
+  if (Number.isFinite(expiresAt.valueOf()) && expiresAt.getTime() < Date.now()) return res.status(410).json({ error: 'expired' });
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const updated = await updateUserProfile({ userId: row.user_id, passwordHash });
+  if (!updated) return res.status(500).json({ error: 'reset_failed' });
+  await setUserVerified(row.user_id);
+  setAuthCookie(res, signAuthToken({ userId: row.user_id }));
+
+  if (SMTP_URL && updated.email) {
+    try {
+      const transport = nodemailer.createTransport(SMTP_URL);
+      await transport.sendMail({
+        from: MAIL_FROM,
+        to: updated.email,
+        subject: 'Your password was reset',
+        text: 'Your password was reset. If this was not you, please contact support.',
+        html: '<p>Your password was reset. If this was not you, please contact support.</p>',
+      });
+    } catch (err) {
+      console.warn('[auth] reset password notification failed', err?.message ?? err);
+    }
+  }
+
+  res.json({
+    ok: true,
+    user: {
+      id: updated.id,
+      email: updated.email,
+      name: updated.name,
+      avatarSeed: updated.avatar_seed,
+      avatarUrl: updated.avatar_url,
+      avatarAnimal: updated.avatar_animal,
+      avatarColor: updated.avatar_color,
+      verified: true,
+    },
+  });
 });
 
 app.get('/api/auth/verify', authRateLimiter, async (req, res) => {
