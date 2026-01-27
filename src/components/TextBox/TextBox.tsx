@@ -39,6 +39,9 @@ type SnapRequest = {
   excludeTextBoxIds?: string[];
 };
 
+type StackDropItem = { kind: 'node' | 'textBox'; id: string };
+type StackDropInfo = { stackId: string | null; candidates: StackDropItem[] };
+
 const getFileExtension = (name: string) => {
   const trimmed = name.trim();
   const idx = trimmed.lastIndexOf('.');
@@ -63,6 +66,9 @@ type TextBoxProps = {
   stackAnimating?: boolean;
   onToggleStack?: (stackId: string) => void;
   onCollapseExpandedStacks?: (excludeStackId?: string | null) => void;
+  resolveStackDropInfo?: (clientX: number, clientY: number, items: StackDropItem[]) => StackDropInfo;
+  onStackDrop?: (stackId: string, items: StackDropItem[]) => void;
+  onStackDropTargetChange?: (stackId: string | null) => void;
 };
 
 export function TextBox({
@@ -77,6 +83,9 @@ export function TextBox({
   stackAnimating = false,
   onToggleStack,
   onCollapseExpandedStacks,
+  resolveStackDropInfo,
+  onStackDrop,
+  onStackDropTargetChange,
 }: TextBoxProps) {
   const updateTextBox = useStore((s) => s.updateTextBox);
   const editingId = useStore((s) => s.editingTextBoxId);
@@ -365,6 +374,13 @@ export function TextBox({
     touchCandidateRef.current = null;
   };
 
+  const updateStackDropTarget = (clientX: number, clientY: number, items: StackDropItem[]) => {
+    if (!resolveStackDropInfo || !onStackDropTargetChange) return null;
+    const info = resolveStackDropInfo(clientX, clientY, items);
+    onStackDropTargetChange(info.stackId);
+    return info;
+  };
+
   const startDrag = (e: React.PointerEvent, kind: 'move' | 'resize') => {
     e.preventDefault();
     e.stopPropagation();
@@ -529,6 +545,15 @@ export function TextBox({
       for (const ts0 of group.textBoxStarts) {
         st.updateTextBox(ts0.id, { x: ts0.x + dx, y: ts0.y + dy });
       }
+      if (group.committed) {
+        const dragItems: StackDropItem[] = [
+          ...group.nodeStarts.map((ns) => ({ kind: 'node' as const, id: ns.id })),
+          ...group.textBoxStarts.map((tb) => ({ kind: 'textBox' as const, id: tb.id })),
+        ];
+        updateStackDropTarget(e.clientX, e.clientY, dragItems);
+      } else if (onStackDropTargetChange) {
+        onStackDropTargetChange(null);
+      }
       return;
     }
 
@@ -564,6 +589,11 @@ export function TextBox({
         clearAlignmentGuides?.();
       }
       updateTextBox(box.id, { x: st.startBox.x + dx, y: st.startBox.y + dy });
+      if (st.committed) {
+        updateStackDropTarget(e.clientX, e.clientY, [{ kind: 'textBox' as const, id: box.id }]);
+      } else if (onStackDropTargetChange) {
+        onStackDropTargetChange(null);
+      }
       return;
     }
 
@@ -576,6 +606,7 @@ export function TextBox({
     const nextW = Math.max(MIN_W, st.startBox.width + dx);
     const nextH = Math.max(MIN_H, st.startBox.height + dy);
     updateTextBox(box.id, { width: nextW, height: nextH });
+    if (onStackDropTargetChange) onStackDropTargetChange(null);
   };
 
   const endDrag = (e: React.PointerEvent) => {
@@ -608,6 +639,17 @@ export function TextBox({
 
     const group = groupDragRef.current;
     if (group && group.pointerId === e.pointerId) {
+      if (group.committed && resolveStackDropInfo && onStackDrop) {
+        const dragItems: StackDropItem[] = [
+          ...group.nodeStarts.map((ns) => ({ kind: 'node' as const, id: ns.id })),
+          ...group.textBoxStarts.map((tb) => ({ kind: 'textBox' as const, id: tb.id })),
+        ];
+        const info = resolveStackDropInfo(e.clientX, e.clientY, dragItems);
+        if (info.stackId && info.candidates.length) {
+          onStackDrop(info.stackId, info.candidates);
+        }
+      }
+      if (onStackDropTargetChange) onStackDropTargetChange(null);
       groupDragRef.current = null;
       e.stopPropagation();
       if (e.pointerType !== 'touch') {
@@ -623,8 +665,15 @@ export function TextBox({
 
     const st = dragStateRef.current;
     if (!st || st.pointerId !== e.pointerId) return;
+    if (st.kind === 'move' && st.committed && resolveStackDropInfo && onStackDrop) {
+      const info = resolveStackDropInfo(e.clientX, e.clientY, [{ kind: 'textBox' as const, id: box.id }]);
+      if (info.stackId && info.candidates.length) {
+        onStackDrop(info.stackId, info.candidates);
+      }
+    }
     dragStateRef.current = null;
     e.stopPropagation();
+    if (onStackDropTargetChange) onStackDropTargetChange(null);
     if (e.pointerType !== 'touch') {
       try {
         (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);

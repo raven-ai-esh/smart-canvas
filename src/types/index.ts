@@ -155,6 +155,7 @@ export interface StackGroup {
   collapsed: boolean;
   collapsedSize?: { width: number; height: number };
   anchor?: { x: number; y: number };
+  zIndex?: number;
   createdAt?: number; // epoch ms
   updatedAt?: number; // epoch ms
 }
