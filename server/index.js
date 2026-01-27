@@ -2769,6 +2769,13 @@ const getSkillsFeedbackUrl = () => {
   return `${SKILLS_SERVICE_URL.replace(/\/+$/, '')}/feedback`;
 };
 
+const getSkillsOptimizeUrl = () => {
+  if (!SKILLS_SERVICE_URL) return '';
+  if (SKILLS_SERVICE_URL.endsWith('/optimize')) return SKILLS_SERVICE_URL;
+  if (SKILLS_SERVICE_URL.endsWith('/run')) return SKILLS_SERVICE_URL.replace(/\/run$/, '/optimize');
+  return `${SKILLS_SERVICE_URL.replace(/\/+$/, '')}/optimize`;
+};
+
 const callSkillsFeedback = async ({
   apiKey,
   model,
@@ -2806,6 +2813,41 @@ const callSkillsFeedback = async ({
     if (!res.ok) {
       const detail = body?.detail ?? body ?? {};
       const err = new Error(detail?.message ?? detail?.error ?? res.statusText ?? 'skills_feedback_failed');
+      err.status = res.status;
+      err.code = detail?.error ?? null;
+      throw err;
+    }
+    return body ?? {};
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+};
+
+const callSkillsOptimize = async ({ apiKey, userId, openaiBaseUrl }) => {
+  const url = getSkillsOptimizeUrl();
+  if (!url) {
+    const err = new Error('skills_service_unavailable');
+    err.code = 'skills_service_unavailable';
+    throw err;
+  }
+  const payload = {
+    apiKey,
+    userId,
+    openaiBaseUrl,
+  };
+  const controller = new AbortController();
+  const timeout = SKILLS_SERVICE_TIMEOUT ? setTimeout(() => controller.abort(), SKILLS_SERVICE_TIMEOUT) : null;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = body?.detail ?? body ?? {};
+      const err = new Error(detail?.message ?? detail?.error ?? res.statusText ?? 'skills_optimize_failed');
       err.status = res.status;
       err.code = detail?.error ?? null;
       throw err;
@@ -5294,6 +5336,27 @@ app.get('/api/raven-ai/skills', async (req, res) => {
   const limit = Number.isFinite(parsedLimit) ? parsedLimit : 60;
   const skills = await listAssistantSkills(auth.userId, limit);
   res.json({ skills });
+});
+
+app.post('/api/raven-ai/skills/optimize', async (req, res) => {
+  const auth = authUserFromRequest(req);
+  if (!auth) return res.status(401).json({ error: 'unauthorized' });
+  const keyRow = await getOpenAiKeyForUser(auth.userId);
+  const apiKey = keyRow?.api_key ?? OPENAI_API_KEY;
+  if (!apiKey) return res.status(400).json({ error: 'openai_key_required' });
+  const aiSettings = await getRavenAiSettings(auth.userId);
+  const resolvedAi = resolveRavenAiSettings(aiSettings);
+  try {
+    const result = await callSkillsOptimize({
+      apiKey,
+      userId: auth.userId,
+      openaiBaseUrl: resolvedAi.baseUrl,
+    });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const status = err?.statusCode ?? err?.status ?? 502;
+    res.status(status).json({ error: err?.code ?? 'skills_optimize_failed', message: err?.message ?? 'skills_optimize_failed' });
+  }
 });
 
 app.post('/api/raven-ai/settings', async (req, res) => {

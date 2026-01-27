@@ -101,6 +101,23 @@ class SkillFeedbackResponse(BaseModel):
     newVersionId: str | None = None
 
 
+class SkillOptimizeRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    apiKey: str = Field(..., min_length=1)
+    userId: str = Field(..., min_length=1)
+    openaiBaseUrl: str | None = None
+
+
+class SkillOptimizeResponse(BaseModel):
+    ok: bool
+    total: int
+    scanned: int
+    merged: int
+    removed: int
+    updatedEmbeddings: int
+
+
 class SkillStep(BaseModel):
     title: str
     instructions: str
@@ -604,6 +621,38 @@ def _step_similarity(left: list[dict[str, Any]], right: list[dict[str, Any]]) ->
     return total / count if count else 0.0
 
 
+def _normalize_steps(raw_steps: Any) -> list[dict[str, Any]]:
+    steps = raw_steps
+    if isinstance(steps, str):
+        try:
+            steps = json.loads(steps)
+        except json.JSONDecodeError:
+            steps = []
+    if not isinstance(steps, list):
+        return []
+    return [step for step in steps if isinstance(step, dict)]
+
+
+def _pick_definition_source(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    left_score = left.get("generalization_score") or 0.0
+    right_score = right.get("generalization_score") or 0.0
+    if left_score != right_score:
+        return left if left_score > right_score else right
+    left_steps = left.get("definition").steps if left.get("definition") else []
+    right_steps = right.get("definition").steps if right.get("definition") else []
+    if len(left_steps) != len(right_steps):
+        return left if len(left_steps) > len(right_steps) else right
+    left_desc = left.get("description") or ""
+    right_desc = right.get("description") or ""
+    if len(left_desc) != len(right_desc):
+        return left if len(left_desc) > len(right_desc) else right
+    left_updated = left.get("updated_at") or left.get("created_at")
+    right_updated = right.get("updated_at") or right.get("created_at")
+    if left_updated and right_updated and right_updated > left_updated:
+        return right
+    return left
+
+
 async def _detect_vector_extension(pool: asyncpg.Pool) -> bool:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS enabled")
@@ -712,6 +761,97 @@ async def _load_skill_version(pool: asyncpg.Pool, version_id: str) -> SkillVersi
         version=row["version"],
         steps=steps,
     )
+
+
+async def _list_skills_for_optimize(pool: asyncpg.Pool, user_id: str) -> list[dict[str, Any]]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT s.id, s.name, s.description, s.entrypoint_text, s.embedding, s.active_version_id,
+                   s.parameters, s.preconditions, s.success_criteria, s.examples, s.generalization_score,
+                   s.created_at, s.updated_at,
+                   v.steps
+              FROM assistant_skills s
+              LEFT JOIN assistant_skill_versions v ON v.id = s.active_version_id
+             WHERE s.user_id = $1
+            """,
+            user_id,
+        )
+    skills: list[dict[str, Any]] = []
+    for row in rows:
+        raw_steps = _normalize_steps(row.get("steps"))
+        steps_models: list[SkillStep] = []
+        for step in raw_steps:
+            title = _clamp_text(str(step.get("title") or "Step"), 140) or "Step"
+            instructions = _clamp_text(str(step.get("instructions") or ""), 2000)
+            if not instructions:
+                continue
+            notes = step.get("notes")
+            notes_text = _clamp_text(str(notes), 800) if isinstance(notes, str) else None
+            steps_models.append(SkillStep(title=title, instructions=instructions, notes=notes_text or None))
+        definition = _normalize_skill_definition(
+            SkillDefinition(
+                name=str(row.get("name") or "Raven skill"),
+                description=str(row.get("description") or ""),
+                entrypoint=str(row.get("entrypoint_text") or ""),
+                steps=steps_models,
+            ),
+            str(row.get("entrypoint_text") or ""),
+        )
+        steps_dump = [step.model_dump() for step in definition.steps]
+        skills.append({
+            "id": row["id"],
+            "name": row.get("name") or "Skill",
+            "description": row.get("description") or "",
+            "entrypoint_text": row.get("entrypoint_text") or "",
+            "definition": definition,
+            "steps_dump": steps_dump,
+            "embedding": _normalize_embedding(row.get("embedding")),
+            "parameters": _normalize_parameters(row.get("parameters")),
+            "preconditions": _normalize_string_list(row.get("preconditions"), max_items=SKILLS_MAX_PRECONDITIONS, max_len=260),
+            "success_criteria": _normalize_string_list(row.get("success_criteria"), max_items=SKILLS_MAX_SUCCESS_CRITERIA, max_len=260),
+            "examples": _normalize_examples(row.get("examples")),
+            "generalization_score": float(row.get("generalization_score")) if isinstance(row.get("generalization_score"), (int, float)) else None,
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        })
+    return skills
+
+
+async def _update_skill_embedding(pool: asyncpg.Pool, skill_id: str, embedding: list[float]) -> None:
+    vector_value: Any = embedding
+    if VECTOR_ENABLED:
+        vector_value = _to_vector_literal(embedding)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE assistant_skills
+               SET embedding = $1,
+                   updated_at = NOW()
+             WHERE id = $2
+            """,
+            vector_value,
+            skill_id,
+        )
+
+
+async def _reassign_skill_runs(pool: asyncpg.Pool, *, from_skill_id: str, to_skill_id: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE assistant_skill_runs
+               SET skill_id = $1,
+                   skill_version_id = NULL
+             WHERE skill_id = $2
+            """,
+            to_skill_id,
+            from_skill_id,
+        )
+
+
+async def _delete_skill(pool: asyncpg.Pool, skill_id: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM assistant_skills WHERE id = $1", skill_id)
 
 
 async def _save_skill(
@@ -1491,6 +1631,146 @@ async def _record_skill_background(
         logger.exception("skill_record_async_failed id=%s error=%s", run_id, str(exc))
 
 
+async def _optimize_skills(
+    *,
+    user_id: str,
+    api_key: str,
+    base_url: str | None,
+) -> dict[str, int]:
+    skills = await _list_skills_for_optimize(POOL, user_id) if POOL else []
+    total = len(skills)
+    updated_embeddings = 0
+    removed: set[str] = set()
+    merged = 0
+    scanned = 0
+
+    if not skills:
+        return {
+            "total": 0,
+            "scanned": 0,
+            "merged": 0,
+            "removed": 0,
+            "updated_embeddings": 0,
+        }
+
+    # Ensure embeddings exist for all skills.
+    for skill in skills:
+        if skill.get("embedding"):
+            continue
+        embedding_text = _build_skill_embedding_text(
+            definition=skill["definition"],
+            parameters=skill["parameters"],
+            preconditions=skill["preconditions"],
+            success_criteria=skill["success_criteria"],
+        )
+        embedding = await _embed_text(api_key, embedding_text, base_url)
+        if embedding:
+            await _update_skill_embedding(POOL, skill["id"], embedding)
+            skill["embedding"] = embedding
+            updated_embeddings += 1
+
+    # Oldest first so we keep stable ids.
+    skills.sort(key=lambda item: item.get("created_at") or datetime.min)
+
+    for i, target in enumerate(skills):
+        target_id = target["id"]
+        if target_id in removed:
+            continue
+        if not target.get("embedding"):
+            continue
+        for j in range(i + 1, len(skills)):
+            incoming = skills[j]
+            incoming_id = incoming["id"]
+            if incoming_id in removed:
+                continue
+            if not incoming.get("embedding"):
+                continue
+
+            scanned += 1
+            similarity = _cosine_similarity(target["embedding"], incoming["embedding"])
+            step_sim = _step_similarity(target["steps_dump"], incoming["steps_dump"])
+            weighted = similarity * 0.7 + step_sim * 0.3
+            boosted_similarity = min(1.0, similarity + SKILLS_MERGE_SIMILARITY_EPS)
+            merge_score = max(weighted, boosted_similarity, step_sim)
+
+            if merge_score < SKILLS_MERGE_SIMILARITY_THRESHOLD:
+                continue
+
+            definition_source = _pick_definition_source(target, incoming)
+            merged_params = _merge_parameters(target["parameters"], incoming["parameters"])
+            merged_preconditions = _merge_string_lists(
+                target["preconditions"],
+                incoming["preconditions"],
+                max_items=SKILLS_MAX_PRECONDITIONS,
+                max_len=260,
+            )
+            merged_success = _merge_string_lists(
+                target["success_criteria"],
+                incoming["success_criteria"],
+                max_items=SKILLS_MAX_SUCCESS_CRITERIA,
+                max_len=260,
+            )
+            merged_examples = _merge_examples(target["examples"], incoming["examples"])
+            merged_score = None
+            if target.get("generalization_score") is not None or incoming.get("generalization_score") is not None:
+                merged_score = max(
+                    float(target.get("generalization_score") or 0.0),
+                    float(incoming.get("generalization_score") or 0.0),
+                )
+
+            merged_embedding = None
+            merged_embedding_text = _build_skill_embedding_text(
+                definition=definition_source["definition"],
+                parameters=merged_params,
+                preconditions=merged_preconditions,
+                success_criteria=merged_success,
+            )
+            merged_embedding = await _embed_text(api_key, merged_embedding_text, base_url)
+            if not merged_embedding:
+                merged_embedding = definition_source.get("embedding") or target.get("embedding") or incoming.get("embedding") or []
+
+            await _save_skill_merge(
+                POOL,
+                skill_id=target_id,
+                definition=definition_source["definition"],
+                embedding=merged_embedding,
+                parameters=merged_params,
+                preconditions=merged_preconditions,
+                success_criteria=merged_success,
+                examples=merged_examples,
+                generalization_score=merged_score,
+            )
+            await _reassign_skill_runs(POOL, from_skill_id=incoming_id, to_skill_id=target_id)
+            await _delete_skill(POOL, incoming_id)
+            removed.add(incoming_id)
+            merged += 1
+
+            # Update in-memory target for subsequent merges.
+            target["definition"] = definition_source["definition"]
+            target["steps_dump"] = [step.model_dump() for step in definition_source["definition"].steps]
+            target["embedding"] = merged_embedding
+            target["parameters"] = merged_params
+            target["preconditions"] = merged_preconditions
+            target["success_criteria"] = merged_success
+            target["examples"] = merged_examples
+            target["generalization_score"] = merged_score
+
+            logger.info(
+                "skills_optimize_merge target=%s incoming=%s score=%.2f",
+                target_id,
+                incoming_id,
+                merge_score,
+            )
+
+    return {
+        "total": total,
+        "scanned": scanned,
+        "merged": merged,
+        "removed": len(removed),
+        "updated_embeddings": updated_embeddings,
+    }
+
+
 @app.post("/run", response_model=SkillRunResponse)
 async def run_skill(req: SkillRunRequest) -> SkillRunResponse:
     if not req.apiKey or not req.apiKey.strip():
@@ -1836,4 +2116,36 @@ async def skill_feedback(req: SkillFeedbackRequest) -> SkillFeedbackResponse:
         skillId=skill_id,
         skillVersionId=version_id,
         newVersionId=new_version_id,
+    )
+
+
+@app.post("/optimize", response_model=SkillOptimizeResponse)
+async def optimize_skills(req: SkillOptimizeRequest) -> SkillOptimizeResponse:
+    if not req.apiKey or not req.apiKey.strip():
+        raise HTTPException(status_code=400, detail="openai_key_required")
+    if not POOL:
+        raise HTTPException(status_code=503, detail="skills_pool_unavailable")
+
+    logger.info("skills_optimize_start user=%s", req.userId)
+    result = await _optimize_skills(
+        user_id=req.userId,
+        api_key=req.apiKey,
+        base_url=req.openaiBaseUrl,
+    )
+    logger.info(
+        "skills_optimize_done user=%s total=%s scanned=%s merged=%s removed=%s updatedEmbeddings=%s",
+        req.userId,
+        result.get("total"),
+        result.get("scanned"),
+        result.get("merged"),
+        result.get("removed"),
+        result.get("updated_embeddings"),
+    )
+    return SkillOptimizeResponse(
+        ok=True,
+        total=result.get("total", 0),
+        scanned=result.get("scanned", 0),
+        merged=result.get("merged", 0),
+        removed=result.get("removed", 0),
+        updatedEmbeddings=result.get("updated_embeddings", 0),
     )
