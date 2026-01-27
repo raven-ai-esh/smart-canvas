@@ -712,6 +712,7 @@ export const Presence: React.FC = () => {
   const [ravenAiAdvancedOpen, setRavenAiAdvancedOpen] = useState(false);
   const [ravenAiSkills, setRavenAiSkills] = useState<RavenSkill[]>([]);
   const [ravenAiSkillsBusy, setRavenAiSkillsBusy] = useState(false);
+  const [ravenAiSkillsOptimizing, setRavenAiSkillsOptimizing] = useState(false);
   const [ravenAiSkillsMessage, setRavenAiSkillsMessage] = useState<string | null>(null);
   const [ravenAiSkillsOpen, setRavenAiSkillsOpen] = useState(false);
   const [ravenAiSkillsQuery, setRavenAiSkillsQuery] = useState('');
@@ -817,6 +818,7 @@ export const Presence: React.FC = () => {
   const myGuestSeed = !me ? mySeed : '';
   const mcpStatusLabel = mcpTokenInfo ? 'Active' : 'Not generated';
   const aiStatusLabel = aiKeyInfo ? 'Active' : 'Not set';
+  const skillsBusy = ravenAiSkillsBusy || ravenAiSkillsOptimizing;
   const ravenAiModelHint = `Default: ${ravenAiDefaults?.model ?? 'gpt-5.2'}`;
   const ravenAiBaseUrlHint = `Default: ${ravenAiDefaults?.baseUrl ?? 'https://api.openai.com/v1'}`;
   const ravenAiSkillsFiltered = useMemo(() => {
@@ -1236,6 +1238,44 @@ export const Presence: React.FC = () => {
       setRavenAiSkillsMessage('Failed to load skills');
     } finally {
       if (!skipBusy) setRavenAiSkillsBusy(false);
+    }
+  };
+
+  const optimizeRavenAiSkills = async () => {
+    setRavenAiSkillsOptimizing(true);
+    setRavenAiSkillsMessage(null);
+    try {
+      const res = await fetch('/api/raven-ai/skills/optimize', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const code = typeof data?.error === 'string' ? data.error : '';
+        if (code === 'openai_key_required') {
+          setRavenAiSkillsMessage('Add an OpenAI key first.');
+        } else if (code === 'skills_service_unavailable') {
+          setRavenAiSkillsMessage('Skills service is unavailable.');
+        } else if (code) {
+          setRavenAiSkillsMessage(`Failed to optimize skills: ${code}`);
+        } else {
+          setRavenAiSkillsMessage('Failed to optimize skills');
+        }
+        return;
+      }
+      const result = data?.result ?? {};
+      const merged = Number(result.merged ?? 0);
+      const removed = Number(result.removed ?? 0);
+      const scanned = Number(result.scanned ?? 0);
+      const updatedEmbeddings = Number(result.updatedEmbeddings ?? 0);
+      setRavenAiSkillsMessage(
+        `Optimized: merged ${merged} (removed ${removed}), scanned ${scanned}, updated ${updatedEmbeddings} embeddings`,
+      );
+      await loadRavenAiSkills({ skipBusy: true });
+    } catch {
+      setRavenAiSkillsMessage('Failed to optimize skills');
+    } finally {
+      setRavenAiSkillsOptimizing(false);
     }
   };
 
@@ -3928,7 +3968,11 @@ export const Presence: React.FC = () => {
                     Skills live in a dedicated library so you can browse them without leaving your canvas.
                   </div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-secondary)' }}>
-                    <span>{ravenAiSkillsBusy ? 'Loading skills...' : `${ravenAiSkills.length} skills`}</span>
+                    <span>
+                      {skillsBusy
+                        ? (ravenAiSkillsOptimizing ? 'Optimizing skills...' : 'Loading skills...')
+                        : `${ravenAiSkills.length} skills`}
+                    </span>
                     <span>
                       {ravenAiSkillsLatest
                         ? `Last updated ${formatDateTime(ravenAiSkillsLatest.updatedAt)}`
@@ -3942,14 +3986,14 @@ export const Presence: React.FC = () => {
                     <button
                       type="button"
                       onClick={openRavenAiSkills}
-                      disabled={ravenAiSkillsBusy}
+                      disabled={skillsBusy}
                       style={{
                         borderRadius: 12,
                         border: '1px solid var(--border-strong)',
                         background: 'var(--accent-primary)',
                         color: '#fff',
                         padding: '8px 12px',
-                        cursor: ravenAiSkillsBusy ? 'not-allowed' : 'pointer',
+                        cursor: skillsBusy ? 'not-allowed' : 'pointer',
                       }}
                     >
                       Open skills library
@@ -3957,17 +4001,32 @@ export const Presence: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => void loadRavenAiSkills({})}
-                      disabled={ravenAiSkillsBusy}
+                      disabled={skillsBusy}
                       style={{
                         borderRadius: 12,
                         border: '1px solid var(--border-strong)',
                         background: 'transparent',
                         color: 'var(--text-primary)',
                         padding: '8px 12px',
-                        cursor: ravenAiSkillsBusy ? 'not-allowed' : 'pointer',
+                        cursor: skillsBusy ? 'not-allowed' : 'pointer',
                       }}
                     >
                       Refresh
+                    </button>
+                    <button
+                      type="button"
+                      onClick={optimizeRavenAiSkills}
+                      disabled={skillsBusy}
+                      style={{
+                        borderRadius: 12,
+                        border: '1px solid var(--border-strong)',
+                        background: 'rgba(15, 20, 28, 0.6)',
+                        color: 'var(--text-primary)',
+                        padding: '8px 12px',
+                        cursor: skillsBusy ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      Optimize
                     </button>
                   </div>
                 </div>
@@ -4026,7 +4085,9 @@ export const Presence: React.FC = () => {
                       <div style={{ display: 'grid', gap: 4 }}>
                         <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--text-primary)' }}>Skills</div>
                         <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                          {ravenAiSkillsBusy ? 'Loading skills...' : `${ravenAiSkills.length} skills`}
+                          {skillsBusy
+                            ? (ravenAiSkillsOptimizing ? 'Optimizing skills...' : 'Loading skills...')
+                            : `${ravenAiSkills.length} skills`}
                           {ravenAiSkillsLatest ? ` • Updated ${formatDateTime(ravenAiSkillsLatest.updatedAt)}` : ''}
                         </div>
                       </div>
@@ -4035,7 +4096,7 @@ export const Presence: React.FC = () => {
                       value={ravenAiSkillsQuery}
                       onChange={(e) => setRavenAiSkillsQuery(e.target.value)}
                       placeholder="Search skills"
-                      disabled={ravenAiSkillsBusy}
+                      disabled={skillsBusy}
                       style={{
                         borderRadius: 10,
                         border: '1px solid var(--border-strong)',
@@ -4050,7 +4111,7 @@ export const Presence: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => void loadRavenAiSkills({})}
-                      disabled={ravenAiSkillsBusy}
+                      disabled={skillsBusy}
                       style={{
                         borderRadius: 10,
                         border: '1px solid var(--border-strong)',
@@ -4058,10 +4119,26 @@ export const Presence: React.FC = () => {
                         color: 'var(--text-primary)',
                         padding: '6px 12px',
                         fontSize: 12,
-                        cursor: ravenAiSkillsBusy ? 'not-allowed' : 'pointer',
+                        cursor: skillsBusy ? 'not-allowed' : 'pointer',
                       }}
                     >
                       Refresh
+                    </button>
+                    <button
+                      type="button"
+                      onClick={optimizeRavenAiSkills}
+                      disabled={skillsBusy}
+                      style={{
+                        borderRadius: 10,
+                        border: '1px solid var(--border-strong)',
+                        background: 'rgba(15, 20, 28, 0.6)',
+                        color: 'var(--text-primary)',
+                        padding: '6px 12px',
+                        fontSize: 12,
+                        cursor: skillsBusy ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      Optimize
                     </button>
                     <button
                       type="button"
@@ -4101,15 +4178,17 @@ export const Presence: React.FC = () => {
 
                 <div style={{ position: 'relative', minHeight: 0 }}>
                   <div style={{ height: '100%', overflowY: 'auto', overflowX: 'hidden', paddingRight: 6 }}>
-                    {ravenAiSkillsBusy && (
-                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Loading skills...</div>
+                    {skillsBusy && (
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                        {ravenAiSkillsOptimizing ? 'Optimizing skills...' : 'Loading skills...'}
+                      </div>
                     )}
-                    {!ravenAiSkillsBusy && ravenAiSkillsFiltered.length === 0 && (
+                    {!skillsBusy && ravenAiSkillsFiltered.length === 0 && (
                       <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
                         {ravenAiSkills.length === 0 ? 'No skills recorded yet.' : 'No skills match this search.'}
                       </div>
                     )}
-                    {!ravenAiSkillsBusy && ravenAiSkillsFiltered.length > 0 && (
+                    {!skillsBusy && ravenAiSkillsFiltered.length > 0 && (
                       <div
                         style={{
                           display: 'grid',
