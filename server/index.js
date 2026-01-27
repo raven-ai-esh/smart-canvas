@@ -91,6 +91,9 @@ const ASSISTANT_MODEL_CONTEXT_TOKENS = Number(process.env.ASSISTANT_MODEL_CONTEX
 const ASSISTANT_TOKEN_ESTIMATE_CHARS = Number(process.env.ASSISTANT_TOKEN_ESTIMATE_CHARS ?? 4);
 const ASSISTANT_OUTPUT_RESERVE_TOKENS = Number(process.env.ASSISTANT_OUTPUT_RESERVE_TOKENS ?? 0);
 const ALERT_WEBHOOK_TIMEOUT_MS = Number(process.env.ALERT_WEBHOOK_TIMEOUT_MS ?? 5000);
+const ALERT_DEBOUNCE_MS = Number(process.env.ALERT_DEBOUNCE_MS ?? 1500);
+const ALERT_MAX_DEBOUNCE_MS = Number(process.env.ALERT_MAX_DEBOUNCE_MS ?? 8000);
+const ALERT_MIN_ENERGY_DELTA = Number(process.env.ALERT_MIN_ENERGY_DELTA ?? 5);
 const ALERT_PUBLIC_BASE_URL = normalizeEnvValue(process.env.ALERT_PUBLIC_BASE_URL) || APP_ORIGIN || '';
 const ATTACHMENTS_DIR = process.env.ATTACHMENTS_DIR ?? path.join(process.cwd(), 'data', 'attachments');
 const ATTACHMENTS_MAX_BYTES_RAW = Number(process.env.ATTACHMENTS_MAX_BYTES ?? 33554432);
@@ -3938,7 +3941,7 @@ const nodeChanged = (prev, next) => {
   if (prev.clarity !== next.clarity) return true;
   if (prev.status !== next.status) return true;
   if (prev.progress !== next.progress) return true;
-  if (prev.energy !== next.energy) return true;
+  if (energyDeltaChanged(prev.energy, next.energy)) return true;
   if (prev.startDate !== next.startDate) return true;
   if (prev.endDate !== next.endDate) return true;
   if (attachmentSignature(prev.attachments) !== attachmentSignature(next.attachments)) return true;
@@ -4127,6 +4130,16 @@ const formatPercent = (value) => {
   return `${num}%`;
 };
 
+const energyDeltaChanged = (prev, next) => {
+  const minDelta = Number.isFinite(ALERT_MIN_ENERGY_DELTA) && ALERT_MIN_ENERGY_DELTA > 0 ? ALERT_MIN_ENERGY_DELTA : 0;
+  const prevNum = Number.isFinite(prev) ? Number(prev) : null;
+  const nextNum = Number.isFinite(next) ? Number(next) : null;
+  if (prevNum === null || nextNum === null) return prev !== next;
+  if (prevNum === nextNum) return false;
+  if (minDelta === 0) return true;
+  return Math.abs(prevNum - nextNum) >= minDelta;
+};
+
 const buildChangeSummary = (prev, next) => {
   const lines = [];
   lines.push(`Card: ${nodeTitle(next)}`);
@@ -4147,7 +4160,7 @@ const buildChangeSummary = (prev, next) => {
   if (prev.progress !== next.progress) {
     lines.push(`Progress: ${formatPercent(prev.progress)} -> ${formatPercent(next.progress)}`);
   }
-  if (prev.energy !== next.energy) {
+  if (energyDeltaChanged(prev.energy, next.energy)) {
     lines.push(`Energy: ${formatValue(prev.energy)} -> ${formatValue(next.energy)}`);
   }
   if (prev.clarity !== next.clarity) {
@@ -4502,31 +4515,28 @@ const sendAlertWebhook = async ({ url, payload }) => {
   return res.ok;
 };
 
-const groupAlerts = (alerts) => {
-  const grouped = new Map();
-  for (const alert of alerts) {
-    const key = `${alert.event}:${alert.userId}`;
-    const existing = grouped.get(key);
-    if (!existing) {
-      grouped.set(key, { ...alert, nodes: alert.nodes ? [...alert.nodes] : [] });
-      continue;
+const ALERT_DEBOUNCE_EVENTS = new Set([ALERT_EVENTS.cardChanges]);
+const alertDebounceQueue = new Map();
+
+const mergeAlertPayload = (base, incoming) => {
+  if (!base || !incoming) return base;
+  if (incoming.nodes?.length) {
+    const byId = new Map((base.nodes ?? []).map((node) => [node.id, node]));
+    for (const node of incoming.nodes) {
+      if (!node?.id) continue;
+      byId.set(node.id, node);
     }
-    if (alert.nodes?.length) {
-      const byId = new Map(existing.nodes.map((n) => [n.id, n]));
-      for (const node of alert.nodes) {
-        if (!node?.id) continue;
-        byId.set(node.id, node);
-      }
-      existing.nodes = Array.from(byId.values());
-    }
-    if (alert.message) {
-      existing.message = existing.message ? `${existing.message}\n\n${alert.message}` : alert.message;
-    }
+    base.nodes = Array.from(byId.values());
   }
-  return Array.from(grouped.values());
+  if (incoming.message) {
+    base.message = base.message ? `${base.message}\n\n${incoming.message}` : incoming.message;
+  }
+  if (!base.sessionName && incoming.sessionName) base.sessionName = incoming.sessionName;
+  if (!base.actor && incoming.actor) base.actor = incoming.actor;
+  return base;
 };
 
-const dispatchAlertEvents = async (alerts) => {
+const dispatchAlertEventsNow = async (alerts) => {
   if (!alerts.length) return;
   const userIds = Array.from(new Set(alerts.map((item) => item.userId)));
   const [settingsMap, usersMap] = await Promise.all([
@@ -4591,6 +4601,77 @@ const dispatchAlertEvents = async (alerts) => {
   }
   if (tasks.length) {
     await Promise.allSettled(tasks);
+  }
+};
+
+const queueAlertEvent = (alert) => {
+  if (!alert?.userId) return;
+  const key = `${alert.event}:${alert.userId}:${alert.sessionId ?? ''}`;
+  const now = Date.now();
+  const debounceMs = Number.isFinite(ALERT_DEBOUNCE_MS) && ALERT_DEBOUNCE_MS > 0 ? ALERT_DEBOUNCE_MS : 0;
+  const maxWaitMs = Number.isFinite(ALERT_MAX_DEBOUNCE_MS) && ALERT_MAX_DEBOUNCE_MS > 0 ? ALERT_MAX_DEBOUNCE_MS : 0;
+  const existing = alertDebounceQueue.get(key);
+  if (existing) {
+    mergeAlertPayload(existing.alert, alert);
+    existing.lastQueuedAt = now;
+    if (existing.timer) clearTimeout(existing.timer);
+  } else {
+    alertDebounceQueue.set(key, {
+      alert: { ...alert, nodes: alert.nodes ? [...alert.nodes] : [] },
+      firstQueuedAt: now,
+      lastQueuedAt: now,
+      timer: null,
+    });
+  }
+  const entry = alertDebounceQueue.get(key);
+  if (!entry) return;
+  const elapsed = now - entry.firstQueuedAt;
+  const remainingMax = maxWaitMs > 0 ? Math.max(0, maxWaitMs - elapsed) : debounceMs;
+  const delay = Math.max(0, Math.min(debounceMs, remainingMax));
+  entry.timer = setTimeout(() => {
+    alertDebounceQueue.delete(key);
+    void dispatchAlertEventsNow([entry.alert]).catch((err) => {
+      console.warn('[alerting] debounced dispatch failed', err?.message ?? err);
+    });
+  }, delay);
+};
+
+const groupAlerts = (alerts) => {
+  const grouped = new Map();
+  for (const alert of alerts) {
+    const key = `${alert.event}:${alert.userId}`;
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, { ...alert, nodes: alert.nodes ? [...alert.nodes] : [] });
+      continue;
+    }
+    if (alert.nodes?.length) {
+      const byId = new Map(existing.nodes.map((n) => [n.id, n]));
+      for (const node of alert.nodes) {
+        if (!node?.id) continue;
+        byId.set(node.id, node);
+      }
+      existing.nodes = Array.from(byId.values());
+    }
+    if (alert.message) {
+      existing.message = existing.message ? `${existing.message}\n\n${alert.message}` : alert.message;
+    }
+  }
+  return Array.from(grouped.values());
+};
+
+const dispatchAlertEvents = async (alerts) => {
+  if (!alerts.length) return;
+  const immediate = [];
+  for (const alert of alerts) {
+    if (ALERT_DEBOUNCE_EVENTS.has(alert.event)) {
+      queueAlertEvent(alert);
+    } else {
+      immediate.push(alert);
+    }
+  }
+  if (immediate.length) {
+    await dispatchAlertEventsNow(immediate);
   }
 };
 

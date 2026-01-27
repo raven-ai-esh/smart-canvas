@@ -114,6 +114,56 @@ function stableSerialize(x: unknown) {
   return JSON.stringify(x);
 }
 
+const DEFAULT_FLUSH_MS = 80;
+const VOLATILE_FLUSH_MS = 600;
+const VOLATILE_NODE_FIELDS = new Set(['title', 'content', 'energy', 'progress', 'status', 'clarity']);
+const VOLATILE_IGNORE_FIELDS = new Set(['updatedAt', 'createdAt']);
+
+function stripNodeForVolatileCompare(node: Record<string, unknown> | null | undefined) {
+  if (!node || typeof node !== 'object') return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (VOLATILE_NODE_FIELDS.has(key) || VOLATILE_IGNORE_FIELDS.has(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function nodesVolatileOnly(prevNodes: any[], nextNodes: any[]) {
+  if (prevNodes === nextNodes) return false;
+  if (!Array.isArray(prevNodes) || !Array.isArray(nextNodes)) return false;
+  if (prevNodes.length !== nextNodes.length) return false;
+  const prevById = new Map(prevNodes.map((node) => [node.id, node]));
+  let hasVolatileChange = false;
+  for (const node of nextNodes) {
+    if (!node || typeof node.id !== 'string') return false;
+    const prev = prevById.get(node.id);
+    if (!prev) return false;
+    const prevStable = stableSerialize(stripNodeForVolatileCompare(prev));
+    const nextStable = stableSerialize(stripNodeForVolatileCompare(node));
+    if (prevStable !== nextStable) return false;
+    for (const field of VOLATILE_NODE_FIELDS) {
+      if ((prev as any)[field] !== (node as any)[field]) {
+        hasVolatileChange = true;
+        break;
+      }
+    }
+  }
+  return hasVolatileChange;
+}
+
+function isVolatileOnlyChange(prev: ReturnType<typeof pickSessionState> | null, next: ReturnType<typeof pickSessionState> | null) {
+  if (!prev || !next) return false;
+  if (prev.edges !== next.edges) return false;
+  if (prev.drawings !== next.drawings) return false;
+  if (prev.textBoxes !== next.textBoxes) return false;
+  if (prev.comments !== next.comments) return false;
+  if (prev.stacks !== next.stacks) return false;
+  if (prev.layers !== next.layers) return false;
+  if (prev.tombstones !== next.tombstones) return false;
+  return nodesVolatileOnly(prev.nodes, next.nodes);
+}
+
 type SessionMeta = {
   name: string | null;
   saved: boolean;
@@ -146,6 +196,7 @@ export function useSessionSync() {
   const desiredStateRef = useRef<ReturnType<typeof pickSessionState> | null>(null);
   const desiredStateJsonRef = useRef<string | null>(null);
   const lastAppliedJsonRef = useRef<string | null>(null);
+  const lastQueuedStateRef = useRef<ReturnType<typeof pickSessionState> | null>(null);
   const sendTimer = useRef<number | null>(null);
   const reconnectTimer = useRef<number | null>(null);
   const reconnectAttempt = useRef(0);
@@ -317,6 +368,7 @@ export function useSessionSync() {
     desiredStateRef.current = null;
     desiredStateJsonRef.current = null;
     lastAppliedJsonRef.current = null;
+    lastQueuedStateRef.current = null;
     sessionPrimedRef.current = false;
 
     const clearTimers = () => {
@@ -643,7 +695,9 @@ export function useSessionSync() {
         });
         applySessionState(next);
         sessionPrimedRef.current = true;
-        lastAppliedJsonRef.current = stableSerialize(pickSessionState(useStore.getState()));
+        const snapshot = pickSessionState(useStore.getState());
+        lastAppliedJsonRef.current = stableSerialize(snapshot);
+        lastQueuedStateRef.current = snapshot;
       } finally {
         applyingRemoteRef.current = false;
       }
@@ -717,11 +771,12 @@ export function useSessionSync() {
       );
     };
 
-    const scheduleFlush = () => {
+    const scheduleFlush = (kind: 'normal' | 'volatile' = 'normal') => {
+      const delay = kind === 'volatile' ? VOLATILE_FLUSH_MS : DEFAULT_FLUSH_MS;
       if (sendTimer.current) window.clearTimeout(sendTimer.current);
       sendTimer.current = window.setTimeout(() => {
         flush();
-      }, 80);
+      }, delay);
     };
 
     const scheduleReconnect = () => {
@@ -871,9 +926,11 @@ export function useSessionSync() {
       if (applyingRemoteRef.current) return;
       const snapshot = pickSessionState(state);
       const json = stableSerialize(snapshot);
+      const wasVolatileOnly = isVolatileOnlyChange(lastQueuedStateRef.current, snapshot);
+      lastQueuedStateRef.current = snapshot;
       desiredStateRef.current = snapshot;
       desiredStateJsonRef.current = json;
-      scheduleFlush();
+      scheduleFlush(wasVolatileOnly ? 'volatile' : 'normal');
     });
 
     return () => {
