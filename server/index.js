@@ -2561,6 +2561,31 @@ const createOpenAiClient = (apiKey, baseUrl) => new OpenAI({
   ...(OPENAI_TIMEOUT ? { timeout: OPENAI_TIMEOUT } : {}),
 });
 
+const resolveOpenAiKeyCheckError = (err) => {
+  const status = err?.statusCode ?? err?.status;
+  if (status === 401 || status === 403) return 'invalid_openai_key';
+  if (status === 429) return 'openai_rate_limited';
+  if (status === 404) return 'openai_base_url_invalid';
+  if (status === 408 || status === 504) return 'openai_timeout';
+  const code = err?.code ?? err?.error?.code ?? err?.message;
+  if (typeof code === 'string' && code.trim()) return code.trim();
+  return 'openai_key_check_failed';
+};
+
+const validateOpenAiKey = async ({ apiKey, baseUrl }) => {
+  const client = createOpenAiClient(apiKey, baseUrl);
+  try {
+    await client.models.list();
+    return true;
+  } catch (err) {
+    const code = resolveOpenAiKeyCheckError(err);
+    const error = new Error(code);
+    error.code = code;
+    error.status = err?.statusCode ?? err?.status ?? null;
+    throw error;
+  }
+};
+
 const getAgentContextUrl = () => {
   if (AGENT_SERVICE_URL.endsWith('/context')) return AGENT_SERVICE_URL;
   if (AGENT_SERVICE_URL.endsWith('/run')) return AGENT_SERVICE_URL.replace(/\/run$/, '/context');
@@ -5233,6 +5258,13 @@ app.post('/api/raven-ai/key', async (req, res) => {
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
   const rawKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
   if (!rawKey || rawKey.length < 10) return res.status(400).json({ error: 'bad_api_key' });
+  const aiSettings = await getRavenAiSettings(auth.userId);
+  const resolvedAi = resolveRavenAiSettings(aiSettings);
+  try {
+    await validateOpenAiKey({ apiKey: rawKey, baseUrl: resolvedAi.baseUrl });
+  } catch (err) {
+    return res.status(400).json({ error: err?.code ?? 'openai_key_check_failed' });
+  }
   const row = await upsertOpenAiKey({ userId: auth.userId, apiKey: rawKey });
   res.json({ key: serializeOpenAiKeyRow(row) });
 });
@@ -5351,6 +5383,13 @@ app.post('/api/integrations/ai/key', async (req, res) => {
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
   const rawKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
   if (!rawKey || rawKey.length < 10) return res.status(400).json({ error: 'bad_api_key' });
+  const aiSettings = await getRavenAiSettings(auth.userId);
+  const resolvedAi = resolveRavenAiSettings(aiSettings);
+  try {
+    await validateOpenAiKey({ apiKey: rawKey, baseUrl: resolvedAi.baseUrl });
+  } catch (err) {
+    return res.status(400).json({ error: err?.code ?? 'openai_key_check_failed' });
+  }
   const row = await upsertOpenAiKey({ userId: auth.userId, apiKey: rawKey });
   res.json({ key: serializeOpenAiKeyRow(row) });
 });

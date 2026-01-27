@@ -728,6 +728,7 @@ export const Presence: React.FC = () => {
   const [mcpExpiryChoice, setMcpExpiryChoice] = useState('90');
   const [aiKeyInfo, setAiKeyInfo] = useState<AiKeyInfo | null>(null);
   const [aiKeyInput, setAiKeyInput] = useState('');
+  const [aiKeyInvalid, setAiKeyInvalid] = useState(false);
   const [alertingMeta, setAlertingMeta] = useState<AlertingMeta | null>(null);
   const [alertingChannels, setAlertingChannels] = useState({
     email: false,
@@ -1475,6 +1476,7 @@ export const Presence: React.FC = () => {
     if (!key) return;
     setRavenAiBusy(true);
     setRavenAiMessage(null);
+    setAiKeyInvalid(false);
     try {
       const res = await fetch('/api/raven-ai/key', {
         method: 'POST',
@@ -1483,11 +1485,26 @@ export const Presence: React.FC = () => {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setRavenAiMessage('Failed to save AI key');
+        const code = typeof data?.error === 'string' ? data.error : '';
+        if (code === 'invalid_openai_key') {
+          setRavenAiMessage('Invalid OpenAI key');
+          setAiKeyInvalid(true);
+        } else if (code === 'openai_rate_limited') {
+          setRavenAiMessage('OpenAI rate limit reached. Try again later.');
+        } else if (code === 'openai_base_url_invalid') {
+          setRavenAiMessage('OpenAI base URL is invalid or unreachable');
+        } else if (code === 'openai_timeout') {
+          setRavenAiMessage('OpenAI request timed out. Try again.');
+        } else if (code) {
+          setRavenAiMessage(`Failed to save AI key: ${code}`);
+        } else {
+          setRavenAiMessage('Failed to save AI key');
+        }
         return;
       }
       setAiKeyInfo(data?.key ?? null);
       setAiKeyInput('');
+      setAiKeyInvalid(false);
       setRavenAiMessage('AI key saved');
     } catch {
       setRavenAiMessage('Failed to save AI key');
@@ -3677,19 +3694,24 @@ export const Presence: React.FC = () => {
                     </div>
                     <input
                       value={aiKeyInput}
-                      onChange={(e) => setAiKeyInput(e.target.value)}
+                      onChange={(e) => {
+                        setAiKeyInput(e.target.value);
+                        if (aiKeyInvalid) setAiKeyInvalid(false);
+                      }}
                       type="password"
                       placeholder="sk-..."
                       disabled={ravenAiBusy}
                       style={{
                         width: '100%',
                         borderRadius: 12,
-                        border: '1px solid var(--border-strong)',
+                        border: aiKeyInvalid ? '1px solid rgba(255, 96, 96, 0.9)' : '1px solid var(--border-strong)',
                         background: 'rgba(15, 20, 28, 0.45)',
                         color: 'var(--text-primary)',
                         padding: '8px 10px',
                         fontSize: 12,
                         boxSizing: 'border-box',
+                        boxShadow: aiKeyInvalid ? '0 0 0 1px rgba(255, 96, 96, 0.45)' : 'none',
+                        transition: 'border-color 160ms ease, box-shadow 160ms ease',
                       }}
                     />
                   </div>
