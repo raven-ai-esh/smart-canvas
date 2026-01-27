@@ -656,10 +656,22 @@ export const Presence: React.FC = () => {
   const isCompactAuth = useIsCompactAuthModal();
   const { t } = useTranslation();
 
+  const getResetPasswordTokenFromUrl = () => new URLSearchParams(window.location.search).get('resetPassword');
+  const clearResetPasswordTokenInUrl = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('resetPassword');
+    window.history.replaceState({}, '', url.toString());
+  };
+
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<'signup' | 'login'>('signup');
+  const [mode, setMode] = useState<'signup' | 'login' | 'reset'>('signup');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [resetToken, setResetToken] = useState<string | null>(null);
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetPasswordConfirm, setResetPasswordConfirm] = useState('');
+  const [resetSubmitAttempted, setResetSubmitAttempted] = useState(false);
+  const [resetTouched, setResetTouched] = useState<{ email: boolean; password: boolean; confirm: boolean }>({ email: false, password: false, confirm: false });
   const [name, setName] = useState('');
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [touched, setTouched] = useState<{ name: boolean; email: boolean; password: boolean }>({ name: false, email: false, password: false });
@@ -668,6 +680,7 @@ export const Presence: React.FC = () => {
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [authNoticeVisible, setAuthNoticeVisible] = useState(false);
   const [devVerifyUrl, setDevVerifyUrl] = useState<string | null>(null);
+  const [devResetUrl, setDevResetUrl] = useState<string | null>(null);
   const [providers, setProviders] = useState<{ google: boolean; yandex: boolean; telegram: boolean; telegramBotUsername: string | null } | null>(null);
   // Account settings modal state (separate from auth modal).
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1620,8 +1633,16 @@ export const Presence: React.FC = () => {
     // When switching tabs between signup/login reset field-level validation visuals.
     setSubmitAttempted(false);
     setTouched({ name: false, email: false, password: false });
+    setResetSubmitAttempted(false);
+    setResetTouched({ email: false, password: false, confirm: false });
     setMessage(null);
     setDevVerifyUrl(null);
+    setDevResetUrl(null);
+    if (mode !== 'reset') {
+      setResetToken(null);
+      setResetPassword('');
+      setResetPasswordConfirm('');
+    }
   }, [mode, open]);
 
   useEffect(() => {
@@ -1695,6 +1716,15 @@ export const Presence: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    const token = getResetPasswordTokenFromUrl();
+    if (!token) return;
+    setResetToken(token);
+    setMode('reset');
+    setOpen(true);
+    clearResetPasswordTokenInUrl();
+  }, []);
+
+  useEffect(() => {
     if (!open) return;
     let cancelled = false;
     (async () => {
@@ -1743,6 +1773,26 @@ export const Presence: React.FC = () => {
   const getPasswordUi = () => {
     if (!shouldValidate('password')) return { status: 'ok' as const, error: null };
     return validatePassword(password);
+  };
+
+  const shouldValidateReset = (field: keyof typeof resetTouched) => resetSubmitAttempted || resetTouched[field];
+
+  const getResetEmailUi = () => {
+    if (!shouldValidateReset('email')) return { status: 'ok' as const, error: null };
+    return validateEmail(email);
+  };
+
+  const getResetPasswordUi = () => {
+    if (!shouldValidateReset('password')) return { status: 'ok' as const, error: null };
+    return validatePassword(resetPassword);
+  };
+
+  const getResetPasswordConfirmUi = () => {
+    if (!shouldValidateReset('confirm')) return { status: 'ok' as const, error: null };
+    if (!resetPassword) return { status: 'ok' as const, error: null };
+    if (!resetPasswordConfirm) return { status: 'missing' as const, error: 'Подтвердите пароль' };
+    if (resetPasswordConfirm !== resetPassword) return { status: 'invalid' as const, error: 'Пароли не совпадают' };
+    return { status: 'ok' as const, error: null };
   };
 
   const shouldValidateSettings = (field: keyof typeof settingsTouched) => settingsSubmitAttempted || settingsTouched[field];
@@ -1813,6 +1863,65 @@ export const Presence: React.FC = () => {
   };
 
   const doEmailAuth = async () => {
+    if (mode === 'reset') {
+      setResetSubmitAttempted(true);
+      if (!resetToken) {
+        const emailCheck = validateEmail(email);
+        if (emailCheck.status !== 'ok') {
+          setResetTouched((t) => ({ ...t, email: true }));
+          return;
+        }
+        setBusy(true);
+        setMessage(null);
+        setDevResetUrl(null);
+        try {
+          const res = await fetch('/api/auth/password/reset/start', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ email }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            setMessage(String(data?.error ?? 'reset_failed'));
+            return;
+          }
+          if (data?.devResetUrl) setDevResetUrl(String(data.devResetUrl));
+          setMessage('Если аккаунт существует, мы отправили ссылку для сброса пароля.');
+          return;
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      const passCheck = validatePassword(resetPassword);
+      const confirmCheck = resetPasswordConfirm && resetPasswordConfirm === resetPassword
+        ? { status: 'ok' as const }
+        : { status: resetPasswordConfirm ? 'invalid' as const : 'missing' as const };
+      if (passCheck.status !== 'ok' || confirmCheck.status !== 'ok') {
+        setResetTouched((t) => ({ ...t, password: true, confirm: true }));
+        return;
+      }
+      setBusy(true);
+      setMessage(null);
+      try {
+        const res = await fetch('/api/auth/password/reset', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token: resetToken, password: resetPassword }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setMessage(String(data?.error ?? 'reset_failed'));
+          return;
+        }
+        await refreshMe();
+        close();
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     setSubmitAttempted(true);
     const issues = validateBeforeSubmit();
     if (issues.length) {
@@ -4289,7 +4398,7 @@ export const Presence: React.FC = () => {
             >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>
-                {mode === 'signup' ? 'Регистрация' : 'Вход'}
+                {mode === 'signup' ? 'Регистрация' : mode === 'reset' ? 'Сброс пароля' : 'Вход'}
               </div>
               <button
                 type="button"
@@ -4332,7 +4441,7 @@ export const Presence: React.FC = () => {
                   minWidth: 180,
                   borderRadius: 10,
                   border: '1px solid var(--border-strong)',
-                  background: mode === 'login' ? 'var(--accent-glow)' : 'transparent',
+                  background: mode !== 'signup' ? 'var(--accent-glow)' : 'transparent',
                   color: 'var(--text-primary)',
                   padding: '8px 10px',
                   cursor: 'pointer',
@@ -4355,31 +4464,88 @@ export const Presence: React.FC = () => {
                   errorText={getNameUi().error}
                 />
               )}
-              <LabeledInputField
-                id="auth-email"
-                label="Email"
-                value={email}
-                onChange={(v) => setEmail(v)}
-                onBlur={() => setTouched((t) => ({ ...t, email: true }))}
-                placeholder="email@example.com"
-                autoComplete="email"
-                inputMode="email"
-                status={getEmailUi().status}
-                errorText={getEmailUi().error}
-              />
-              <LabeledInputField
-                id="auth-password"
-                label="Password"
-                value={password}
-                onChange={(v) => setPassword(v)}
-                onBlur={() => setTouched((t) => ({ ...t, password: true }))}
-                placeholder={mode === 'signup' ? 'Min 8 characters' : 'Your password'}
-                type="password"
-                autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-                status={getPasswordUi().status}
-                errorText={getPasswordUi().error}
-              />
+              {(mode !== 'reset' || !resetToken) && (
+                <LabeledInputField
+                  id="auth-email"
+                  label="Email"
+                  value={email}
+                  onChange={(v) => setEmail(v)}
+                  onBlur={() => (mode === 'reset'
+                    ? setResetTouched((t) => ({ ...t, email: true }))
+                    : setTouched((t) => ({ ...t, email: true })))}
+                  placeholder="email@example.com"
+                  autoComplete="email"
+                  inputMode="email"
+                  status={mode === 'reset' ? getResetEmailUi().status : getEmailUi().status}
+                  errorText={mode === 'reset' ? getResetEmailUi().error : getEmailUi().error}
+                />
+              )}
+              {mode !== 'reset' && (
+                <LabeledInputField
+                  id="auth-password"
+                  label="Password"
+                  value={password}
+                  onChange={(v) => setPassword(v)}
+                  onBlur={() => setTouched((t) => ({ ...t, password: true }))}
+                  placeholder={mode === 'signup' ? 'Min 8 characters' : 'Your password'}
+                  type="password"
+                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+                  status={getPasswordUi().status}
+                  errorText={getPasswordUi().error}
+                />
+              )}
+              {mode === 'reset' && resetToken && (
+                <>
+                  <LabeledInputField
+                    id="auth-reset-password"
+                    label="Новый пароль"
+                    value={resetPassword}
+                    onChange={(v) => setResetPassword(v)}
+                    onBlur={() => setResetTouched((t) => ({ ...t, password: true }))}
+                    placeholder="Минимум 8 символов"
+                    type="password"
+                    autoComplete="new-password"
+                    status={getResetPasswordUi().status}
+                    errorText={getResetPasswordUi().error}
+                  />
+                  <LabeledInputField
+                    id="auth-reset-password-confirm"
+                    label="Повторите пароль"
+                    value={resetPasswordConfirm}
+                    onChange={(v) => setResetPasswordConfirm(v)}
+                    onBlur={() => setResetTouched((t) => ({ ...t, confirm: true }))}
+                    placeholder="Повторите пароль"
+                    type="password"
+                    autoComplete="new-password"
+                    status={getResetPasswordConfirmUi().status}
+                    errorText={getResetPasswordConfirmUi().error}
+                  />
+                </>
+              )}
             </div>
+
+            {mode === 'login' && (
+              <div style={{ marginTop: 8, textAlign: 'right' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode('reset');
+                    setMessage(null);
+                    setDevResetUrl(null);
+                  }}
+                  style={{
+                    border: 'none',
+                    background: 'transparent',
+                    color: 'var(--text-secondary)',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    padding: 0,
+                  }}
+                >
+                  Забыли пароль?
+                </button>
+              </div>
+            )}
 
             {message && (
               <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-secondary)' }}>{message}</div>
@@ -4422,6 +4588,44 @@ export const Presence: React.FC = () => {
                 </div>
               </div>
             )}
+            {devResetUrl && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                  Dev reset link
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input
+                    readOnly
+                    value={devResetUrl}
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      borderRadius: 12,
+                      border: '1px solid var(--border-strong)',
+                      background: 'transparent',
+                      color: 'var(--text-primary)',
+                      padding: '10px 12px',
+                      outline: 'none',
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => copyText(devResetUrl)}
+                    style={{
+                      borderRadius: 12,
+                      border: '1px solid var(--border-strong)',
+                      background: 'transparent',
+                      color: 'var(--text-primary)',
+                      padding: '10px 12px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
               <button
@@ -4442,7 +4646,13 @@ export const Presence: React.FC = () => {
                   gap: 8,
                 }}
               >
-                <span>{mode === 'signup' ? 'Sign up' : 'Sign in'}</span>
+                <span>
+                  {mode === 'signup'
+                    ? 'Sign up'
+                    : mode === 'reset'
+                      ? (resetToken ? 'Reset password' : 'Send reset link')
+                      : 'Sign in'}
+                </span>
                 {busy && <LoadingSpinner />}
               </button>
             </div>
