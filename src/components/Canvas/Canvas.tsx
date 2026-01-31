@@ -375,6 +375,7 @@ export const Canvas: React.FC = () => {
     const stackPeekTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const stackPeekRef = useRef<{ stackId: string; pointerId: number; startClientX: number; startClientY: number } | null>(null);
     const stackPeekActiveRef = useRef<string | null>(null);
+    const lastStackClickRef = useRef<{ stackId: string; time: number; x: number; y: number } | null>(null);
     const collapseStack = useStore((state) => state.collapseStack);
 
     const stackByItem = useMemo(() => {
@@ -737,6 +738,13 @@ export const Canvas: React.FC = () => {
 	    const draftInputRef = useRef<HTMLTextAreaElement | null>(null);
 	    const draftAttachInputRef = useRef<HTMLInputElement | null>(null);
 	    const marqueeStartRef = useRef<{ x: number; y: number; pointerId: number } | null>(null);
+    const handleStackDoubleClick = useCallback((stackId: string) => {
+        const stack = stackById.get(stackId);
+        if (!stack || !stack.collapsed) return;
+        triggerStackAnimation(stack.items);
+        expandStack(stackId);
+        setContextMenu(null);
+    }, [expandStack, setContextMenu, stackById, triggerStackAnimation]);
 	    const groupDragRef = useRef<null | {
         pointerId: number;
         startWorld: { x: number; y: number };
@@ -2115,10 +2123,16 @@ export const Canvas: React.FC = () => {
                 if (timeDiff < 300 && dist < 30) {
                     // Double-tap detected! Create node
                     const target = document.elementFromPoint(touch.clientX, touch.clientY) as HTMLElement | null;
+                    const stackHit = resolveStackHitAtClientPoint(touch.clientX, touch.clientY);
+                    if (stackHit) {
+                        handleStackDoubleClick(stackHit.id);
+                    }
                     // Avoid creating nodes when the double-tap hits any interactive UI or an existing object.
                     if (
-                        !target?.closest?.('[data-node-id]')
+                        !stackHit
+                        && !target?.closest?.('[data-node-id]')
                         && !target?.closest?.('[data-textbox-id]')
+                        && !target?.closest?.('[data-stack-id]')
                         && !target?.closest?.('[data-interactive="true"]')
                         && !target?.closest?.('button')
                     ) {
@@ -2163,7 +2177,16 @@ export const Canvas: React.FC = () => {
             container.removeEventListener('touchend', handleTouchEnd);
             container.removeEventListener('touchcancel', handleTouchCancel);
         };
-    }, [handleWheel, penMode, penTool, textMode, addNode, screenToWorldLatest]);
+    }, [
+        handleWheel,
+        penMode,
+        penTool,
+        textMode,
+        addNode,
+        handleStackDoubleClick,
+        resolveStackHitAtClientPoint,
+        screenToWorldLatest,
+    ]);
 
     // Handle Hotkeys
     useEffect(() => {
@@ -3096,18 +3119,6 @@ export const Canvas: React.FC = () => {
                     window.clearTimeout(stackPeekTimerRef.current);
                     stackPeekTimerRef.current = null;
                 }
-                stackPeekRef.current = {
-                    stackId,
-                    pointerId: e.pointerId,
-                    startClientX: e.clientX,
-                    startClientY: e.clientY,
-                };
-                stackPeekTimerRef.current = window.setTimeout(() => {
-                    const candidate = stackPeekRef.current;
-                    if (!candidate || candidate.stackId !== stackId || candidate.pointerId !== e.pointerId) return;
-                    stackPeekActiveRef.current = stackId;
-                    setPeekingStackId(stackId);
-                }, LONG_PRESS_MS);
                 pendingDragUndoSnapshotRef.current = {
                     nodes: useStore.getState().nodes,
                     edges: useStore.getState().edges,
@@ -3138,8 +3149,7 @@ export const Canvas: React.FC = () => {
             const stackForNode = stackByItem.get(stackItemKey('node', nodeId));
             if (stackForNode?.collapsed) {
                 if (!(e.pointerType === 'mouse' && e.button === 2)) {
-                    triggerStackAnimation(stackForNode.items);
-                    expandStack(stackForNode.id);
+                    selectStack(stackForNode.id);
                     setContextMenu(null);
                 }
                 e.stopPropagation();
@@ -3987,44 +3997,11 @@ export const Canvas: React.FC = () => {
         }
 
         if (mode === 'draggingStack') {
-            const drag = stackDragRef.current;
-            const stackId = drag?.stackId ?? draggingStackIdRef.current;
-            const wasPeeking = !!stackId && stackPeekActiveRef.current === stackId;
             clearStackPeek();
             stackDragRef.current = null;
             draggingStackIdRef.current = null;
             setMode('idle');
             setActiveId(null);
-            if (wasPeeking) {
-                if (stackId) {
-                    const stack = stackById.get(stackId);
-                    if (stack) {
-                        triggerStackAnimation(stack.items);
-                        expandStack(stackId);
-                        setContextMenu(null);
-                    }
-                }
-                if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
-                    try {
-                        const el = containerRef.current as any;
-                        if (el?.hasPointerCapture?.(e.pointerId)) {
-                            el.releasePointerCapture(e.pointerId);
-                        }
-                    } catch {
-                        // ignore
-                    }
-                }
-                clearAlignmentGuides();
-                return;
-            }
-            if (isClick && stackId) {
-                const stack = stackById.get(stackId);
-                if (stack) {
-                    triggerStackAnimation(stack.items);
-                    expandStack(stackId);
-                    setContextMenu(null);
-                }
-            }
             if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
                 try {
                     const el = containerRef.current as any;
@@ -4174,6 +4151,9 @@ export const Canvas: React.FC = () => {
         // Respect interactive UI anywhere in the hit path.
         const interactiveHit = findMatch(target, '[data-interactive=\"true\"],button') || findMatch(hit, '[data-interactive=\"true\"],button');
         if (interactiveHit) return;
+
+        const stackHit = resolveStackHitAtClientPoint(e.clientX, e.clientY);
+        if (stackHit) return;
 
         // If a node was double-clicked, open detail view instead of creating a new node.
         const nodeHit = findMatch(target, '[data-node-id]') || findMatch(hit, '[data-node-id]');
@@ -5595,12 +5575,6 @@ export const Canvas: React.FC = () => {
                                 stackId={stack?.id}
                                 stackCollapsed={!!stack?.collapsed && !isPeeking}
                                 stackAnimating={stackAnimatingSet.has(stackItemKey('textBox', tb.id))}
-                                onToggleStack={(stackId) => {
-                                    const target = stacks.find((item) => item.id === stackId);
-                                    if (!target) return;
-                                    triggerStackAnimation(target.items);
-                                    expandStack(stackId);
-                                }}
                                 onCollapseExpandedStacks={collapseExpandedStacks}
                                 onRequestContextMenu={(args) => {
                                     if (args.id === '__selection__') setContextMenu({ kind: 'selection', id: '__selection__', x: args.x, y: args.y });
@@ -5763,6 +5737,27 @@ export const Canvas: React.FC = () => {
                             data-stack-id={stack.id}
                             data-stack-bounds="true"
                             data-stack-drop={stackDropTargetId === stack.id ? 'true' : undefined}
+                            onClick={(e) => {
+                                lastStackClickRef.current = {
+                                    stackId: stack.id,
+                                    time: e.timeStamp,
+                                    x: e.clientX,
+                                    y: e.clientY,
+                                };
+                            }}
+                            onDoubleClick={(e) => {
+                                e.stopPropagation();
+                                if (e.detail < 2) return;
+                                const last = lastStackClickRef.current;
+                                const now = e.timeStamp;
+                                const dist = last ? Math.hypot(e.clientX - last.x, e.clientY - last.y) : Infinity;
+                                const within = !!last
+                                    && last.stackId === stack.id
+                                    && (now - last.time) < 500
+                                    && dist < 30;
+                                if (!within) return;
+                                handleStackDoubleClick(stack.id);
+                            }}
                         >
                             <div className={`${styles.stackCard} ${styles.stackCardBack}`} />
                             <div className={`${styles.stackCard} ${styles.stackCardMid}`} />
