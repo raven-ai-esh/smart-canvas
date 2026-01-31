@@ -1,4 +1,5 @@
 import type { EdgeData, NodeData } from '../types';
+import { getChecklistStats } from './checklist';
 
 const clampProgress = (value: unknown) => {
   const num = Number(value);
@@ -63,6 +64,7 @@ export const applyChildProgress = (
       changed = true;
       return { ...node, childProgress: false, updatedAt: now };
     }
+    if (node.progressManual) return node;
     if (!node.childProgress) return node;
     const sources = incomingByTarget.get(node.id);
     if (!sources || sources.size === 0) {
@@ -83,7 +85,11 @@ export const applyChildProgress = (
       return { ...node, childProgress: false, updatedAt: now };
     }
 
-    const nextProgress = clampProgress(sum / count);
+    let nextProgress = clampProgress(sum / count);
+    const checklist = getChecklistStats(node.checklist);
+    if (checklist.total > 0) {
+      nextProgress = clampProgress((nextProgress + checklist.progress) / 2);
+    }
     const nextStatus = statusFromProgress(nextProgress);
     const prevProgress = clampProgress(node.progress);
     if (Math.abs(prevProgress - nextProgress) < 0.1 && node.status === nextStatus) {

@@ -18,6 +18,12 @@ export interface Attachment {
   dataUrl?: string;
 }
 
+export interface ChecklistItem {
+  id: string;
+  text: string;
+  done?: boolean;
+}
+
 export interface NodeData {
   id: string;
   title: string;
@@ -39,10 +45,12 @@ export interface NodeData {
   endDate?: string;
   status?: 'queued' | 'in_progress' | 'done';
   progress?: number;
+  progressManual?: boolean;
   childProgress?: boolean;
   ganttY?: number;
   attachments?: Attachment[];
   mentions?: MentionToken[];
+  checklist?: ChecklistItem[];
 }
 
 export interface EdgeData {

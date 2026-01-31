@@ -8,6 +8,7 @@ import { getGuestIdentity } from '../utils/guestIdentity';
 import { DEFAULT_LAYER_ID, normalizeLayers, resolveLayerId } from '../utils/layers';
 import { collectLayerStackEntries, sortLayerStackEntries, type StackKind } from '../utils/stacking';
 import { applyChildProgress } from '../utils/childProgress';
+import { applyChecklistProgress } from '../utils/checklist';
 
 type GeneralSettings = {
     zoomSensitivity: number;
@@ -43,6 +44,16 @@ const progressFromStatus = (status?: NodeData['status'], legacyInWork?: boolean)
     if (status === 'queued') return 0;
     if (legacyInWork) return 50;
     return 0;
+};
+
+const applyProgressPipeline = (nodes: NodeData[], edges: EdgeData[], opts?: { now?: number }) => {
+    const checklistResult = applyChecklistProgress(nodes, { now: opts?.now });
+    const childProgressResult = applyChildProgress(checklistResult.nodes, edges, { now: opts?.now });
+    return {
+        nodes: childProgressResult.nodes,
+        changed: checklistResult.changed || childProgressResult.changed,
+        progressChanged: checklistResult.progressChanged || childProgressResult.progressChanged,
+    };
 };
 const tombstoneFor = (now: number, updatedAt?: number) => Math.max(now, ts(updatedAt) + 1);
 const STACK_CARD_WIDTH = 240;
@@ -1050,16 +1061,16 @@ export const useStore = create<AppState>()(
                 };
                 delete tombstones.nodes[normalized.id];
                 const normalizedEnergy = normalizeEnergies(nodes, state.edges);
-                const childProgressResult = applyChildProgress(normalizedEnergy.nodes, state.edges);
+                const progressResult = applyProgressPipeline(normalizedEnergy.nodes, state.edges, { now });
                 const effectiveEnergy = effectiveForMode(
-                    childProgressResult.nodes,
+                    progressResult.nodes,
                     state.edges,
                     state.monitoringMode,
                     normalizedEnergy.effectiveEnergy,
                 );
                 return {
                     ...pushHistoryReducer(state),
-                    nodes: childProgressResult.nodes,
+                    nodes: progressResult.nodes,
                     tombstones,
                     effectiveEnergy,
                 };
@@ -1097,10 +1108,14 @@ export const useStore = create<AppState>()(
                         );
                         nextData.progress = progress;
                         nextData.status = statusFromProgress(progress);
+                        if (!Object.prototype.hasOwnProperty.call(nextData, 'progressManual')) {
+                            nextData.progressManual = existing?.progressManual ?? false;
+                        }
                     }
                     if (nextData.type === 'idea') {
                         nextData.status = undefined;
                         nextData.progress = undefined;
+                        nextData.progressManual = undefined;
                     }
                 }
                 if ((existing?.type === 'task' || nextData.type === 'task') && Object.prototype.hasOwnProperty.call(nextData, 'progress')) {
@@ -1136,13 +1151,13 @@ export const useStore = create<AppState>()(
                     normalizedEnergy = normalizeEnergies(nodes, state.edges);
                     workingNodes = normalizedEnergy.nodes;
                 }
-                const childProgressResult = applyChildProgress(workingNodes, state.edges);
-                const finalNodes = childProgressResult.nodes;
+                const progressResult = applyProgressPipeline(workingNodes, state.edges, { now });
+                const finalNodes = progressResult.nodes;
                 const affectsMonitoring = state.monitoringMode && (
                     Object.prototype.hasOwnProperty.call(nextData, 'progress')
                     || Object.prototype.hasOwnProperty.call(nextData, 'status')
                     || Object.prototype.hasOwnProperty.call(nextData, 'type')
-                    || childProgressResult.progressChanged
+                    || progressResult.progressChanged
                 );
                 if (!hasEnergyUpdate && !affectsMonitoring) {
                     return nextStacks === state.stacks ? { nodes: finalNodes } : { nodes: finalNodes, stacks: nextStacks };
@@ -1193,11 +1208,11 @@ export const useStore = create<AppState>()(
                 const nodeRectVersion = { ...state.nodeRectVersion };
                 delete nodeRectVersion[id];
                 debugLog({ type: 'delete_call', t: performance.now(), kind: 'node', id, now, updatedAt: node?.updatedAt, tombstone: tombstoneNode });
-                const childProgressResult = applyChildProgress(nodes, edges);
-                const effectiveEnergy = effectiveForMode(childProgressResult.nodes, edges, state.monitoringMode);
+                const progressResult = applyProgressPipeline(nodes, edges, { now });
+                const effectiveEnergy = effectiveForMode(progressResult.nodes, edges, state.monitoringMode);
                 return {
                     ...pushHistoryReducer(state),
-                    nodes: childProgressResult.nodes,
+                    nodes: progressResult.nodes,
                     edges,
                     stacks: pruneResult.stacks,
                     tombstones,
@@ -1224,9 +1239,9 @@ export const useStore = create<AppState>()(
                 };
                 delete tombstones.edges[normalized.id];
                 const normalizedEnergy = normalizeEnergies(state.nodes, edges);
-                const childProgressResult = applyChildProgress(normalizedEnergy.nodes, edges);
+                const progressResult = applyProgressPipeline(normalizedEnergy.nodes, edges, { now });
                 const effectiveEnergy = effectiveForMode(
-                    childProgressResult.nodes,
+                    progressResult.nodes,
                     edges,
                     state.monitoringMode,
                     normalizedEnergy.effectiveEnergy,
@@ -1234,7 +1249,7 @@ export const useStore = create<AppState>()(
                 return {
                     ...pushHistoryReducer(state),
                     edges,
-                    nodes: childProgressResult.nodes,
+                    nodes: progressResult.nodes,
                     tombstones,
                     effectiveEnergy,
                 };
@@ -1245,16 +1260,16 @@ export const useStore = create<AppState>()(
                     const now = Date.now();
                     const edges = state.edges.map((e) => (e.id === id ? { ...e, ...data, updatedAt: now } : e));
                     const normalizedEnergy = normalizeEnergies(state.nodes, edges);
-                    const childProgressResult = applyChildProgress(normalizedEnergy.nodes, edges);
+                    const progressResult = applyProgressPipeline(normalizedEnergy.nodes, edges, { now });
                     const effectiveEnergy = effectiveForMode(
-                        childProgressResult.nodes,
+                        progressResult.nodes,
                         edges,
                         state.monitoringMode,
                         normalizedEnergy.effectiveEnergy,
                     );
                     return {
                         edges,
-                        nodes: childProgressResult.nodes,
+                        nodes: progressResult.nodes,
                         effectiveEnergy,
                     };
                 }),
@@ -1272,9 +1287,9 @@ export const useStore = create<AppState>()(
                 };
                 debugLog({ type: 'delete_call', t: performance.now(), kind: 'edge', id, now, updatedAt: edge?.updatedAt, tombstone: tombstoneEdge });
                 const normalizedEnergy = normalizeEnergies(state.nodes, edges);
-                const childProgressResult = applyChildProgress(normalizedEnergy.nodes, edges);
+                const progressResult = applyProgressPipeline(normalizedEnergy.nodes, edges, { now });
                 const effectiveEnergy = effectiveForMode(
-                    childProgressResult.nodes,
+                    progressResult.nodes,
                     edges,
                     state.monitoringMode,
                     normalizedEnergy.effectiveEnergy,
@@ -1282,7 +1297,7 @@ export const useStore = create<AppState>()(
                 return {
                     ...pushHistoryReducer(state),
                     edges,
-                    nodes: childProgressResult.nodes,
+                    nodes: progressResult.nodes,
                     tombstones,
                     effectiveEnergy,
                 };

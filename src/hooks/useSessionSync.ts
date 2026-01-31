@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { computeEffectiveEnergy } from '../utils/energy';
 import { applyChildProgress } from '../utils/childProgress';
+import { applyChecklistProgress } from '../utils/checklist';
 import { mergeSessionState, normalizeSessionState, type SessionState } from '../utils/sessionMerge';
 import { normalizeLayers, resolveLayerId } from '../utils/layers';
 import { debugLog } from '../utils/debug';
@@ -54,7 +55,8 @@ function applySessionState(state: SessionState) {
   const monitoringMode = useStore.getState().monitoringMode;
   const nextLayers = normalizeLayers(state.layers);
   const activeLayerId = resolveLayerId(nextLayers, useStore.getState().activeLayerId);
-  const childProgressResult = applyChildProgress(state.nodes as any, state.edges as any);
+  const checklistResult = applyChecklistProgress(state.nodes as any);
+  const childProgressResult = applyChildProgress(checklistResult.nodes as any, state.edges as any);
   const nextNodes = childProgressResult.nodes as any;
   useStore.setState({
     nodes: nextNodes,
@@ -116,7 +118,7 @@ function stableSerialize(x: unknown) {
 
 const DEFAULT_FLUSH_MS = 80;
 const VOLATILE_FLUSH_MS = 600;
-const VOLATILE_NODE_FIELDS = new Set(['title', 'content', 'energy', 'progress', 'status', 'clarity']);
+const VOLATILE_NODE_FIELDS = new Set(['title', 'content', 'energy', 'progress', 'status', 'clarity', 'checklist', 'progressManual']);
 const VOLATILE_IGNORE_FIELDS = new Set(['updatedAt', 'createdAt']);
 
 function stripNodeForVolatileCompare(node: Record<string, unknown> | null | undefined) {
