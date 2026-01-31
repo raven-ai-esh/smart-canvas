@@ -64,7 +64,6 @@ type TextBoxProps = {
   stackId?: string | null;
   stackCollapsed?: boolean;
   stackAnimating?: boolean;
-  onToggleStack?: (stackId: string) => void;
   onCollapseExpandedStacks?: (excludeStackId?: string | null) => void;
   resolveStackDropInfo?: (clientX: number, clientY: number, items: StackDropItem[]) => StackDropInfo;
   onStackDrop?: (stackId: string, items: StackDropItem[]) => void;
@@ -81,7 +80,6 @@ export function TextBox({
   stackId,
   stackCollapsed = false,
   stackAnimating = false,
-  onToggleStack,
   onCollapseExpandedStacks,
   resolveStackDropInfo,
   onStackDrop,
@@ -718,12 +716,11 @@ export function TextBox({
       data-interactive="true"
       onPointerEnter={() => setIsHovered(true)}
       onPointerLeave={() => setIsHovered(false)}
-      onPointerDown={(e) => {
+        onPointerDown={(e) => {
         onCollapseExpandedStacks?.(stackCollapsed ? null : (stackId ?? null));
         if (stackCollapsed && stackId && !isEditing) {
           if (!(e.pointerType === 'mouse' && e.button === 2)) {
             e.stopPropagation();
-            onToggleStack?.(stackId);
           }
           return;
         }
