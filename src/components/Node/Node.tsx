@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
-import { Bold, Italic, Strikethrough, Code, List, ListOrdered, Quote, Paperclip, Trash2, User, AtSign } from 'lucide-react';
+import { Bold, Italic, Strikethrough, Code, List, ListOrdered, Quote, Paperclip, Trash2, User, AtSign, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useStore } from '../../store/useStore';
 import type { Attachment, NodeData, MentionToken, SessionSaver } from '../../types';
@@ -9,6 +9,7 @@ import { clampEnergy, energyToColor } from '../../utils/energy';
 import { EnergySvgLiquidGauge } from './EnergySvgLiquidGauge';
 import { filesToAttachments, formatBytes, MAX_ATTACHMENT_BYTES, resolveAttachmentUrl } from '../../utils/attachments';
 import { getIncomingProgress } from '../../utils/childProgress';
+import { getChecklistStats } from '../../utils/checklist';
 import { markdownComponents, markdownPlugins } from '../../utils/markdown';
 
 // View Components
@@ -108,6 +109,16 @@ const normalizeMentionables = (savers: SessionSaver[] | undefined) => {
 const normalizeMentions = (mentions: MentionToken[] | undefined) => {
     if (!Array.isArray(mentions)) return [];
     return mentions.filter((mention) => mention && typeof mention.id === 'string' && mention.id && typeof mention.label === 'string' && mention.label.trim());
+};
+
+const normalizeChecklistItems = (items: NodeData['checklist'] | undefined) => {
+    if (!Array.isArray(items)) return [];
+    return items.filter((item) => item && typeof item.id === 'string' && item.id);
+};
+
+const createChecklistItemId = () => {
+    if (typeof crypto?.randomUUID === 'function') return crypto.randomUUID();
+    return `check-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 };
 
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1198,21 +1209,40 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
     const titleTouchRef = useRef<{ id: number; x: number; y: number } | null>(null);
     const [isDraggingProgress, setIsDraggingProgress] = React.useState(false);
     const [showEnergyPanel, setShowEnergyPanel] = React.useState(false);
+    const [showChecklistPanel, setShowChecklistPanel] = React.useState(false);
     const [energyInputOpen, setEnergyInputOpen] = React.useState(false);
     const [energyInputValue, setEnergyInputValue] = React.useState('');
     const [energyToast, setEnergyToast] = React.useState<string | null>(null);
     const [energyToastVisible, setEnergyToastVisible] = React.useState(false);
     const energyInputRef = React.useRef<HTMLInputElement | null>(null);
+    const checklistInputRef = React.useRef<HTMLInputElement | null>(null);
+    const [checklistDraft, setChecklistDraft] = React.useState('');
     const titleHistoryRef = React.useRef(false);
+    const checklistHistoryRef = React.useRef(false);
 
     React.useEffect(() => {
         if (!isEditingTitle) titleHistoryRef.current = false;
     }, [isEditingTitle]);
 
+    React.useEffect(() => {
+        if (!showChecklistPanel) checklistHistoryRef.current = false;
+    }, [showChecklistPanel]);
+
+    React.useEffect(() => {
+        if (!showChecklistPanel) return;
+        requestAnimationFrame(() => checklistInputRef.current?.focus());
+    }, [showChecklistPanel]);
+
     const ensureTitleHistory = () => {
         if (titleHistoryRef.current) return;
         useStore.getState().pushHistory();
         titleHistoryRef.current = true;
+    };
+
+    const ensureChecklistHistory = () => {
+        if (checklistHistoryRef.current) return;
+        useStore.getState().pushHistory();
+        checklistHistoryRef.current = true;
     };
     const effectiveEnergy = useStore((state) => state.effectiveEnergy[data.id] ?? data.energy);
     const baseEnergy = clampEnergy(Number.isFinite(data.energy) ? data.energy : 50);
@@ -1229,6 +1259,9 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
     const canUseChildProgress = incomingProgress.count > 0;
     const childProgressEnabled = isTask && data.childProgress === true;
     const childProgressActive = childProgressEnabled && canUseChildProgress;
+    const checklistItems = React.useMemo(() => normalizeChecklistItems(data.checklist), [data.checklist]);
+    const checklistStats = React.useMemo(() => getChecklistStats(checklistItems), [checklistItems]);
+    const checklistHasItems = checklistStats.total > 0;
     const nodeAttachments = Array.isArray(data.attachments) ? data.attachments : [];
     const mentionParticipants = resolveMentionParticipants(data.mentions, sessionSavers);
     const authorLabel = typeof data.authorName === 'string' ? data.authorName.trim() : '';
@@ -1243,7 +1276,7 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
         if (!childProgressActive) return;
         const next = incomingProgress.value;
         if (Math.abs(progress - next) < 0.1) return;
-        updateNode(data.id, { progress: next });
+        updateNode(data.id, { progress: next, progressManual: false });
     }, [childProgressActive, incomingProgress.value, progress, updateNode, data.id]);
 
     React.useEffect(() => {
@@ -1254,6 +1287,15 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
         window.addEventListener('click', onClick);
         return () => window.removeEventListener('click', onClick);
     }, [showEnergyPanel]);
+
+    React.useEffect(() => {
+        if (!showChecklistPanel) return;
+        const onClick = () => {
+            setShowChecklistPanel(false);
+        };
+        window.addEventListener('click', onClick);
+        return () => window.removeEventListener('click', onClick);
+    }, [showChecklistPanel]);
 
     // Keep numeric input scoped to the energy panel and sync to current value.
     React.useEffect(() => {
@@ -1363,7 +1405,7 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
         const rect = el.getBoundingClientRect();
         const t = (clientX - rect.left) / rect.width;
         const next = clampProgress(t * 100);
-        updateNode(data.id, { progress: next, childProgress: false });
+        updateNode(data.id, { progress: next, childProgress: false, progressManual: true });
     };
 
     const startProgressDrag = (clientX: number, el: HTMLElement, pointerId: number) => {
@@ -1403,7 +1445,7 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
         const next = clampProgress(value);
         if (Math.round(progress) === next) return;
         useStore.getState().pushHistory();
-        updateNode(data.id, { progress: next, childProgress: false });
+        updateNode(data.id, { progress: next, childProgress: false, progressManual: true });
     };
     const quickProgressOptions = [25, 50, 75, 100];
     const toggleChildProgress = (e?: React.SyntheticEvent) => {
@@ -1415,7 +1457,43 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
             updateNode(data.id, { childProgress: false });
             return;
         }
-        updateNode(data.id, { childProgress: true, progress: incomingProgress.value });
+        updateNode(data.id, { childProgress: true, progress: incomingProgress.value, progressManual: false });
+    };
+
+    const updateChecklist = (nextItems: NodeData['checklist']) => {
+        ensureChecklistHistory();
+        updateNode(data.id, { checklist: nextItems });
+    };
+
+    const toggleChecklistItem = (id: string) => {
+        const nextItems = checklistItems.map((item) => (
+            item.id === id ? { ...item, done: !item.done } : item
+        ));
+        updateChecklist(nextItems);
+    };
+
+    const updateChecklistItemText = (id: string, text: string) => {
+        const nextItems = checklistItems.map((item) => (
+            item.id === id ? { ...item, text } : item
+        ));
+        updateChecklist(nextItems);
+    };
+
+    const removeChecklistItem = (id: string) => {
+        const nextItems = checklistItems.filter((item) => item.id !== id);
+        updateChecklist(nextItems);
+    };
+
+    const addChecklistItem = () => {
+        const text = checklistDraft.trim();
+        if (!text) return;
+        const nextItems = [
+            ...checklistItems,
+            { id: createChecklistItemId(), text, done: false },
+        ];
+        updateChecklist(nextItems);
+        setChecklistDraft('');
+        requestAnimationFrame(() => checklistInputRef.current?.focus());
     };
 
 
@@ -1423,6 +1501,23 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
         <div className={styles.noteDetailWrap} data-interactive="true" onPointerDown={(e) => e.stopPropagation()}>
             {/* Wrap the detailed card + energy panel so phone layout can scale them together. */}
             <div className={styles.noteShell}>
+                {!showChecklistPanel && (
+                    <button
+                        type="button"
+                        className={`${styles.noteChecklistFab}${checklistHasItems ? ` ${styles.noteChecklistFabHasItems}` : ''}`}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            setShowChecklistPanel(true);
+                        }}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        data-interactive="true"
+                        title="Checklist"
+                        aria-label="Checklist"
+                        style={{ '--progress-color': energyColor } as React.CSSProperties}
+                    >
+                        <List size={16} />
+                    </button>
+                )}
                 <div className={`${styles.noteNode}${shouldPulse ? ` ${styles.monitorPulse}` : ''}`}>
                 <div className={styles.noteHeaderRow}>
                     <div className={styles.noteTitleWrap}>
@@ -1468,11 +1563,11 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
                         )}
                     </div>
 
-                    <div className={styles.noteHeaderActions} onPointerDown={(e) => e.stopPropagation()}>
-                        <div className={`${styles.typeSwitcher} ${styles.noteTypeSwitcherCompact}`}>
-                            <div
-                                className={`${styles.typeOption} ${data.type === 'idea' ? styles.activeIdea : ''}`}
-                                onClick={() => {
+                <div className={styles.noteHeaderActions} onPointerDown={(e) => e.stopPropagation()}>
+                    <div className={`${styles.typeSwitcher} ${styles.noteTypeSwitcherCompact}`}>
+                        <div
+                            className={`${styles.typeOption} ${data.type === 'idea' ? styles.activeIdea : ''}`}
+                            onClick={() => {
                                     useStore.getState().pushHistory();
                                     updateNode(data.id, { type: 'idea' });
                                 }}
@@ -1541,21 +1636,21 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
                                 className={styles.noteProgressQuickRow}
                                 style={{ '--progress-color': energyColor } as React.CSSProperties}
                             >
-                                {quickProgressOptions.map((value) => {
-                                    const isActive = Math.round(progress) === value;
-                                    return (
-                                        <button
-                                            key={value}
-                                            type="button"
-                                            className={`${styles.noteProgressQuickButton}${isActive ? ` ${styles.noteProgressQuickActive}` : ''}`}
-                                            onClick={(e) => applyQuickProgress(value, e)}
-                                            onPointerDown={(e) => e.stopPropagation()}
-                                            data-interactive="true"
-                                        >
-                                            {value}%
-                                        </button>
-                                    );
-                                })}
+                                    {quickProgressOptions.map((value) => {
+                                        const isActive = Math.round(progress) === value;
+                                        return (
+                                            <button
+                                                key={value}
+                                                type="button"
+                                                className={`${styles.noteProgressQuickButton}${isActive ? ` ${styles.noteProgressQuickActive}` : ''}`}
+                                                onClick={(e) => applyQuickProgress(value, e)}
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                                data-interactive="true"
+                                            >
+                                                {value}%
+                                            </button>
+                                        );
+                                    })}
                                 <button
                                     type="button"
                                     className={`${styles.noteProgressToggle}${childProgressEnabled ? ` ${styles.noteProgressToggleActive}` : ''}`}
@@ -1614,6 +1709,104 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
                     <NoteContentEditor nodeId={data.id} value={data.content} attachments={nodeAttachments} mentions={normalizeMentions(data.mentions)} />
                 </div>
                 </div>
+
+                {showChecklistPanel && (
+                    <div
+                        className={styles.noteChecklistSide}
+                        style={{ '--progress-color': energyColor } as React.CSSProperties}
+                        data-interactive="true"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className={styles.noteChecklistHeader}>
+                            <div className={styles.noteChecklistTitle}>Checklist</div>
+                            <div className={styles.noteChecklistHeaderRight}>
+                                <div className={styles.noteChecklistMeta}>
+                                    {checklistStats.done}/{checklistStats.total || 0}
+                                </div>
+                                <button
+                                    type="button"
+                                    className={styles.noteChecklistClose}
+                                    onClick={() => setShowChecklistPanel(false)}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    aria-label="Close checklist"
+                                >
+                                    <X size={14} />
+                                </button>
+                            </div>
+                        </div>
+                        <div className={styles.noteChecklistBar}>
+                            <div
+                                className={styles.noteChecklistBarFill}
+                                style={{ width: `${checklistStats.progress}%` }}
+                            />
+                        </div>
+                        <div className={styles.noteChecklistList}>
+                            {checklistItems.length === 0 ? (
+                                <div className={styles.noteChecklistEmpty}>No items yet</div>
+                            ) : (
+                                checklistItems.map((item) => {
+                                    const text = typeof item.text === 'string' ? item.text : '';
+                                    return (
+                                        <div
+                                            key={item.id}
+                                            className={`${styles.noteChecklistItem}${item.done ? ` ${styles.noteChecklistItemDone}` : ''}`}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                className={styles.noteChecklistCheckbox}
+                                                checked={!!item.done}
+                                                onChange={() => toggleChecklistItem(item.id)}
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                            />
+                                            <input
+                                                className={styles.noteChecklistText}
+                                                value={text}
+                                                onChange={(e) => updateChecklistItemText(item.id, e.target.value)}
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                                placeholder="Checklist item"
+                                            />
+                                            <button
+                                                type="button"
+                                                className={styles.noteChecklistDelete}
+                                                onClick={() => removeChecklistItem(item.id)}
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                                aria-label="Remove item"
+                                            >
+                                                <Trash2 size={14} />
+                                            </button>
+                                        </div>
+                                    );
+                                })
+                            )}
+                        </div>
+                        <div className={styles.noteChecklistAddRow}>
+                            <input
+                                ref={checklistInputRef}
+                                className={styles.noteChecklistAddInput}
+                                value={checklistDraft}
+                                onChange={(e) => setChecklistDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        addChecklistItem();
+                                    }
+                                }}
+                                onPointerDown={(e) => e.stopPropagation()}
+                                placeholder="Add item"
+                            />
+                            <button
+                                type="button"
+                                className={styles.noteChecklistAddButton}
+                                onClick={addChecklistItem}
+                                onPointerDown={(e) => e.stopPropagation()}
+                                disabled={!checklistDraft.trim()}
+                            >
+                                Add
+                            </button>
+                        </div>
+                    </div>
+                )}
 
                 {showEnergyPanel && (
                     <div
