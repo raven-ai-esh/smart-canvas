@@ -146,6 +146,72 @@ const progressFromNode = (node: NodeData) => {
 const snapGanttLane = (value: number) => Math.round(value / GANTT_LANE_HEIGHT) * GANTT_LANE_HEIGHT;
 const ganttYForNode = (node: NodeData) => (Number.isFinite(node.ganttY) ? (node.ganttY as number) : node.y);
 
+type GanttEdgeRect = { x: number; y: number; width: number; height: number };
+type GanttEdgeSide = 'left' | 'right';
+
+const ganttAnchorX = (rect: GanttEdgeRect, side: GanttEdgeSide) => (
+    side === 'left'
+        ? rect.x
+        : rect.x + rect.width
+);
+
+const clampNumber = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const buildGanttEdgePath = (source: GanttEdgeRect, target: GanttEdgeRect, edgeId: string, dayWidth: number) => {
+    const sourceLeft = source.x;
+    const sourceRight = source.x + source.width;
+    const targetLeft = target.x;
+    const targetRight = target.x + target.width;
+    const overlapLeft = Math.max(sourceLeft, targetLeft);
+    const overlapRight = Math.min(sourceRight, targetRight);
+    const overlapWidth = overlapRight - overlapLeft;
+    const spread = ((hashString(edgeId) % 7) - 3) * 4;
+    const overlapThreshold = Math.max(16, dayWidth * 0.35);
+
+    if (overlapWidth >= overlapThreshold) {
+        const sourceCenterY = source.y + source.height / 2;
+        const targetCenterY = target.y + target.height / 2;
+        const sourceAboveTarget = sourceCenterY <= targetCenterY;
+        const sy = sourceAboveTarget ? source.y + source.height : source.y;
+        const ty = sourceAboveTarget ? target.y : target.y + target.height;
+        const overlapMidX = (overlapLeft + overlapRight) / 2;
+        const minX = overlapLeft + 6;
+        const maxX = overlapRight - 6;
+        const jitter = ((hashString(edgeId) % 5) - 2) * Math.min(8, dayWidth * 0.1);
+        const x = clampNumber(overlapMidX + jitter, minX, maxX);
+        const dy = Math.abs(ty - sy);
+        const bendY = Math.max(18, Math.min(90, dy * 0.45));
+        const c1y = sourceAboveTarget ? sy + bendY : sy - bendY;
+        const c2y = sourceAboveTarget ? ty - bendY : ty + bendY;
+        return `M ${x} ${sy} C ${x} ${c1y}, ${x} ${c2y}, ${x} ${ty}`;
+    }
+
+    const sourceBeforeTarget = sourceRight <= targetLeft;
+    const sourceSide: GanttEdgeSide = sourceBeforeTarget ? 'right' : 'left';
+    const targetSide: GanttEdgeSide = sourceBeforeTarget ? 'left' : 'right';
+    const sx = ganttAnchorX(source, sourceSide);
+    const sy = source.y + source.height / 2;
+    const tx = ganttAnchorX(target, targetSide);
+    const ty = target.y + target.height / 2;
+    const dx = Math.abs(tx - sx);
+
+    if (!sourceBeforeTarget && dx > dayWidth * 2.2) {
+        const topYBase = Math.min(source.y, target.y) - Math.max(24, GANTT_LANE_HEIGHT * 0.7);
+        const topY = topYBase - Math.abs(spread) * 0.8;
+        const outBend = Math.max(20, dayWidth * 0.45);
+        const c1x = sx - outBend;
+        const c2x = tx + outBend;
+        return `M ${sx} ${sy} C ${c1x} ${sy}, ${c1x} ${topY}, ${sx} ${topY} L ${tx} ${topY} C ${c2x} ${topY}, ${c2x} ${ty}, ${tx} ${ty}`;
+    }
+
+    const bend = Math.max(24, Math.min(180, Math.max(dx * 0.45, dayWidth * 0.6)));
+    const c1x = sx + (sourceBeforeTarget ? bend : -bend);
+    const c2x = tx - (sourceBeforeTarget ? bend : -bend);
+    const c1y = sy + spread * 0.4;
+    const c2y = ty - spread * 0.4;
+    return `M ${sx} ${sy} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${tx} ${ty}`;
+};
+
 const withAlpha = (color: string, alpha: number) => {
     if (!color.startsWith('rgb(')) return color;
     return color.replace('rgb(', 'rgb(').replace(')', ` / ${alpha})`);
@@ -364,7 +430,9 @@ export const Canvas: React.FC = () => {
         lastLaneY: number;
         moved: boolean;
         lastDeltaDays: number;
+        parked: boolean;
     } | null>(null);
+    const ganttRangeLockRef = useRef<{ rangeStartMs: number; rangeEndMs: number } | null>(null);
     const [ganttDetailNodeId, setGanttDetailNodeId] = useState<string | null>(null);
     const [stackAnimatingKeys, setStackAnimatingKeys] = useState<string[]>([]);
     const [peekingStackId, setPeekingStackId] = useState<string | null>(null);
@@ -567,8 +635,13 @@ export const Canvas: React.FC = () => {
         }
 
         const paddingDays = 3;
-        const rangeStartMs = alignToWeekStart(minMs - paddingDays * MS_PER_DAY);
-        const rangeEndMs = toUtcDay(maxMs + paddingDays * MS_PER_DAY);
+        let rangeStartMs = alignToWeekStart(minMs - paddingDays * MS_PER_DAY);
+        let rangeEndMs = toUtcDay(maxMs + paddingDays * MS_PER_DAY);
+        const lockedRange = ganttRangeLockRef.current;
+        if (lockedRange) {
+            rangeStartMs = lockedRange.rangeStartMs;
+            rangeEndMs = lockedRange.rangeEndMs;
+        }
         const originX = 0;
         const dayWidth = GANTT_DAY_WIDTH;
         const parkingWidth = dayWidth * GANTT_PARKING_DAYS;
@@ -581,7 +654,7 @@ export const Canvas: React.FC = () => {
             height: number;
             hasDates: boolean;
         }> = [];
-        const positionById = new Map<string, { x: number; y: number; width: number; height: number }>();
+        const positionById = new Map<string, { x: number; y: number; width: number; height: number; hasDates: boolean }>();
 
         dated.forEach(({ node, start, end }) => {
             const durationDays = Math.max(1, Math.round((end - start) / MS_PER_DAY) + 1);
@@ -591,7 +664,7 @@ export const Canvas: React.FC = () => {
             const y = laneY - GANTT_BAR_HEIGHT / 2;
             const entry = { node, x, y, width, height: GANTT_BAR_HEIGHT, hasDates: true };
             items.push(entry);
-            positionById.set(node.id, { x, y, width, height: GANTT_BAR_HEIGHT });
+            positionById.set(node.id, { x, y, width, height: GANTT_BAR_HEIGHT, hasDates: true });
         });
 
         undated.forEach((node) => {
@@ -601,7 +674,7 @@ export const Canvas: React.FC = () => {
             const y = laneY - GANTT_BAR_HEIGHT / 2;
             const entry = { node, x, y, width, height: GANTT_BAR_HEIGHT, hasDates: false };
             items.push(entry);
-            positionById.set(node.id, { x, y, width, height: GANTT_BAR_HEIGHT });
+            positionById.set(node.id, { x, y, width, height: GANTT_BAR_HEIGHT, hasDates: false });
         });
 
         return {
@@ -681,12 +754,8 @@ export const Canvas: React.FC = () => {
             const source = ganttLayout.positionById.get(edge.source);
             const target = ganttLayout.positionById.get(edge.target);
             if (!source || !target) return;
-            const sx = source.x + source.width;
-            const sy = source.y + source.height / 2;
-            const tx = target.x;
-            const ty = target.y + target.height / 2;
-            const midX = (sx + tx) / 2;
-            const d = `M ${sx} ${sy} C ${midX} ${sy}, ${midX} ${ty}, ${tx} ${ty}`;
+            if (!source.hasDates || !target.hasDates) return;
+            const d = buildGanttEdgePath(source, target, edge.id, ganttLayout.dayWidth);
             const sourceNode = nodeById.get(edge.source);
             const energy = Number.isFinite(effectiveEnergy[edge.source])
                 ? effectiveEnergy[edge.source]
@@ -1680,6 +1749,10 @@ export const Canvas: React.FC = () => {
             startMs,
             endMs,
         };
+        ganttRangeLockRef.current = {
+            rangeStartMs: ganttLayout.rangeStartMs,
+            rangeEndMs: ganttLayout.rangeEndMs,
+        };
         useStore.getState().pushHistory();
         setMode('ganttResize');
         setActiveId(nodeId);
@@ -1721,6 +1794,11 @@ export const Canvas: React.FC = () => {
             lastLaneY: startNodeY,
             moved: false,
             lastDeltaDays: 0,
+            parked: !hadStart && !hadEnd,
+        };
+        ganttRangeLockRef.current = {
+            rangeStartMs: ganttLayout.rangeStartMs,
+            rangeEndMs: ganttLayout.rangeEndMs,
         };
         setMode('ganttMove');
         setActiveId(nodeId);
@@ -3481,13 +3559,27 @@ export const Canvas: React.FC = () => {
             const deltaDays = Math.round((worldPos.x - move.startWorldX) / ganttLayout.dayWidth);
             const deltaY = worldPos.y - move.startWorldY;
             const nextLaneY = snapGanttLane(move.startNodeY + deltaY);
-            const daysChanged = deltaDays !== move.lastDeltaDays;
+            const parkingDropBoundary = ganttLayout.originX - ganttLayout.dayWidth * 0.5;
+            const shouldPark = worldPos.x <= parkingDropBoundary;
+            const parkingChanged = shouldPark !== move.parked;
+            const leavingParking = move.parked && !shouldPark;
+            const daysChanged = deltaDays !== move.lastDeltaDays || leavingParking;
             const laneChanged = nextLaneY !== move.lastLaneY;
-            if (!daysChanged && !laneChanged) return;
-            const nextStartMs = move.startMs + deltaDays * MS_PER_DAY;
-            const nextEndMs = move.endMs + deltaDays * MS_PER_DAY;
+            if (!daysChanged && !laneChanged && !parkingChanged) return;
             const update: Partial<NodeData> = {};
-            if (daysChanged) {
+            if (shouldPark) {
+                if (!move.parked) {
+                    update.startDate = undefined;
+                    update.endDate = undefined;
+                    update.startDateManual = true;
+                    update.endDateManual = true;
+                    update.startDateAuto = false;
+                    update.endDateAuto = false;
+                    move.parked = true;
+                }
+            } else if (daysChanged) {
+                const nextStartMs = move.startMs + deltaDays * MS_PER_DAY;
+                const nextEndMs = move.endMs + deltaDays * MS_PER_DAY;
                 if (move.hadStart || !move.hadEnd) {
                     update.startDate = formatDateInput(nextStartMs);
                     update.startDateManual = true;
@@ -3498,8 +3590,10 @@ export const Canvas: React.FC = () => {
                     update.endDateManual = true;
                     update.endDateAuto = false;
                 }
+                move.parked = false;
             }
             if (laneChanged) update.ganttY = nextLaneY;
+            if (!Object.keys(update).length) return;
             updateNode(move.nodeId, update);
             if (daysChanged) move.lastDeltaDays = deltaDays;
             if (laneChanged) move.lastLaneY = nextLaneY;
@@ -3830,6 +3924,7 @@ export const Canvas: React.FC = () => {
             if (resize && resize.pointerId === e.pointerId) {
                 ganttResizeRef.current = null;
             }
+            ganttRangeLockRef.current = null;
             setMode('idle');
             setActiveId(null);
             if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
@@ -3855,6 +3950,7 @@ export const Canvas: React.FC = () => {
                     selectNode(move.nodeId);
                 }
             }
+            ganttRangeLockRef.current = null;
             setMode('idle');
             setActiveId(null);
             if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
@@ -4216,6 +4312,7 @@ export const Canvas: React.FC = () => {
 		        isDrawing.current = false;
             ganttResizeRef.current = null;
             ganttMoveRef.current = null;
+            ganttRangeLockRef.current = null;
 		        setMode('idle');
 		        setActiveId(null);
             clearCanvasLongPress();
