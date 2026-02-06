@@ -1100,15 +1100,16 @@
     overflow: auto;
     color: var(--text-secondary);
     cursor: text;
-    white-space: pre-wrap;
+    white-space: normal;
     box-sizing: border-box;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
     touch-action: pan-y;
+    line-height: 1.5;
 }
 
 .editorPreview :global(p) {
-    margin: 0 0 10px;
+    margin: 0 0 8px;
 }
 
 .editorPreview :global(p:last-child) {
@@ -1117,17 +1118,8 @@
 
 .editorPreview :global(ul),
 .editorPreview :global(ol) {
-    margin: 0 0 10px 20px;
+    margin: 0 0 8px 20px;
     padding: 0;
-}
-
-.editorPreview :global(code) {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: 1px 6px;
-    color: var(--text-primary);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .editorPreview :global(img) {

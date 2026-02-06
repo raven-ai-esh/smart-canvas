@@ -9,6 +9,7 @@ import { DEFAULT_LAYER_ID, normalizeLayers, resolveLayerId } from '../utils/laye
 import { collectLayerStackEntries, sortLayerStackEntries, type StackKind } from '../utils/stacking';
 import { applyChildProgress } from '../utils/childProgress';
 import { applyChecklistProgress } from '../utils/checklist';
+import { applyChildDates } from '../utils/childDates';
 
 type GeneralSettings = {
     zoomSensitivity: number;
@@ -49,9 +50,10 @@ const progressFromStatus = (status?: NodeData['status'], legacyInWork?: boolean)
 const applyProgressPipeline = (nodes: NodeData[], edges: EdgeData[], opts?: { now?: number }) => {
     const checklistResult = applyChecklistProgress(nodes, { now: opts?.now });
     const childProgressResult = applyChildProgress(checklistResult.nodes, edges, { now: opts?.now });
+    const childDatesResult = applyChildDates(childProgressResult.nodes, edges, { now: opts?.now });
     return {
-        nodes: childProgressResult.nodes,
-        changed: checklistResult.changed || childProgressResult.changed,
+        nodes: childDatesResult.nodes,
+        changed: checklistResult.changed || childProgressResult.changed || childDatesResult.changed,
         progressChanged: checklistResult.progressChanged || childProgressResult.progressChanged,
     };
 };

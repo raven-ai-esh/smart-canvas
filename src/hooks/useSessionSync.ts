@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { computeEffectiveEnergy } from '../utils/energy';
 import { applyChildProgress } from '../utils/childProgress';
+import { applyChildDates } from '../utils/childDates';
 import { applyChecklistProgress } from '../utils/checklist';
 import { mergeSessionState, normalizeSessionState, type SessionState } from '../utils/sessionMerge';
 import { normalizeLayers, resolveLayerId } from '../utils/layers';
@@ -57,7 +58,8 @@ function applySessionState(state: SessionState) {
   const activeLayerId = resolveLayerId(nextLayers, useStore.getState().activeLayerId);
   const checklistResult = applyChecklistProgress(state.nodes as any);
   const childProgressResult = applyChildProgress(checklistResult.nodes as any, state.edges as any);
-  const nextNodes = childProgressResult.nodes as any;
+  const childDatesResult = applyChildDates(childProgressResult.nodes as any, state.edges as any);
+  const nextNodes = childDatesResult.nodes as any;
   useStore.setState({
     nodes: nextNodes,
     edges: state.edges as any,
@@ -199,6 +201,9 @@ export function useSessionSync() {
   const desiredStateJsonRef = useRef<string | null>(null);
   const lastAppliedJsonRef = useRef<string | null>(null);
   const lastQueuedStateRef = useRef<ReturnType<typeof pickSessionState> | null>(null);
+  const hasPendingLocalChangesRef = useRef(false);
+  const pendingRequestPayloadsRef = useRef<Map<string, string>>(new Map());
+  const lastSentJsonRef = useRef<string | null>(null);
   const sendTimer = useRef<number | null>(null);
   const reconnectTimer = useRef<number | null>(null);
   const reconnectAttempt = useRef(0);
@@ -371,6 +376,9 @@ export function useSessionSync() {
     desiredStateJsonRef.current = null;
     lastAppliedJsonRef.current = null;
     lastQueuedStateRef.current = null;
+    hasPendingLocalChangesRef.current = false;
+    pendingRequestPayloadsRef.current.clear();
+    lastSentJsonRef.current = null;
     sessionPrimedRef.current = false;
 
     const clearTimers = () => {
@@ -741,9 +749,15 @@ export function useSessionSync() {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (!sessionPrimedRef.current) return;
       if (!desiredStateRef.current || !desiredStateJsonRef.current) return;
-      if (desiredStateJsonRef.current === lastAppliedJsonRef.current) return; // already in sync
+      if (!hasPendingLocalChangesRef.current && desiredStateJsonRef.current === lastAppliedJsonRef.current) return; // already in sync
+      if (
+        pendingRequestPayloadsRef.current.size > 0
+        && lastSentJsonRef.current === desiredStateJsonRef.current
+      ) return; // already sent this payload, waiting for ACK
 
       const requestId = crypto.randomUUID();
+      pendingRequestPayloadsRef.current.set(requestId, desiredStateJsonRef.current);
+      lastSentJsonRef.current = desiredStateJsonRef.current;
       debugLog({
         type: 'sync_send',
         t: performance.now(),
@@ -891,8 +905,21 @@ export function useSessionSync() {
         // Our server broadcasts updates to the sender as well. Applying those echoes would
         // reset local UI state (selection/editing) while typing, so treat them as an ACK.
         if (msg?.type === 'update' && typeof msg?.sourceClientId === 'string' && msg.sourceClientId === clientId) {
-          // Mark "in sync" so unrelated store updates (presence, selection) don't trigger resends.
-          lastAppliedJsonRef.current = desiredStateJsonRef.current ?? stableSerialize(pickSessionState(useStore.getState()));
+          const ackRequestId = typeof msg?.requestId === 'string' ? msg.requestId : null;
+          const ackedJson = ackRequestId ? pendingRequestPayloadsRef.current.get(ackRequestId) ?? null : null;
+          if (ackRequestId) pendingRequestPayloadsRef.current.delete(ackRequestId);
+          if (ackedJson) {
+            lastAppliedJsonRef.current = ackedJson;
+          } else {
+            lastAppliedJsonRef.current = desiredStateJsonRef.current ?? stableSerialize(pickSessionState(useStore.getState()));
+          }
+          if (
+            pendingRequestPayloadsRef.current.size === 0
+            && desiredStateJsonRef.current
+            && lastAppliedJsonRef.current === desiredStateJsonRef.current
+          ) {
+            hasPendingLocalChangesRef.current = false;
+          }
           return;
         }
         const remote = normalizeSessionState(msg?.state);
@@ -904,11 +931,15 @@ export function useSessionSync() {
 
       ws.addEventListener('close', () => {
         if (wsRef.current === ws) wsRef.current = null;
+        pendingRequestPayloadsRef.current.clear();
+        lastSentJsonRef.current = null;
         scheduleReconnect();
       });
 
       ws.addEventListener('error', () => {
         // some browsers only emit error without close; ensure we reconnect
+        pendingRequestPayloadsRef.current.clear();
+        lastSentJsonRef.current = null;
         scheduleReconnect();
       });
     };
@@ -932,6 +963,7 @@ export function useSessionSync() {
       lastQueuedStateRef.current = snapshot;
       desiredStateRef.current = snapshot;
       desiredStateJsonRef.current = json;
+      hasPendingLocalChangesRef.current = true;
       scheduleFlush(wasVolatileOnly ? 'volatile' : 'normal');
     });
 

@@ -3466,6 +3466,10 @@ export const Canvas: React.FC = () => {
             updateNode(resize.nodeId, {
                 startDate: formatDateInput(startMs),
                 endDate: formatDateInput(endMs),
+                startDateManual: true,
+                endDateManual: true,
+                startDateAuto: false,
+                endDateAuto: false,
             });
             ganttResizeRef.current = { ...resize, startMs, endMs };
             return;
@@ -3484,8 +3488,16 @@ export const Canvas: React.FC = () => {
             const nextEndMs = move.endMs + deltaDays * MS_PER_DAY;
             const update: Partial<NodeData> = {};
             if (daysChanged) {
-                if (move.hadStart || !move.hadEnd) update.startDate = formatDateInput(nextStartMs);
-                if (move.hadEnd || !move.hadStart) update.endDate = formatDateInput(nextEndMs);
+                if (move.hadStart || !move.hadEnd) {
+                    update.startDate = formatDateInput(nextStartMs);
+                    update.startDateManual = true;
+                    update.startDateAuto = false;
+                }
+                if (move.hadEnd || !move.hadStart) {
+                    update.endDate = formatDateInput(nextEndMs);
+                    update.endDateManual = true;
+                    update.endDateAuto = false;
+                }
             }
             if (laneChanged) update.ganttY = nextLaneY;
             updateNode(move.nodeId, update);
