@@ -315,8 +315,8 @@
 .previewMarkdown {
   color: var(--text-primary);
   font-size: 13px;
-  line-height: 1.6;
-  white-space: pre-wrap;
+  line-height: 1.5;
+  white-space: normal;
 }
 
 .previewDoc {

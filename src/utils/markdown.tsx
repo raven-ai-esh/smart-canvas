@@ -2,61 +2,63 @@ import type { HTMLAttributes, ReactNode } from 'react';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-const remarkSoftBreaks = () => (tree: any) => {
-  const visit = (node: any) => {
-    if (!node || typeof node !== 'object') return;
-    if (node.type === 'code' || node.type === 'inlineCode') return;
-    if (Array.isArray(node.children)) {
-      const nextChildren: any[] = [];
-      node.children.forEach((child: any) => {
-        if (child?.type === 'text' && typeof child.value === 'string' && child.value.includes('\n')) {
-          const parts = child.value.split('\n');
-          parts.forEach((part: string, idx: number) => {
-            if (part) {
-              nextChildren.push({ type: 'text', value: part });
-            }
-            if (idx < parts.length - 1) {
-              nextChildren.push({ type: 'break' });
-            }
-          });
-          return;
-        }
-        nextChildren.push(child);
-      });
-      node.children = nextChildren;
-      node.children.forEach(visit);
-    }
-  };
-  visit(tree);
-};
-
-export const markdownPlugins = [remarkGfm, remarkSoftBreaks];
+export const markdownPlugins = [remarkGfm];
 
 export const markdownComponents: Components = {
+  h1: ({ node: _node, children, ...props }) => (
+    <h1 style={{ margin: '0 0 0.7em', lineHeight: 1.25, fontSize: '1.75em', fontWeight: 700 }} {...props}>
+      {children}
+    </h1>
+  ),
+  h2: ({ node: _node, children, ...props }) => (
+    <h2 style={{ margin: '0 0 0.65em', lineHeight: 1.3, fontSize: '1.45em', fontWeight: 700 }} {...props}>
+      {children}
+    </h2>
+  ),
+  h3: ({ node: _node, children, ...props }) => (
+    <h3 style={{ margin: '0 0 0.6em', lineHeight: 1.35, fontSize: '1.22em', fontWeight: 700 }} {...props}>
+      {children}
+    </h3>
+  ),
+  h4: ({ node: _node, children, ...props }) => (
+    <h4 style={{ margin: '0 0 0.55em', lineHeight: 1.4, fontSize: '1.1em', fontWeight: 600 }} {...props}>
+      {children}
+    </h4>
+  ),
+  h5: ({ node: _node, children, ...props }) => (
+    <h5 style={{ margin: '0 0 0.5em', lineHeight: 1.4, fontSize: '1em', fontWeight: 600 }} {...props}>
+      {children}
+    </h5>
+  ),
+  h6: ({ node: _node, children, ...props }) => (
+    <h6 style={{ margin: '0 0 0.5em', lineHeight: 1.4, fontSize: '0.92em', fontWeight: 600, color: 'var(--text-secondary)' }} {...props}>
+      {children}
+    </h6>
+  ),
   p: ({ node: _node, children, ...props }) => (
-    <p style={{ margin: '0 0 4px', lineHeight: 1.38 }} {...props}>
+    <p style={{ margin: '0 0 0.7em', lineHeight: 1.55 }} {...props}>
       {children}
     </p>
   ),
   ul: ({ node: _node, children, ...props }) => (
-    <ul style={{ margin: '0 0 4px 14px', padding: 0 }} {...props}>
+    <ul style={{ margin: '0 0 0.7em', paddingLeft: '1.5em' }} {...props}>
       {children}
     </ul>
   ),
   ol: ({ node: _node, children, ...props }) => (
-    <ol style={{ margin: '0 0 4px 14px', padding: 0 }} {...props}>
+    <ol style={{ margin: '0 0 0.7em', paddingLeft: '1.5em' }} {...props}>
       {children}
     </ol>
   ),
   li: ({ node: _node, children, ...props }) => (
-    <li style={{ margin: '0 0 1px' }} {...props}>
+    <li style={{ margin: '0.2em 0', lineHeight: 1.5 }} {...props}>
       {children}
     </li>
   ),
   a: ({ node: _node, children, ...props }) => (
     <a
       {...props}
-      style={{ color: 'var(--accent-primary)', textDecoration: 'none' }}
+      style={{ color: 'var(--accent-primary)', textDecoration: 'underline' }}
       target="_blank"
       rel="noreferrer"
     >
@@ -67,12 +69,12 @@ export const markdownComponents: Components = {
     <blockquote
       {...props}
       style={{
-        margin: '0 0 8px',
-        padding: '6px 10px',
-        borderLeft: '3px solid rgba(94,129,172,0.6)',
+        margin: '0 0 0.8em',
+        padding: '0.2em 0.9em',
+        borderLeft: '0.25em solid rgba(255,255,255,0.25)',
         color: 'var(--text-secondary)',
         background: 'rgba(255,255,255,0.04)',
-        borderRadius: 8,
+        borderRadius: 6,
       }}
     >
       {children}
@@ -80,36 +82,64 @@ export const markdownComponents: Components = {
   ),
   code: ({
     node: _node,
-    inline,
+    className,
     children,
     ...props
   }: {
     node?: unknown;
-    inline?: boolean;
+    className?: string;
     children?: ReactNode;
   } & HTMLAttributes<HTMLElement>) => (
-    <code
-      {...props}
-      style={{
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-        fontSize: 12,
-        padding: inline ? '1px 4px' : '8px 10px',
-        borderRadius: 8,
-        background: 'rgba(15, 20, 28, 0.7)',
-        border: '1px solid rgba(255,255,255,0.08)',
-        display: inline ? 'inline' : 'block',
-        whiteSpace: 'pre-wrap',
-      }}
-    >
-      {children}
-    </code>
+    (() => {
+      const text = String(children ?? '');
+      const isBlock = (className?.includes('language-') ?? false) || text.includes('\n');
+      if (isBlock) {
+        return (
+          <code
+            {...props}
+            className={className}
+            style={{
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+              fontSize: '0.9em',
+            }}
+          >
+            {children}
+          </code>
+        );
+      }
+      return (
+        <code
+          {...props}
+          className={className}
+          style={{
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+            fontSize: '0.9em',
+            padding: '0.15em 0.4em',
+            borderRadius: 6,
+            background: 'rgba(175, 184, 193, 0.2)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            display: 'inline',
+            whiteSpace: 'break-spaces',
+            overflowWrap: 'normal',
+            wordBreak: 'normal',
+          }}
+        >
+          {children}
+        </code>
+      );
+    })()
   ),
   pre: ({ node: _node, children, ...props }) => (
     <pre
       {...props}
       style={{
-        margin: '0 0 8px',
-        whiteSpace: 'pre-wrap',
+        margin: '0 0 0.8em',
+        padding: '0.8em 1em',
+        borderRadius: 10,
+        border: '1px solid rgba(255,255,255,0.12)',
+        background: 'rgba(15, 20, 28, 0.72)',
+        lineHeight: 1.45,
+        whiteSpace: 'pre',
         overflowX: 'auto',
       }}
     >
@@ -122,8 +152,8 @@ export const markdownComponents: Components = {
       style={{
         width: '100%',
         borderCollapse: 'collapse',
-        margin: '0 0 8px',
-        fontSize: 12,
+        margin: '0 0 0.8em',
+        fontSize: '0.92em',
       }}
     >
       {children}
@@ -134,8 +164,8 @@ export const markdownComponents: Components = {
       {...props}
       style={{
         textAlign: 'left',
-        borderBottom: '1px solid var(--border-strong)',
-        padding: '6px 8px',
+        borderBottom: '1px solid rgba(255,255,255,0.2)',
+        padding: '0.45em 0.6em',
         fontWeight: 600,
       }}
     >
@@ -146,8 +176,8 @@ export const markdownComponents: Components = {
     <td
       {...props}
       style={{
-        borderBottom: '1px solid var(--border-subtle)',
-        padding: '6px 8px',
+        borderBottom: '1px solid rgba(255,255,255,0.12)',
+        padding: '0.45em 0.6em',
         verticalAlign: 'top',
       }}
     >
@@ -159,8 +189,8 @@ export const markdownComponents: Components = {
       {...props}
       style={{
         border: 'none',
-        borderTop: '1px solid var(--border-subtle)',
-        margin: '10px 0',
+        borderTop: '1px solid rgba(255,255,255,0.16)',
+        margin: '0.9em 0',
       }}
     />
   ),

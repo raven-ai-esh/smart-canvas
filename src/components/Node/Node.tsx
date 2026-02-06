@@ -1679,7 +1679,11 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
                                     value={data.startDate || ''}
                                     onChange={(e) => {
                                         useStore.getState().pushHistory();
-                                        updateNode(data.id, { startDate: e.target.value });
+                                        updateNode(data.id, {
+                                            startDate: e.target.value,
+                                            startDateManual: true,
+                                            startDateAuto: false,
+                                        });
                                     }}
                                     onPointerDown={(e) => e.stopPropagation()}
                                 />
@@ -1692,7 +1696,11 @@ export const NoteView = React.memo(({ data }: { data: NodeData }) => {
                                     value={data.endDate || ''}
                                     onChange={(e) => {
                                         useStore.getState().pushHistory();
-                                        updateNode(data.id, { endDate: e.target.value });
+                                        updateNode(data.id, {
+                                            endDate: e.target.value,
+                                            endDateManual: true,
+                                            endDateAuto: false,
+                                        });
                                     }}
                                     onPointerDown={(e) => e.stopPropagation()}
                                 />

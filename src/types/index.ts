@@ -43,6 +43,10 @@ export interface NodeData {
   // Task specific
   startDate?: string;
   endDate?: string;
+  startDateManual?: boolean;
+  endDateManual?: boolean;
+  startDateAuto?: boolean;
+  endDateAuto?: boolean;
   status?: 'queued' | 'in_progress' | 'done';
   progress?: number;
   progressManual?: boolean;
