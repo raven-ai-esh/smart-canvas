@@ -14,6 +14,7 @@ import io
 import pathlib
 import base64
 import hashlib
+from urllib.parse import urlparse
 import numpy as np
 import pandas as pd
 import contextlib
@@ -935,7 +936,24 @@ async def _run_table_agent(
     }
 
 
-async def _run_doc_search(args: dict[str, Any], model: str | None, client: AsyncOpenAI) -> dict[str, Any]:
+def _is_internal_file_url(raw_url: Any, resolved_url: str | None) -> bool:
+    if isinstance(raw_url, str) and raw_url.startswith("/"):
+        return True
+    if not resolved_url:
+        return False
+    base = urlparse(FILE_BASE_URL)
+    target = urlparse(resolved_url)
+    if not base.netloc or not target.netloc:
+        return False
+    return base.netloc == target.netloc
+
+
+async def _run_doc_search(
+    args: dict[str, Any],
+    model: str | None,
+    client: AsyncOpenAI,
+    mcp_token: str | None = None,
+) -> dict[str, Any]:
     raw_url = args.get("download_url") or args.get("url")
     if raw_url and isinstance(raw_url, str) and raw_url.startswith("/"):
         download_url = FILE_BASE_URL.rstrip("/") + raw_url
@@ -945,8 +963,12 @@ async def _run_doc_search(args: dict[str, Any], model: str | None, client: Async
     if not download_url or not search_request:
         raise HTTPException(status_code=400, detail="download_url and search_request are required")
 
+    request_headers: dict[str, str] = {}
+    if isinstance(mcp_token, str) and mcp_token.strip() and _is_internal_file_url(raw_url, download_url):
+        request_headers["Authorization"] = f"Bearer {mcp_token.strip()}"
+
     async with httpx.AsyncClient(timeout=30) as http_client:
-        resp = await http_client.get(download_url)
+        resp = await http_client.get(download_url, headers=request_headers or None)
         resp.raise_for_status()
         content = resp.content
         mime = resp.headers.get("content-type", "").split(";")[0].strip() or None
@@ -1193,9 +1215,14 @@ async def _run_doc_search(args: dict[str, Any], model: str | None, client: Async
     }
 
 
-async def _safe_doc_search(args: dict[str, Any], model: str | None, client: AsyncOpenAI) -> dict[str, Any]:
+async def _safe_doc_search(
+    args: dict[str, Any],
+    model: str | None,
+    client: AsyncOpenAI,
+    mcp_token: str | None = None,
+) -> dict[str, Any]:
     try:
-        result = await _run_doc_search(args, model, client)
+        result = await _run_doc_search(args, model, client, mcp_token=mcp_token)
         return {"ok": True, "result": result}
     except Exception as exc:
         logger.exception("doc_search_error", extra={"error": str(exc)})
@@ -1940,7 +1967,8 @@ async def run_agent(req: AgentRunRequest) -> AgentRunResponse:
                         continue
                     args = _parse_tool_args(args_raw)
                     if name == "doc_search":
-                        ds = await _safe_doc_search(args, req.model, client)
+                        mcp_token = req.mcp.token if req.mcp else None
+                        ds = await _safe_doc_search(args, req.model, client, mcp_token=mcp_token)
                         payload_content = ds.get("result") if ds.get("ok") else {"error": ds.get("error")}
                         result = type(
                             "Result",
