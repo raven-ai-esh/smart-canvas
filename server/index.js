@@ -4101,6 +4101,25 @@ const nodeChanged = (prev, next) => {
   return false;
 };
 
+const isTextOnlyNodeEdit = (prev, next) => {
+  if (!prev || !next) return false;
+  const titleChanged = prev.title !== next.title;
+  const contentChanged = prev.content !== next.content;
+  if (!titleChanged && !contentChanged) return false;
+  if (prev.type !== next.type) return false;
+  if (prev.clarity !== next.clarity) return false;
+  if (prev.status !== next.status) return false;
+  if (prev.progress !== next.progress) return false;
+  if (energyDeltaChanged(prev.energy, next.energy)) return false;
+  if (prev.startDate !== next.startDate) return false;
+  if (prev.endDate !== next.endDate) return false;
+  if (attachmentSignature(prev.attachments) !== attachmentSignature(next.attachments)) return false;
+  const prevMentions = Array.isArray(prev.mentions) ? prev.mentions : [];
+  const nextMentions = Array.isArray(next.mentions) ? next.mentions : [];
+  if (JSON.stringify(prevMentions) !== JSON.stringify(nextMentions)) return false;
+  return true;
+};
+
 const collectChangedNodes = (prevState, nextState) => {
   const prevNodes = Array.isArray(prevState?.nodes) ? prevState.nodes : [];
   const nextNodes = Array.isArray(nextState?.nodes) ? nextState.nodes : [];
@@ -4164,6 +4183,7 @@ const buildSessionAlertEvents = async ({ sessionId, sessionName, prevState, next
 
   for (const change of changes) {
     const { node, prev } = change;
+    const skipCardChangeAlert = isTextOnlyNodeEdit(prev, node);
     const summaryLines = limitLines(buildChangeSummary(prev, node));
     const changeSummary = summaryLines.join('\n');
     const mentionDiff = diffMentions(prev?.mentions, node?.mentions);
@@ -4183,7 +4203,7 @@ const buildSessionAlertEvents = async ({ sessionId, sessionName, prevState, next
     if (node?.authorId) recipients.add(node.authorId);
     if (actor?.id) recipients.delete(actor.id);
     mentionRecipients.forEach((id) => recipients.delete(id));
-    if (recipients.size) {
+    if (!skipCardChangeAlert && recipients.size) {
       for (const userId of recipients) {
         alerts.push({
           userId,
