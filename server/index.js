@@ -880,6 +880,24 @@ const sanitizeFilename = (name) => {
   return normalized || 'attachment';
 };
 
+const buildContentDispositionHeader = (filename, disposition = 'inline') => {
+  const raw = typeof filename === 'string' && filename.trim() ? filename.trim() : 'attachment';
+  const utf8Name = raw
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/"/g, '')
+    .trim() || 'attachment';
+  const asciiFallback = utf8Name
+    .normalize('NFKD')
+    .replace(/[^\x20-\x7E]+/g, '_')
+    .replace(/[\\"]/g, '')
+    .replace(/[^A-Za-z0-9._ -]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180) || 'attachment';
+  const encoded = encodeURIComponent(utf8Name);
+  return `${disposition}; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`;
+};
+
 const buildStorageName = (id, originalName) => {
   const ext = path.extname(originalName || '').slice(0, 12);
   return ext ? `${id}${ext}` : id;
@@ -7194,10 +7212,9 @@ app.get('/api/attachments/:id', async (req, res) => {
     return res.status(404).json({ error: 'not_found' });
   }
 
-  const safeName = (attachment.name || 'attachment').replace(/"/g, '');
-  const encoded = encodeURIComponent(safeName);
+  const contentDisposition = buildContentDispositionHeader(attachment.name || 'attachment', 'inline');
   res.setHeader('Content-Type', attachment.mime || 'application/octet-stream');
-  res.setHeader('Content-Disposition', `inline; filename="${safeName}"; filename*=UTF-8''${encoded}`);
+  res.setHeader('Content-Disposition', contentDisposition);
   res.sendFile(filePath);
 });
 
